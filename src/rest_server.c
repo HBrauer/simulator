@@ -21,6 +21,7 @@ struct rest_server {
 typedef struct {
     char data[4096];
     size_t len;
+    bool too_large;
 } request_body_t;
 
 static enum MHD_Result send_json(struct MHD_Connection *connection, unsigned int status, json_t *body)
@@ -137,8 +138,13 @@ static enum MHD_Result answer(void *cls, struct MHD_Connection *connection, cons
     }
     request_body_t *request_body = *con_cls;
     if (*upload_data_size > 0) {
+        const size_t upload_size = *upload_data_size;
         const size_t remaining = sizeof(request_body->data) - request_body->len - 1;
-        const size_t copy_len = *upload_data_size < remaining ? *upload_data_size : remaining;
+        size_t copy_len = upload_size;
+        if (upload_size > remaining) {
+            copy_len = remaining;
+            request_body->too_large = true;
+        }
         memcpy(request_body->data + request_body->len, upload_data, copy_len);
         request_body->len += copy_len;
         request_body->data[request_body->len] = '\0';
@@ -154,6 +160,9 @@ static enum MHD_Result answer(void *cls, struct MHD_Connection *connection, cons
     } while (0)
 
     const uint64_t scenario_time_ns = timebase_now_ns(ctx->timebase);
+    if (request_body->too_large) {
+        SEND_JSON_AND_FREE(MHD_HTTP_CONTENT_TOO_LARGE, error_body("request_too_large", "request body exceeds 4095 bytes"));
+    }
     if (strcmp(method, "GET") == 0 && strcmp(url, "/api/v1/health") == 0) {
         SEND_JSON_AND_FREE(MHD_HTTP_OK, json_pack("{s:s,s:s,s:i}", "status", "ok", "version", ctx->version, "uptime_s", (int)(time(NULL) - server->started_at)));
     }

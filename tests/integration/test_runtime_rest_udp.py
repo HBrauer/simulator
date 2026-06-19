@@ -220,6 +220,13 @@ def test_runtime_rest_and_udp_stream(tmp_path):
         assert code == 400
         assert error["error"]["code"] == "invalid_output_scale"
 
+        code, error = _request_json_error(
+            f"http://127.0.0.1:{rest_port}/api/v1/output-scale",
+            {"output_scale": 0.5, "padding": "x" * 5000},
+        )
+        assert code == 413
+        assert error["error"]["code"] == "request_too_large"
+
         code, scaled = _request_json(
             f"http://127.0.0.1:{rest_port}/api/v1/output-scale",
             {"output_scale": 0.5},
