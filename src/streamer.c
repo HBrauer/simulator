@@ -22,6 +22,7 @@ typedef struct {
     const timebase_t *timebase;
     receiver_config_t *receiver;
     receiver_metrics_t *metrics;
+    stream_metrics_t *stream_metrics;
     size_t ddc_index;
     pthread_mutex_t *receiver_lock;
     stream_kind_t kind;
@@ -94,8 +95,12 @@ static void *stream_worker_main(void *arg)
             atomic_fetch_add(&worker->metrics->udp_packets_sent, 1);
             atomic_fetch_add(&worker->metrics->udp_bytes_sent, sent);
             atomic_fetch_add(&worker->metrics->samples_rendered, worker->block_samples);
+            atomic_fetch_add(&worker->stream_metrics->udp_packets_sent, 1);
+            atomic_fetch_add(&worker->stream_metrics->udp_bytes_sent, sent);
+            atomic_fetch_add(&worker->stream_metrics->samples_rendered, worker->block_samples);
         } else {
             atomic_fetch_add(&worker->metrics->udp_send_errors, 1);
+            atomic_fetch_add(&worker->stream_metrics->udp_send_errors, 1);
         }
         const uint32_t sample_rate = worker->kind == STREAM_KIND_80MHZ
             ? receiver_snapshot.sample_rate_hz
@@ -126,6 +131,7 @@ bool streamer_manager_start(streamer_manager_t **manager, const streamer_config_
             .timebase = config->timebase,
             .receiver = receiver,
             .metrics = &config->metrics[i],
+            .stream_metrics = &config->metrics[i].streams[0],
             .receiver_lock = config->receiver_lock,
             .kind = STREAM_KIND_80MHZ,
             .block_samples = config->block_samples,
@@ -136,6 +142,7 @@ bool streamer_manager_start(streamer_manager_t **manager, const streamer_config_
         }
         worker->started = true;
         atomic_fetch_add(&worker->metrics->active_streams, 1);
+        atomic_store(&worker->stream_metrics->active, true);
 
         for (size_t d = 0; d < SIM_DDC_COUNT; d++) {
             stream_worker_t *ddc_worker = &m->workers[m->worker_count++];
@@ -146,6 +153,7 @@ bool streamer_manager_start(streamer_manager_t **manager, const streamer_config_
                 .timebase = config->timebase,
                 .receiver = receiver,
                 .metrics = &config->metrics[i],
+                .stream_metrics = &config->metrics[i].streams[1 + d],
                 .ddc_index = d,
                 .receiver_lock = config->receiver_lock,
                 .kind = STREAM_KIND_DDC,
@@ -157,6 +165,7 @@ bool streamer_manager_start(streamer_manager_t **manager, const streamer_config_
             }
             ddc_worker->started = true;
             atomic_fetch_add(&ddc_worker->metrics->active_streams, 1);
+            atomic_store(&ddc_worker->stream_metrics->active, true);
         }
     }
 
@@ -174,6 +183,7 @@ void streamer_manager_stop(streamer_manager_t *manager)
         if (manager->workers[i].started) {
             pthread_join(manager->workers[i].thread, NULL);
             atomic_fetch_sub(&manager->workers[i].metrics->active_streams, 1);
+            atomic_store(&manager->workers[i].stream_metrics->active, false);
         }
     }
     free(manager);
