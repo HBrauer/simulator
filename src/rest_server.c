@@ -14,7 +14,12 @@ struct rest_server {
     time_t started_at;
 };
 
-static int send_json(struct MHD_Connection *connection, unsigned int status, json_t *body)
+typedef struct {
+    char data[4096];
+    size_t len;
+} request_body_t;
+
+static enum MHD_Result send_json(struct MHD_Connection *connection, unsigned int status, json_t *body)
 {
     char *payload = json_dumps(body, JSON_COMPACT);
     json_decref(body);
@@ -27,7 +32,7 @@ static int send_json(struct MHD_Connection *connection, unsigned int status, jso
         return MHD_NO;
     }
     MHD_add_response_header(response, "Content-Type", "application/json");
-    const int ret = MHD_queue_response(connection, status, response);
+    const enum MHD_Result ret = MHD_queue_response(connection, status, response);
     MHD_destroy_response(response);
     return ret;
 }
@@ -35,6 +40,34 @@ static int send_json(struct MHD_Connection *connection, unsigned int status, jso
 static json_t *error_body(const char *code, const char *message)
 {
     return json_pack("{s:{s:s,s:s}}", "error", "code", code, "message", message);
+}
+
+static bool json_get_u64(json_t *object, const char *key, uint64_t *out)
+{
+    json_t *value = json_object_get(object, key);
+    if (!json_is_integer(value)) {
+        return false;
+    }
+    const json_int_t parsed = json_integer_value(value);
+    if (parsed < 0) {
+        return false;
+    }
+    *out = (uint64_t)parsed;
+    return true;
+}
+
+static bool json_get_optional_double(json_t *object, const char *key, double default_value, double *out)
+{
+    json_t *value = json_object_get(object, key);
+    if (value == NULL) {
+        *out = default_value;
+        return true;
+    }
+    if (!json_is_number(value)) {
+        return false;
+    }
+    *out = json_number_value(value);
+    return true;
 }
 
 static json_t *receiver_json(const receiver_config_t *r, uint64_t scenario_time_ns, bool include_ddc)
@@ -72,7 +105,7 @@ static json_t *receiver_json(const receiver_config_t *r, uint64_t scenario_time_
     return root;
 }
 
-static int answer(void *cls, struct MHD_Connection *connection, const char *url, const char *method, const char *version, const char *upload_data, size_t *upload_data_size, void **con_cls)
+static enum MHD_Result answer(void *cls, struct MHD_Connection *connection, const char *url, const char *method, const char *version, const char *upload_data, size_t *upload_data_size, void **con_cls)
 {
     (void)version;
     rest_server_t *server = cls;
@@ -80,24 +113,36 @@ static int answer(void *cls, struct MHD_Connection *connection, const char *url,
     receiver_config_t *r = ctx->receiver;
 
     if (*con_cls == NULL) {
-        *con_cls = calloc(1, 4096);
+        *con_cls = calloc(1, sizeof(request_body_t));
+        if (*con_cls == NULL) {
+            return MHD_NO;
+        }
         return MHD_YES;
     }
-    char *body = *con_cls;
+    request_body_t *request_body = *con_cls;
     if (*upload_data_size > 0) {
-        strncat(body, upload_data, 4095 - strlen(body));
+        const size_t remaining = sizeof(request_body->data) - request_body->len - 1;
+        const size_t copy_len = *upload_data_size < remaining ? *upload_data_size : remaining;
+        memcpy(request_body->data + request_body->len, upload_data, copy_len);
+        request_body->len += copy_len;
+        request_body->data[request_body->len] = '\0';
         *upload_data_size = 0;
         return MHD_YES;
     }
-    free(*con_cls);
     *con_cls = NULL;
+
+#define SEND_JSON_AND_FREE(status_code, json_body) \
+    do { \
+        free(request_body); \
+        return send_json(connection, (status_code), (json_body)); \
+    } while (0)
 
     const uint64_t scenario_time_ns = timebase_now_ns(ctx->timebase);
     if (strcmp(method, "GET") == 0 && strcmp(url, "/api/v1/health") == 0) {
-        return send_json(connection, MHD_HTTP_OK, json_pack("{s:s,s:s,s:i}", "status", "ok", "version", ctx->version, "uptime_s", (int)(time(NULL) - server->started_at)));
+        SEND_JSON_AND_FREE(MHD_HTTP_OK, json_pack("{s:s,s:s,s:i}", "status", "ok", "version", ctx->version, "uptime_s", (int)(time(NULL) - server->started_at)));
     }
     if (strcmp(method, "GET") == 0 && strcmp(url, "/api/v1/scenario/status") == 0) {
-        return send_json(connection, MHD_HTTP_OK, json_pack(
+        SEND_JSON_AND_FREE(MHD_HTTP_OK, json_pack(
             "{s:s,s:b,s:I,s:i,s:i}",
             "scenario_id", ctx->scenario->scenario_id,
             "loaded", 1,
@@ -107,20 +152,26 @@ static int answer(void *cls, struct MHD_Connection *connection, const char *url,
         ));
     }
     if (strcmp(method, "GET") == 0 && strcmp(url, "/api/v1/config") == 0) {
-        return send_json(connection, MHD_HTTP_OK, receiver_json(r, scenario_time_ns, true));
+        SEND_JSON_AND_FREE(MHD_HTTP_OK, receiver_json(r, scenario_time_ns, true));
     }
     if (strcmp(method, "GET") == 0 && strcmp(url, "/api/v1/status") == 0) {
-        return send_json(connection, MHD_HTTP_OK, receiver_json(r, scenario_time_ns, false));
+        SEND_JSON_AND_FREE(MHD_HTTP_OK, receiver_json(r, scenario_time_ns, false));
     }
     if (strcmp(method, "POST") == 0 && strcmp(url, "/api/v1/frequency-range") == 0) {
         json_error_t json_error;
-        json_t *request = json_loads(body, 0, &json_error);
+        json_t *request = json_loads(request_body->data, 0, &json_error);
         if (request == NULL) {
-            return send_json(connection, MHD_HTTP_BAD_REQUEST, error_body("invalid_json", json_error.text));
+            SEND_JSON_AND_FREE(MHD_HTTP_BAD_REQUEST, error_body("invalid_json", json_error.text));
         }
-        uint64_t start = (uint64_t)json_integer_value(json_object_get(request, "frequency_start_hz"));
-        uint64_t stop = (uint64_t)json_integer_value(json_object_get(request, "frequency_stop_hz"));
-        double scan_rate = json_number_value(json_object_get(request, "scan_rate_hz_per_s"));
+        uint64_t start = 0;
+        uint64_t stop = 0;
+        double scan_rate = r->scan_rate_hz_per_s;
+        if (!json_get_u64(request, "frequency_start_hz", &start) ||
+            !json_get_u64(request, "frequency_stop_hz", &stop) ||
+            !json_get_optional_double(request, "scan_rate_hz_per_s", r->scan_rate_hz_per_s, &scan_rate)) {
+            json_decref(request);
+            SEND_JSON_AND_FREE(MHD_HTTP_BAD_REQUEST, error_body("invalid_request", "frequency_start_hz and frequency_stop_hz must be unsigned integer Hz values"));
+        }
         json_decref(request);
         receiver_config_t updated = *r;
         updated.frequency_start_hz = start;
@@ -128,38 +179,44 @@ static int answer(void *cls, struct MHD_Connection *connection, const char *url,
         updated.scan_rate_hz_per_s = scan_rate;
         char error[128];
         if (!receiver_validate(&updated, error, sizeof(error))) {
-            return send_json(connection, MHD_HTTP_BAD_REQUEST, error_body(error, "invalid frequency range"));
+            SEND_JSON_AND_FREE(MHD_HTTP_BAD_REQUEST, error_body(error, "invalid frequency range"));
         }
         *r = updated;
-        return send_json(connection, MHD_HTTP_OK, receiver_json(r, scenario_time_ns, false));
+        SEND_JSON_AND_FREE(MHD_HTTP_OK, receiver_json(r, scenario_time_ns, false));
     }
     unsigned ddc_id = 99;
     if (sscanf(url, "/api/v1/ddc/%u/status", &ddc_id) == 1 && strcmp(method, "GET") == 0) {
         if (ddc_id >= SIM_DDC_COUNT) {
-            return send_json(connection, MHD_HTTP_NOT_FOUND, error_body("invalid_ddc_id", "ddc_id must be 0..3"));
+            SEND_JSON_AND_FREE(MHD_HTTP_NOT_FOUND, error_body("invalid_ddc_id", "ddc_id must be 0..3"));
         }
         const ddc_config_t *d = &r->ddc[ddc_id];
-        return send_json(connection, MHD_HTTP_OK, json_pack("{s:i,s:i,s:I,s:i,s:i,s:{s:i}}", "receiver_id", (int)r->id, "ddc_id", (int)d->id, "center_frequency_hz", (json_int_t)d->center_frequency_hz, "bandwidth_hz", (int)d->bandwidth_hz, "sample_rate_hz", (int)d->sample_rate_hz, "udp_output", "port", (int)d->udp_output.port));
+        SEND_JSON_AND_FREE(MHD_HTTP_OK, json_pack("{s:i,s:i,s:I,s:i,s:i,s:{s:i}}", "receiver_id", (int)r->id, "ddc_id", (int)d->id, "center_frequency_hz", (json_int_t)d->center_frequency_hz, "bandwidth_hz", (int)d->bandwidth_hz, "sample_rate_hz", (int)d->sample_rate_hz, "udp_output", "port", (int)d->udp_output.port));
     }
     if (sscanf(url, "/api/v1/ddc/%u/configure", &ddc_id) == 1 && strcmp(method, "POST") == 0) {
         if (ddc_id >= SIM_DDC_COUNT) {
-            return send_json(connection, MHD_HTTP_NOT_FOUND, error_body("invalid_ddc_id", "ddc_id must be 0..3"));
+            SEND_JSON_AND_FREE(MHD_HTTP_NOT_FOUND, error_body("invalid_ddc_id", "ddc_id must be 0..3"));
         }
         json_error_t json_error;
-        json_t *request = json_loads(body, 0, &json_error);
+        json_t *request = json_loads(request_body->data, 0, &json_error);
         if (request == NULL) {
-            return send_json(connection, MHD_HTTP_BAD_REQUEST, error_body("invalid_json", json_error.text));
+            SEND_JSON_AND_FREE(MHD_HTTP_BAD_REQUEST, error_body("invalid_json", json_error.text));
         }
-        uint64_t center = (uint64_t)json_integer_value(json_object_get(request, "center_frequency_hz"));
+        uint64_t center = 0;
+        if (!json_get_u64(request, "center_frequency_hz", &center)) {
+            json_decref(request);
+            SEND_JSON_AND_FREE(MHD_HTTP_BAD_REQUEST, error_body("invalid_request", "center_frequency_hz must be an unsigned integer Hz value"));
+        }
         json_decref(request);
         if (center > SIM_MAX_RF_HZ) {
-            return send_json(connection, MHD_HTTP_BAD_REQUEST, error_body("invalid_frequency", "center_frequency_hz must be between 0 and 40000000000"));
+            SEND_JSON_AND_FREE(MHD_HTTP_BAD_REQUEST, error_body("invalid_frequency", "center_frequency_hz must be between 0 and 40000000000"));
         }
         r->ddc[ddc_id].center_frequency_hz = center;
-        return send_json(connection, MHD_HTTP_OK, json_pack("{s:s}", "status", "ok"));
+        SEND_JSON_AND_FREE(MHD_HTTP_OK, json_pack("{s:s}", "status", "ok"));
     }
 
-    return send_json(connection, MHD_HTTP_NOT_FOUND, error_body("not_found", "unknown endpoint"));
+    SEND_JSON_AND_FREE(MHD_HTTP_NOT_FOUND, error_body("not_found", "unknown endpoint"));
+
+#undef SEND_JSON_AND_FREE
 }
 
 bool rest_server_start(rest_server_t **server, const rest_context_t *context)

@@ -2,6 +2,8 @@ import json
 import socket
 import subprocess
 import time
+from urllib.error import HTTPError
+from urllib.request import Request
 from pathlib import Path
 from urllib.request import urlopen
 
@@ -68,6 +70,21 @@ def _wait_json(url):
     raise AssertionError(f"endpoint did not become ready: {url}: {last_error}")
 
 
+def _request_json(url, payload):
+    data = json.dumps(payload).encode("utf-8")
+    request = Request(url, data=data, method="POST", headers={"Content-Type": "application/json"})
+    with urlopen(request, timeout=2.0) as response:
+        return response.status, json.loads(response.read().decode("utf-8"))
+
+
+def _request_json_error(url, payload):
+    try:
+        _request_json(url, payload)
+    except HTTPError as exc:
+        return exc.code, json.loads(exc.read().decode("utf-8"))
+    raise AssertionError("request unexpectedly succeeded")
+
+
 def test_runtime_rest_and_udp_stream(tmp_path):
     rest_port = _free_tcp_port()
     udp_port = _free_udp_port()
@@ -124,6 +141,48 @@ def test_runtime_rest_and_udp_stream(tmp_path):
             cwd=ROOT,
         )
         assert packet == expected
+
+        code, error = _request_json_error(
+            f"http://127.0.0.1:{rest_port}/api/v1/frequency-range",
+            {"frequency_start_hz": 1000},
+        )
+        assert code == 400
+        assert error["error"]["code"] == "invalid_request"
+
+        code, updated = _request_json(
+            f"http://127.0.0.1:{rest_port}/api/v1/frequency-range",
+            {
+                "frequency_start_hz": 9960000000,
+                "frequency_stop_hz": 10060000000,
+                "scan_rate_hz_per_s": 100000000000,
+            },
+        )
+        assert code == 200
+        assert updated["effective_mode"] == "scan"
+        assert updated["center_frequency_hz"] == 10005000000
+
+        code, error = _request_json_error(
+            f"http://127.0.0.1:{rest_port}/api/v1/ddc/99/configure",
+            {"center_frequency_hz": 10005000000},
+        )
+        assert code == 404
+        assert error["error"]["code"] == "invalid_ddc_id"
+
+        code, error = _request_json_error(
+            f"http://127.0.0.1:{rest_port}/api/v1/ddc/0/configure",
+            {"center_frequency_hz": "bad"},
+        )
+        assert code == 400
+        assert error["error"]["code"] == "invalid_request"
+
+        code, ddc_updated = _request_json(
+            f"http://127.0.0.1:{rest_port}/api/v1/ddc/0/configure",
+            {"center_frequency_hz": 10005000001},
+        )
+        assert code == 200
+        assert ddc_updated["status"] == "ok"
+        ddc_status = _wait_json(f"http://127.0.0.1:{rest_port}/api/v1/ddc/0/status")
+        assert ddc_status["center_frequency_hz"] == 10005000001
     finally:
         proc.terminate()
         try:
