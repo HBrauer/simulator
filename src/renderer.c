@@ -55,25 +55,24 @@ static bool renderer_render_window_block(
         const iq_ci16_t *source_samples = &asset->samples[sample_offset];
 
         const double offset_hz = (double)((int64_t)signal->center_frequency_hz - (int64_t)window_center_hz);
-        double phase = 0.0;
         const double phase_step = 2.0 * M_PI * offset_hz / (double)output_sample_rate_hz;
+        const double step_c = cos(phase_step);
+        const double step_s = sin(phase_step);
+        double osc_c = 1.0;
+        double osc_s = 0.0;
         for (size_t i = 0; i < count; i++) {
             const size_t src_index = (size_t)floor((double)i * source_per_output);
             if (src_index >= read_count) {
                 break;
             }
-            const double c = cos(phase);
-            const double sin_phase = sin(phase);
             const double ii = (double)source_samples[src_index].i;
             const double qq = (double)source_samples[src_index].q;
-            out[i].i = sim_clip_i16((double)out[i].i + (ii * c - qq * sin_phase));
-            out[i].q = sim_clip_i16((double)out[i].q + (ii * sin_phase + qq * c));
-            phase += phase_step;
-            if (phase > M_PI) {
-                phase -= 2.0 * M_PI;
-            } else if (phase < -M_PI) {
-                phase += 2.0 * M_PI;
-            }
+            out[i].i = sim_clip_i16((double)out[i].i + (ii * osc_c - qq * osc_s));
+            out[i].q = sim_clip_i16((double)out[i].q + (ii * osc_s + qq * osc_c));
+            const double next_c = osc_c * step_c - osc_s * step_s;
+            const double next_s = osc_s * step_c + osc_c * step_s;
+            osc_c = next_c;
+            osc_s = next_s;
         }
         if (stats != NULL) {
             stats->active_signals++;
