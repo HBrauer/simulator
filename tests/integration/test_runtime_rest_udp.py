@@ -68,6 +68,60 @@ receivers:
     )
 
 
+def _write_two_receiver_config(path, rest_port_0, rest_port_1, udp_base):
+    path.write_text(
+        f"""schema_version: 1
+instance_id: "pytest_two_receivers"
+scenario_file: "scenarios/test_scenario_001.json"
+log_path: "logs/pytest_two_receivers.log"
+receivers:
+  - receiver_id: 0
+    rest_bind_host: "127.0.0.1"
+    rest_port: {rest_port_0}
+    udp_output_host: "127.0.0.1"
+    frequency_start_hz: 9960000000
+    frequency_stop_hz: 10040000000
+    scan_rate_hz_per_s: 100000000000
+    udp_80mhz_output_port: {udp_base}
+    ddc:
+      - ddc_id: 0
+        center_frequency_hz: 10005000000
+        udp_output_port: {udp_base + 1}
+      - ddc_id: 1
+        center_frequency_hz: 10010000000
+        udp_output_port: {udp_base + 2}
+      - ddc_id: 2
+        center_frequency_hz: 9995000000
+        udp_output_port: {udp_base + 3}
+      - ddc_id: 3
+        center_frequency_hz: 10030000000
+        udp_output_port: {udp_base + 4}
+  - receiver_id: 1
+    rest_bind_host: "127.0.0.1"
+    rest_port: {rest_port_1}
+    udp_output_host: "127.0.0.1"
+    frequency_start_hz: 19960000000
+    frequency_stop_hz: 20040000000
+    scan_rate_hz_per_s: 100000000000
+    udp_80mhz_output_port: {udp_base + 5}
+    ddc:
+      - ddc_id: 0
+        center_frequency_hz: 20000000000
+        udp_output_port: {udp_base + 6}
+      - ddc_id: 1
+        center_frequency_hz: 20010000000
+        udp_output_port: {udp_base + 7}
+      - ddc_id: 2
+        center_frequency_hz: 19990000000
+        udp_output_port: {udp_base + 8}
+      - ddc_id: 3
+        center_frequency_hz: 20030000000
+        udp_output_port: {udp_base + 9}
+""",
+        encoding="utf-8",
+    )
+
+
 def _wait_json(url):
     deadline = time.time() + 5.0
     last_error = None
@@ -258,5 +312,47 @@ def test_ddc_udp_stream_is_empty_when_outside_receiver_window(tmp_path):
             proc.kill()
             proc.wait(timeout=5.0)
         ddc_sock.close()
+        stderr = proc.stderr.read() if proc.stderr else ""
+        assert proc.returncode in (0, -15), stderr
+
+
+def test_two_receivers_expose_independent_rest_apis(tmp_path):
+    rest_port_0 = _free_tcp_port()
+    rest_port_1 = _free_tcp_port()
+    udp_base = _free_udp_port_block(count=10)
+    config = tmp_path / "runtime_two_receivers.yaml"
+    _write_two_receiver_config(config, rest_port_0, rest_port_1, udp_base)
+
+    proc = subprocess.Popen(
+        [
+            str(SIM),
+            "--config",
+            str(config),
+            "--scenario",
+            "scenarios/test_scenario_001.json",
+            "--scenario-time-ns",
+            "450000",
+            "--stream-block-samples",
+            "128",
+        ],
+        cwd=ROOT,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        status_0 = _wait_json(f"http://127.0.0.1:{rest_port_0}/api/v1/status")
+        status_1 = _wait_json(f"http://127.0.0.1:{rest_port_1}/api/v1/status")
+        assert status_0["receiver_id"] == 0
+        assert status_1["receiver_id"] == 1
+        assert status_0["center_frequency_hz"] == 10000000000
+        assert status_1["center_frequency_hz"] == 20000000000
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5.0)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5.0)
         stderr = proc.stderr.read() if proc.stderr else ""
         assert proc.returncode in (0, -15), stderr
