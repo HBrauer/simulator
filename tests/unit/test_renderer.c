@@ -22,6 +22,26 @@ START_TEST(renders_nonzero_visible_signal)
 }
 END_TEST
 
+START_TEST(renderer_80mhz_maps_24576_source_to_98304_output)
+{
+    simulator_config_t config;
+    scenario_t scenario;
+    char error[128];
+    ck_assert_msg(config_load_yaml("configs/instance_001.yaml", &config, error, sizeof(error)), "%s", error);
+    ck_assert_msg(scenario_load_json("scenarios/test_scenario_001.json", &scenario, error, sizeof(error)), "%s", error);
+    config.receivers[0].frequency_start_hz = 9965000000ULL;
+    config.receivers[0].frequency_stop_hz = 10045000000ULL;
+
+    iq_ci16_t out[8];
+    render_stats_t stats;
+    ck_assert(renderer_render_80mhz_block(&scenario, &config.receivers[0], 450000ULL, out, 8, &stats));
+    ck_assert_int_eq(out[0].i, out[1].i);
+    ck_assert_int_eq(out[1].i, out[2].i);
+    ck_assert_int_eq(out[2].i, out[3].i);
+    ck_assert_int_ne(out[3].i, out[4].i);
+}
+END_TEST
+
 START_TEST(renders_ddc_nonzero_visible_signal)
 {
     scenario_t scenario;
@@ -48,6 +68,7 @@ Suite *renderer_suite(void)
     Suite *suite = suite_create("renderer");
     TCase *tc = tcase_create("core");
     tcase_add_test(tc, renders_nonzero_visible_signal);
+    tcase_add_test(tc, renderer_80mhz_maps_24576_source_to_98304_output);
     tcase_add_test(tc, renders_ddc_nonzero_visible_signal);
     suite_add_tcase(suite, tc);
     return suite;

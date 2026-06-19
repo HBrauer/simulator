@@ -21,6 +21,7 @@ static bool renderer_render_window_block(
     const scenario_t *scenario,
     uint64_t window_center_hz,
     uint64_t window_bandwidth_hz,
+    uint32_t output_sample_rate_hz,
     uint64_t scenario_time_ns,
     iq_ci16_t *out,
     size_t count,
@@ -32,9 +33,6 @@ static bool renderer_render_window_block(
     }
     const double day_s = timebase_day_seconds_from_ns(scenario_time_ns);
 
-    iq_ci16_t scratch[4096];
-    const size_t chunk = count < 4096 ? count : 4096;
-
     for (size_t s = 0; s < scenario->signal_count; s++) {
         const scenario_signal_t *signal = &scenario->signals[s];
         const scenario_source_t *source = scenario_find_source(scenario, signal->source_reference);
@@ -43,23 +41,43 @@ static bool renderer_render_window_block(
             !iq_signal_active(signal, source, day_s, &sample_offset)) {
             continue;
         }
+
+        const double source_per_output = (double)source->sample_rate_hz / (double)output_sample_rate_hz;
+        const uint64_t needed_source_samples = (uint64_t)ceil((double)count * source_per_output) + 1ULL;
+        if (needed_source_samples > 4096ULL) {
+            continue;
+        }
+
         iq_file_reader_t reader;
         char error[128];
         if (!iq_file_reader_open(&reader, source->file, source->sample_count, error, sizeof(error))) {
             continue;
         }
+        iq_ci16_t scratch[4096];
         size_t read_count = 0;
-        (void)iq_file_reader_read(&reader, sample_offset, scratch, chunk, &read_count);
+        (void)iq_file_reader_read(&reader, sample_offset, scratch, (size_t)needed_source_samples, &read_count);
         iq_file_reader_close(&reader);
 
         const double offset_hz = (double)((int64_t)signal->center_frequency_hz - (int64_t)window_center_hz);
-        nco_t nco;
-        nco_init(&nco, offset_hz, (double)source->sample_rate_hz);
-        iq_ci16_t shifted[4096];
-        nco_mix_ci16(&nco, scratch, shifted, read_count, 1.0);
-        for (size_t i = 0; i < read_count; i++) {
-            out[i].i = sim_clip_i16((double)out[i].i + (double)shifted[i].i);
-            out[i].q = sim_clip_i16((double)out[i].q + (double)shifted[i].q);
+        double phase = 0.0;
+        const double phase_step = 2.0 * M_PI * offset_hz / (double)output_sample_rate_hz;
+        for (size_t i = 0; i < count; i++) {
+            const size_t src_index = (size_t)floor((double)i * source_per_output);
+            if (src_index >= read_count) {
+                break;
+            }
+            const double c = cos(phase);
+            const double sin_phase = sin(phase);
+            const double ii = (double)scratch[src_index].i;
+            const double qq = (double)scratch[src_index].q;
+            out[i].i = sim_clip_i16((double)out[i].i + (ii * c - qq * sin_phase));
+            out[i].q = sim_clip_i16((double)out[i].q + (ii * sin_phase + qq * c));
+            phase += phase_step;
+            if (phase > M_PI) {
+                phase -= 2.0 * M_PI;
+            } else if (phase < -M_PI) {
+                phase += 2.0 * M_PI;
+            }
         }
         if (stats != NULL) {
             stats->active_signals++;
@@ -74,10 +92,10 @@ static bool renderer_render_window_block(
 bool renderer_render_80mhz_block(const scenario_t *scenario, const receiver_config_t *receiver, uint64_t scenario_time_ns, iq_ci16_t *out, size_t count, render_stats_t *stats)
 {
     const uint64_t center_hz = receiver_center_frequency_hz(receiver, scenario_time_ns);
-    return renderer_render_window_block(scenario, center_hz, SIM_RECEIVER_BANDWIDTH_HZ, scenario_time_ns, out, count, stats);
+    return renderer_render_window_block(scenario, center_hz, SIM_RECEIVER_BANDWIDTH_HZ, SIM_RECEIVER_SAMPLE_RATE_HZ, scenario_time_ns, out, count, stats);
 }
 
 bool renderer_render_ddc_block(const scenario_t *scenario, const ddc_config_t *ddc, uint64_t scenario_time_ns, iq_ci16_t *out, size_t count, render_stats_t *stats)
 {
-    return renderer_render_window_block(scenario, ddc->center_frequency_hz, ddc->bandwidth_hz, scenario_time_ns, out, count, stats);
+    return renderer_render_window_block(scenario, ddc->center_frequency_hz, ddc->bandwidth_hz, ddc->sample_rate_hz, scenario_time_ns, out, count, stats);
 }
