@@ -55,6 +55,7 @@ static bool renderer_render_window_block(
         const iq_ci16_t *source_samples = &asset->samples[sample_offset];
 
         const double offset_hz = (double)((int64_t)signal->center_frequency_hz - (int64_t)window_center_hz);
+        const double source_gain = pow(10.0, -source->nominal_level_dbfs / 20.0);
         const double phase_step = 2.0 * M_PI * offset_hz / (double)output_sample_rate_hz;
         const double step_c = cos(phase_step);
         const double step_s = sin(phase_step);
@@ -72,8 +73,8 @@ static bool renderer_render_window_block(
             const double q0 = (double)source_samples[src_index].q;
             const double i1 = (double)source_samples[next_index].i;
             const double q1 = (double)source_samples[next_index].q;
-            const double ii = i0 + frac * (i1 - i0);
-            const double qq = q0 + frac * (q1 - q0);
+            const double ii = source_gain * (i0 + frac * (i1 - i0));
+            const double qq = source_gain * (q0 + frac * (q1 - q0));
             out[i].i = sim_clip_i16((double)out[i].i + (ii * osc_c - qq * osc_s));
             out[i].q = sim_clip_i16((double)out[i].q + (ii * osc_s + qq * osc_c));
             const double next_c = osc_c * step_c - osc_s * step_s;
