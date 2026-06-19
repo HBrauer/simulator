@@ -18,8 +18,8 @@ def _free_tcp_port():
         return sock.getsockname()[1]
 
 
-def _free_udp_port_block(count=5):
-    for base in range(30000, 60000 - count):
+def _free_udp_port_block(count=5, start=30000):
+    for base in range(start, 60000 - count):
         sockets = []
         try:
             for port in range(base, base + count):
@@ -392,3 +392,79 @@ def test_two_receivers_expose_independent_rest_apis(tmp_path):
             proc.wait(timeout=5.0)
         stderr = proc.stderr.read() if proc.stderr else ""
         assert proc.returncode in (0, -15), stderr
+
+
+def test_two_instances_emit_identical_udp_for_same_scenario_time(tmp_path):
+    rest_port_1 = _free_tcp_port()
+    rest_port_2 = _free_tcp_port()
+    udp_base_1 = _free_udp_port_block()
+    udp_base_2 = _free_udp_port_block(start=udp_base_1 + 10)
+    config_1 = tmp_path / "instance_1.yaml"
+    config_2 = tmp_path / "instance_2.yaml"
+    _write_config(config_1, rest_port_1, udp_base_1)
+    _write_config(config_2, rest_port_2, udp_base_2)
+
+    sock_1 = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock_2 = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock_1.bind(("127.0.0.1", udp_base_1))
+    sock_2.bind(("127.0.0.1", udp_base_2))
+    sock_1.settimeout(5.0)
+    sock_2.settimeout(5.0)
+
+    procs = [
+        subprocess.Popen(
+            [
+                str(SIM),
+                "--config",
+                str(config_1),
+                "--scenario",
+                "scenarios/test_scenario_001.json",
+                "--scenario-time-ns",
+                "450000",
+                "--stream-block-samples",
+                "256",
+            ],
+            cwd=ROOT,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        ),
+        subprocess.Popen(
+            [
+                str(SIM),
+                "--config",
+                str(config_2),
+                "--scenario",
+                "scenarios/test_scenario_001.json",
+                "--scenario-time-ns",
+                "450000",
+                "--stream-block-samples",
+                "256",
+            ],
+            cwd=ROOT,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        ),
+    ]
+    try:
+        status_1 = _wait_json(f"http://127.0.0.1:{rest_port_1}/api/v1/status")
+        status_2 = _wait_json(f"http://127.0.0.1:{rest_port_2}/api/v1/status")
+        assert status_1["receiver_id"] == status_2["receiver_id"] == 0
+        packet_1, _ = sock_1.recvfrom(4096)
+        packet_2, _ = sock_2.recvfrom(4096)
+        assert len(packet_1) == len(packet_2) == 256 * 4
+        assert packet_1 == packet_2
+    finally:
+        for proc in procs:
+            proc.terminate()
+        for proc in procs:
+            try:
+                proc.wait(timeout=5.0)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=5.0)
+            stderr = proc.stderr.read() if proc.stderr else ""
+            assert proc.returncode in (0, -15), stderr
+        sock_1.close()
+        sock_2.close()
