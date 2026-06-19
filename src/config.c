@@ -93,6 +93,8 @@ static void apply_scalar(simulator_config_t *config, parse_state_t *state, const
         config->stream_cpu = parse_int_value(value);
     } else if (strcmp(key, "framed_udp") == 0) {
         config->framed_udp = parse_bool_value(value);
+    } else if (strcmp(key, "asset_cache_max_bytes") == 0) {
+        config->asset_cache_max_bytes = (size_t)parse_u64(value);
     }
 }
 

@@ -62,6 +62,7 @@ typedef struct {
     size_t stream_block_samples;
     int stream_cpu;
     bool framed_udp;
+    size_t asset_cache_max_bytes;
     size_t receiver_count;
     receiver_config_t receivers[SIM_MAX_RECEIVERS];
 } simulator_config_t;

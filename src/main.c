@@ -61,7 +61,7 @@ int main(int argc, char **argv)
         return 3;
     }
     asset_cache_t asset_cache;
-    if (!asset_cache_load(&asset_cache, &scenario, error, sizeof(error))) {
+    if (!asset_cache_load_limited(&asset_cache, &scenario, config.asset_cache_max_bytes, 4096, error, sizeof(error))) {
         fprintf(stderr, "asset cache error: %s\n", error);
         return 4;
     }

@@ -15,6 +15,7 @@ Top-level fields:
 | `stream_block_samples` | integer | no | UDP payload size in IQ samples. Defaults to `1024`; valid range is `1..4096`. |
 | `stream_cpu` | integer | no | Linux CPU index used for stream render/UDP threads. `-1` disables pinning. Defaults to `-1`. |
 | `framed_udp` | boolean | no | Prepends a timestamped `SDR1` UDP frame header when `true`. Defaults to raw UDP payloads (`false`). |
+| `asset_cache_max_bytes` | integer | no | Maximum total in-memory IQ asset bytes. `0` means unlimited. Defaults to `0`. |
 | `receivers` | array | yes | At least one receiver, up to `SIM_MAX_RECEIVERS` (`12`). |
 
 Receiver fields:

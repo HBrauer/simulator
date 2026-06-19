@@ -5,6 +5,7 @@ log_path: "logs/instance_001.log"
 stream_block_samples: 1024
 stream_cpu: -1
 framed_udp: false
+asset_cache_max_bytes: 0
 receivers:
   - receiver_id: 0
     rest_bind_host: "127.0.0.1"
