@@ -184,6 +184,7 @@ def _assert_receiver_status_shape(status):
             "center_frequency_hz",
             "scan_rate_hz_per_s",
             "output_scale",
+            "stream_enabled",
             "bandwidth_hz",
             "udp_output_host",
             "udp_outputs",
@@ -237,6 +238,7 @@ def _assert_stream_status_shape(streams):
                 "stream_id",
                 "udp_port",
                 "sample_rate_hz",
+                "enabled",
                 "active",
                 "samples_rendered",
                 "udp_packets_sent",
@@ -246,6 +248,16 @@ def _assert_stream_status_shape(streams):
         )
         if stream["stream_type"] == "ddc":
             _assert_keys(stream, {"center_frequency_hz", "output_scale", "in_receiver_window"})
+
+
+def _wait_stream_state(rest_port, stream_type, stream_id, enabled):
+    for _ in range(50):
+        streams = _wait_json(f"http://127.0.0.1:{rest_port}/api/v1/streams")
+        for stream in streams["streams"]:
+            if stream["stream_type"] == stream_type and stream["stream_id"] == stream_id and stream["enabled"] is enabled and stream["active"] is enabled:
+                return stream
+        time.sleep(0.02)
+    raise AssertionError(f"stream {stream_type}/{stream_id} did not reach enabled={enabled}")
 
 
 def test_runtime_rest_and_udp_stream(tmp_path):
@@ -315,10 +327,44 @@ def test_runtime_rest_and_udp_stream(tmp_path):
         assert len(streams["streams"]) == 5
         assert streams["streams"][0]["stream_type"] == "iq_80mhz"
         assert streams["streams"][0]["udp_port"] == udp_port
+        assert streams["streams"][0]["enabled"] is True
         assert streams["streams"][0]["active"] is True
         ddc_streams = [stream for stream in streams["streams"] if stream["stream_type"] == "ddc"]
         assert {stream["stream_id"] for stream in ddc_streams} == {0, 1, 2, 3}
         assert all("in_receiver_window" in stream for stream in ddc_streams)
+        assert all(stream["enabled"] is True for stream in ddc_streams)
+
+        code, stream_update = _request_json(
+            f"http://127.0.0.1:{rest_port}/api/v1/streams/80mhz",
+            {"enabled": False},
+        )
+        assert code == 200
+        assert stream_update["enabled"] is False
+        _wait_stream_state(rest_port, "iq_80mhz", -1, False)
+        code, stream_update = _request_json(
+            f"http://127.0.0.1:{rest_port}/api/v1/streams/80mhz",
+            {"enabled": True},
+        )
+        assert code == 200
+        assert stream_update["enabled"] is True
+        _wait_stream_state(rest_port, "iq_80mhz", -1, True)
+
+        code, stream_update = _request_json(
+            f"http://127.0.0.1:{rest_port}/api/v1/ddc/0/stream",
+            {"enabled": False},
+        )
+        assert code == 200
+        assert stream_update["stream_type"] == "ddc"
+        assert stream_update["stream_id"] == 0
+        assert stream_update["enabled"] is False
+        _wait_stream_state(rest_port, "ddc", 0, False)
+        code, stream_update = _request_json(
+            f"http://127.0.0.1:{rest_port}/api/v1/ddc/0/stream",
+            {"enabled": True},
+        )
+        assert code == 200
+        assert stream_update["enabled"] is True
+        _wait_stream_state(rest_port, "ddc", 0, True)
 
         expected = subprocess.check_output(
             [

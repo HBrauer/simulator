@@ -18,7 +18,7 @@
 
 - [x] Replace direct render-send loop with renderer-to-UDP ringbuffer pipeline.
 - [x] Add per-stream underrun/overrun/drop counters.
-- [ ] Add configurable stream enable/disable switches to avoid rendering unused streams.
+- [x] Add configurable stream enable/disable switches to avoid rendering unused streams.
 - [ ] Add batch asset reads/cache memory limit handling for larger IQ files.
 - [ ] Add SIMD/VOLK or hand-vectorized hot loops for:
   - [ ] interpolation.
@@ -34,7 +34,7 @@
 - [x] Add `/api/v1/streams` or per-stream status endpoint.
 - [x] Add per-stream metrics instead of only receiver-aggregated metrics.
 - [x] Add JSON schema-style response validation in integration tests.
-- [ ] Add runtime stream enable/disable API if stream switches are implemented.
+- [x] Add runtime stream enable/disable API if stream switches are implemented.
 - [x] Add REST tests for malformed paths/methods and concurrent runtime updates.
 
 ## UDP And Interop

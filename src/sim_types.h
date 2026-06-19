@@ -34,6 +34,7 @@ typedef struct {
     uint32_t bandwidth_hz;
     uint32_t sample_rate_hz;
     double output_scale;
+    bool stream_enabled;
     udp_output_config_t udp_output;
 } ddc_config_t;
 
@@ -47,6 +48,7 @@ typedef struct {
     uint32_t sample_rate_hz;
     double scan_rate_hz_per_s;
     double output_scale;
+    bool stream_enabled;
     char udp_output_host[64];
     udp_output_config_t udp_80mhz_output;
     ddc_config_t ddc[SIM_DDC_COUNT];

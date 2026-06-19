@@ -22,6 +22,11 @@ static double parse_double_value(const char *value)
     return strtod(value, NULL);
 }
 
+static bool parse_bool_value(const char *value)
+{
+    return strcmp(value, "true") == 0 || strcmp(value, "1") == 0 || strcmp(value, "yes") == 0;
+}
+
 static void apply_scalar(simulator_config_t *config, parse_state_t *state, const char *key, const char *value)
 {
     if (state->current_ddc != NULL) {
@@ -31,6 +36,8 @@ static void apply_scalar(simulator_config_t *config, parse_state_t *state, const
             state->current_ddc->center_frequency_hz = parse_u64(value);
         } else if (strcmp(key, "output_scale") == 0) {
             state->current_ddc->output_scale = parse_double_value(value);
+        } else if (strcmp(key, "stream_enabled") == 0) {
+            state->current_ddc->stream_enabled = parse_bool_value(value);
         } else if (strcmp(key, "udp_output_port") == 0) {
             state->current_ddc->udp_output.port = (uint16_t)parse_u64(value);
         }
@@ -57,6 +64,8 @@ static void apply_scalar(simulator_config_t *config, parse_state_t *state, const
             r->scan_rate_hz_per_s = parse_double_value(value);
         } else if (strcmp(key, "output_scale") == 0) {
             r->output_scale = parse_double_value(value);
+        } else if (strcmp(key, "stream_enabled") == 0) {
+            r->stream_enabled = parse_bool_value(value);
         } else if (strcmp(key, "udp_80mhz_output_port") == 0) {
             r->udp_80mhz_output.port = (uint16_t)parse_u64(value);
         }
@@ -138,6 +147,10 @@ bool config_load_yaml(const char *path, simulator_config_t *config, char *error,
                         ok = false;
                     } else {
                         state.current_receiver = &config->receivers[config->receiver_count++];
+                        state.current_receiver->stream_enabled = true;
+                        for (size_t i = 0; i < SIM_DDC_COUNT; i++) {
+                            state.current_receiver->ddc[i].stream_enabled = true;
+                        }
                     }
                 } else if (strcmp(pending_key, "ddc_id") == 0 && state.current_receiver != NULL) {
                     const uint32_t id = (uint32_t)parse_u64(value);

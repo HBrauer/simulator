@@ -42,7 +42,9 @@ GET  http://127.0.0.1:8100/api/v1/scenario/status
 GET  http://127.0.0.1:8100/api/v1/metrics
 GET  http://127.0.0.1:8100/api/v1/ddc/0/status
 POST http://127.0.0.1:8100/api/v1/frequency-range
+POST http://127.0.0.1:8100/api/v1/streams/80mhz
 POST http://127.0.0.1:8100/api/v1/ddc/0/configure
+POST http://127.0.0.1:8100/api/v1/ddc/0/stream
 ```
 
 ## Deterministic Render Check

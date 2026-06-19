@@ -26,6 +26,13 @@ void ringbuffer_free(ringbuffer_t *rb)
     rb->fill = 0;
 }
 
+void ringbuffer_clear(ringbuffer_t *rb)
+{
+    rb->read_pos = 0;
+    rb->write_pos = 0;
+    rb->fill = 0;
+}
+
 size_t ringbuffer_write(ringbuffer_t *rb, const uint8_t *data, size_t length)
 {
     const size_t writable = rb->capacity - rb->fill;

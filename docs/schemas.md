@@ -27,6 +27,7 @@ Receiver fields:
 | `frequency_stop_hz` | integer | yes | RF range stop, greater than start and `<= 40000000000`. |
 | `scan_rate_hz_per_s` | number | yes | Used when range is wider than 80 MHz. |
 | `output_scale` | number | no | Receiver output multiplier. Defaults to `1.0`; must be positive when set. |
+| `stream_enabled` | boolean | no | Enables the 80-MHz UDP stream. Defaults to `true`. |
 | `udp_80mhz_output_port` | integer | yes | Unique across all receiver/DDC UDP outputs. |
 | `ddc` | array | yes | Four DDC entries with IDs `0..3`. |
 
@@ -37,6 +38,7 @@ DDC fields:
 | `ddc_id` | integer | yes | `0..3`. |
 | `center_frequency_hz` | integer | yes | Absolute RF center frequency. |
 | `output_scale` | number | no | DDC output multiplier. Defaults to receiver `output_scale`. |
+| `stream_enabled` | boolean | no | Enables this DDC UDP stream. Defaults to `true`. |
 | `udp_output_port` | integer | yes | Unique across all receiver/DDC UDP outputs. |
 
 Validation error codes include:

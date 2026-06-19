@@ -85,11 +85,30 @@ static bool json_get_double(json_t *object, const char *key, double *out)
     return true;
 }
 
+static bool json_get_bool_value(json_t *object, const char *key, bool *out)
+{
+    json_t *value = json_object_get(object, key);
+    if (!json_is_boolean(value)) {
+        return false;
+    }
+    *out = json_is_true(value);
+    return true;
+}
+
+static bool parse_ddc_path(const char *url, const char *suffix, unsigned *ddc_id)
+{
+    int parsed_chars = 0;
+    if (sscanf(url, "/api/v1/ddc/%u/%n", ddc_id, &parsed_chars) != 1 || parsed_chars <= 0) {
+        return false;
+    }
+    return strcmp(url + parsed_chars, suffix) == 0;
+}
+
 static json_t *receiver_json(const receiver_config_t *r, uint64_t scenario_time_ns, bool include_ddc)
 {
     const char *mode = receiver_effective_mode(r) == RECEIVER_MODE_FIXED ? "fixed" : "scan";
     json_t *root = json_pack(
-        "{s:i,s:s,s:I,s:I,s:I,s:f,s:f,s:I,s:s,s:{s:{s:i}},s:b}",
+        "{s:i,s:s,s:I,s:I,s:I,s:f,s:f,s:b,s:I,s:s,s:{s:{s:i}},s:b}",
         "receiver_id", (int)r->id,
         "effective_mode", mode,
         "frequency_start_hz", (json_int_t)r->frequency_start_hz,
@@ -97,21 +116,23 @@ static json_t *receiver_json(const receiver_config_t *r, uint64_t scenario_time_
         "center_frequency_hz", (json_int_t)receiver_center_frequency_hz(r, scenario_time_ns),
         "scan_rate_hz_per_s", r->scan_rate_hz_per_s,
         "output_scale", r->output_scale,
+        "stream_enabled", r->stream_enabled,
         "bandwidth_hz", (json_int_t)r->bandwidth_hz,
         "udp_output_host", r->udp_output_host,
         "udp_outputs", "iq_80mhz", "port", (int)r->udp_80mhz_output.port,
-        "streams_active", 1
+        "streams_active", r->stream_enabled
     );
     if (include_ddc) {
         json_t *arr = json_array();
         for (size_t i = 0; i < SIM_DDC_COUNT; i++) {
             json_array_append_new(arr, json_pack(
-                "{s:i,s:I,s:i,s:i,s:f,s:{s:i}}",
+                "{s:i,s:I,s:i,s:i,s:f,s:b,s:{s:i}}",
                 "ddc_id", (int)r->ddc[i].id,
                 "center_frequency_hz", (json_int_t)r->ddc[i].center_frequency_hz,
                 "bandwidth_hz", (int)r->ddc[i].bandwidth_hz,
                 "sample_rate_hz", (int)r->ddc[i].sample_rate_hz,
                 "output_scale", r->ddc[i].output_scale,
+                "stream_enabled", r->ddc[i].stream_enabled,
                 "udp_output", "port", (int)r->ddc[i].udp_output.port
             ));
         }
@@ -148,11 +169,12 @@ static json_t *stream_status_json(const receiver_config_t *receiver, const recei
 {
     json_t *streams = json_array();
     json_array_append_new(streams, json_pack(
-        "{s:s,s:i,s:i,s:i,s:b,s:I,s:I,s:I,s:I}",
+        "{s:s,s:i,s:i,s:i,s:b,s:b,s:I,s:I,s:I,s:I}",
         "stream_type", "iq_80mhz",
         "stream_id", -1,
         "udp_port", (int)receiver->udp_80mhz_output.port,
         "sample_rate_hz", (int)receiver->sample_rate_hz,
+        "enabled", receiver->stream_enabled,
         "active", atomic_load(&metrics->streams[0].active),
         "samples_rendered", (json_int_t)atomic_load(&metrics->streams[0].samples_rendered),
         "udp_packets_sent", (json_int_t)atomic_load(&metrics->streams[0].udp_packets_sent),
@@ -163,7 +185,7 @@ static json_t *stream_status_json(const receiver_config_t *receiver, const recei
         const ddc_config_t *ddc = &receiver->ddc[i];
         const stream_metrics_t *stream = &metrics->streams[1 + i];
         json_array_append_new(streams, json_pack(
-            "{s:s,s:i,s:i,s:i,s:I,s:f,s:b,s:b,s:I,s:I,s:I,s:I}",
+            "{s:s,s:i,s:i,s:i,s:I,s:f,s:b,s:b,s:b,s:I,s:I,s:I,s:I}",
             "stream_type", "ddc",
             "stream_id", (int)i,
             "udp_port", (int)ddc->udp_output.port,
@@ -171,6 +193,7 @@ static json_t *stream_status_json(const receiver_config_t *receiver, const recei
             "center_frequency_hz", (json_int_t)ddc->center_frequency_hz,
             "output_scale", ddc->output_scale,
             "in_receiver_window", receiver_ddc_in_window(receiver, ddc, scenario_time_ns),
+            "enabled", ddc->stream_enabled,
             "active", atomic_load(&stream->active),
             "samples_rendered", (json_int_t)atomic_load(&stream->samples_rendered),
             "udp_packets_sent", (json_int_t)atomic_load(&stream->udp_packets_sent),
@@ -256,6 +279,24 @@ static enum MHD_Result answer(void *cls, struct MHD_Connection *connection, cons
         pthread_mutex_unlock(ctx->receiver_lock);
         SEND_JSON_AND_FREE(MHD_HTTP_OK, response);
     }
+    if (strcmp(method, "POST") == 0 && strcmp(url, "/api/v1/streams/80mhz") == 0) {
+        json_error_t json_error;
+        json_t *request = json_loads(request_body->data, 0, &json_error);
+        if (request == NULL) {
+            SEND_JSON_AND_FREE(MHD_HTTP_BAD_REQUEST, error_body("invalid_json", json_error.text));
+        }
+        bool enabled = false;
+        if (!json_get_bool_value(request, "enabled", &enabled)) {
+            json_decref(request);
+            SEND_JSON_AND_FREE(MHD_HTTP_BAD_REQUEST, error_body("invalid_request", "enabled must be a boolean"));
+        }
+        json_decref(request);
+        pthread_mutex_lock(ctx->receiver_lock);
+        r->stream_enabled = enabled;
+        json_t *response = json_pack("{s:s,s:s,s:i,s:b}", "status", "ok", "stream_type", "iq_80mhz", "stream_id", -1, "enabled", enabled);
+        pthread_mutex_unlock(ctx->receiver_lock);
+        SEND_JSON_AND_FREE(MHD_HTTP_OK, response);
+    }
     if (strcmp(method, "GET") == 0 && strcmp(url, "/api/v1/config") == 0) {
         pthread_mutex_lock(ctx->receiver_lock);
         json_t *response = receiver_json(r, scenario_time_ns, true);
@@ -324,18 +365,38 @@ static enum MHD_Result answer(void *cls, struct MHD_Connection *connection, cons
         SEND_JSON_AND_FREE(MHD_HTTP_OK, response);
     }
     unsigned ddc_id = 99;
-    if (sscanf(url, "/api/v1/ddc/%u/status", &ddc_id) == 1 && strcmp(method, "GET") == 0) {
+    if (parse_ddc_path(url, "status", &ddc_id) && strcmp(method, "GET") == 0) {
         if (ddc_id >= SIM_DDC_COUNT) {
             SEND_JSON_AND_FREE(MHD_HTTP_NOT_FOUND, error_body("invalid_ddc_id", "ddc_id must be 0..3"));
         }
         pthread_mutex_lock(ctx->receiver_lock);
         const ddc_config_t *d = &r->ddc[ddc_id];
         const bool in_window = receiver_ddc_in_window(r, d, scenario_time_ns);
-        json_t *response = json_pack("{s:i,s:i,s:I,s:i,s:i,s:f,s:b,s:{s:i}}", "receiver_id", (int)r->id, "ddc_id", (int)d->id, "center_frequency_hz", (json_int_t)d->center_frequency_hz, "bandwidth_hz", (int)d->bandwidth_hz, "sample_rate_hz", (int)d->sample_rate_hz, "output_scale", d->output_scale, "in_receiver_window", in_window, "udp_output", "port", (int)d->udp_output.port);
+        json_t *response = json_pack("{s:i,s:i,s:I,s:i,s:i,s:f,s:b,s:b,s:{s:i}}", "receiver_id", (int)r->id, "ddc_id", (int)d->id, "center_frequency_hz", (json_int_t)d->center_frequency_hz, "bandwidth_hz", (int)d->bandwidth_hz, "sample_rate_hz", (int)d->sample_rate_hz, "output_scale", d->output_scale, "stream_enabled", d->stream_enabled, "in_receiver_window", in_window, "udp_output", "port", (int)d->udp_output.port);
         pthread_mutex_unlock(ctx->receiver_lock);
         SEND_JSON_AND_FREE(MHD_HTTP_OK, response);
     }
-    if (sscanf(url, "/api/v1/ddc/%u/configure", &ddc_id) == 1 && strcmp(method, "POST") == 0) {
+    if (parse_ddc_path(url, "stream", &ddc_id) && strcmp(method, "POST") == 0) {
+        if (ddc_id >= SIM_DDC_COUNT) {
+            SEND_JSON_AND_FREE(MHD_HTTP_NOT_FOUND, error_body("invalid_ddc_id", "ddc_id must be 0..3"));
+        }
+        json_error_t json_error;
+        json_t *request = json_loads(request_body->data, 0, &json_error);
+        if (request == NULL) {
+            SEND_JSON_AND_FREE(MHD_HTTP_BAD_REQUEST, error_body("invalid_json", json_error.text));
+        }
+        bool enabled = false;
+        if (!json_get_bool_value(request, "enabled", &enabled)) {
+            json_decref(request);
+            SEND_JSON_AND_FREE(MHD_HTTP_BAD_REQUEST, error_body("invalid_request", "enabled must be a boolean"));
+        }
+        json_decref(request);
+        pthread_mutex_lock(ctx->receiver_lock);
+        r->ddc[ddc_id].stream_enabled = enabled;
+        pthread_mutex_unlock(ctx->receiver_lock);
+        SEND_JSON_AND_FREE(MHD_HTTP_OK, json_pack("{s:s,s:s,s:i,s:b}", "status", "ok", "stream_type", "ddc", "stream_id", (int)ddc_id, "enabled", enabled));
+    }
+    if (parse_ddc_path(url, "configure", &ddc_id) && strcmp(method, "POST") == 0) {
         if (ddc_id >= SIM_DDC_COUNT) {
             SEND_JSON_AND_FREE(MHD_HTTP_NOT_FOUND, error_body("invalid_ddc_id", "ddc_id must be 0..3"));
         }

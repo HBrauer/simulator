@@ -75,6 +75,21 @@ static uint32_t stream_sample_rate(const stream_worker_t *worker, const receiver
     return worker->kind == STREAM_KIND_80MHZ ? receiver->sample_rate_hz : ddc->sample_rate_hz;
 }
 
+static bool stream_enabled(const stream_worker_t *worker, const receiver_config_t *receiver, const ddc_config_t *ddc)
+{
+    return worker->kind == STREAM_KIND_80MHZ ? receiver->stream_enabled : ddc->stream_enabled;
+}
+
+static void stream_worker_set_active(stream_worker_t *worker, bool active)
+{
+    const bool was_active = atomic_exchange(&worker->stream_metrics->active, active);
+    if (active && !was_active) {
+        atomic_fetch_add(&worker->metrics->active_streams, 1);
+    } else if (!active && was_active) {
+        atomic_fetch_sub(&worker->metrics->active_streams, 1);
+    }
+}
+
 static void render_one_block(const stream_worker_t *worker, iq_ci16_t *buffer, const receiver_config_t *receiver, const ddc_config_t *ddc, uint64_t scenario_time_ns)
 {
     render_stats_t stats;
@@ -117,6 +132,16 @@ static void *stream_render_thread_main(void *arg)
         receiver_config_t receiver_snapshot = *worker->receiver;
         ddc_config_t ddc_snapshot = receiver_snapshot.ddc[worker->ddc_index];
         pthread_mutex_unlock(worker->receiver_lock);
+
+        if (!stream_enabled(worker, &receiver_snapshot, &ddc_snapshot)) {
+            stream_worker_set_active(worker, false);
+            pthread_mutex_lock(&worker->ringbuffer_lock);
+            ringbuffer_clear(&worker->ringbuffer);
+            pthread_mutex_unlock(&worker->ringbuffer_lock);
+            sleep_for_block(worker->block_samples, stream_sample_rate(worker, &receiver_snapshot, &ddc_snapshot));
+            continue;
+        }
+        stream_worker_set_active(worker, true);
 
         render_one_block(worker, buffer, &receiver_snapshot, &ddc_snapshot, scenario_time_ns);
 
@@ -164,6 +189,11 @@ static void *stream_udp_thread_main(void *arg)
         receiver_snapshot = *worker->receiver;
         ddc_snapshot = receiver_snapshot.ddc[worker->ddc_index];
         pthread_mutex_unlock(worker->receiver_lock);
+
+        if (!stream_enabled(worker, &receiver_snapshot, &ddc_snapshot)) {
+            sleep_for_block(worker->block_samples, stream_sample_rate(worker, &receiver_snapshot, &ddc_snapshot));
+            continue;
+        }
 
         bool got_packet = false;
         pthread_mutex_lock(&worker->ringbuffer_lock);
@@ -218,8 +248,6 @@ static bool stream_worker_start(stream_worker_t *worker)
         return false;
     }
     worker->udp_started = true;
-    atomic_fetch_add(&worker->metrics->active_streams, 1);
-    atomic_store(&worker->stream_metrics->active, true);
     return true;
 }
 
@@ -233,10 +261,7 @@ static void stream_worker_join(stream_worker_t *worker)
         pthread_join(worker->udp_thread, NULL);
         worker->udp_started = false;
     }
-    if (atomic_load(&worker->stream_metrics->active)) {
-        atomic_fetch_sub(&worker->metrics->active_streams, 1);
-        atomic_store(&worker->stream_metrics->active, false);
-    }
+    stream_worker_set_active(worker, false);
     if (worker->ringbuffer_lock_initialized) {
         pthread_mutex_destroy(&worker->ringbuffer_lock);
         worker->ringbuffer_lock_initialized = false;
