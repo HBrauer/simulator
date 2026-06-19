@@ -79,6 +79,14 @@ cppcheck --enable=warning,style,performance,portability \
   src tests/unit tests/benchmarks
 ```
 
+Coverage report:
+
+```sh
+scripts/run_coverage.sh
+```
+
+The script configures `build-coverage` with Meson coverage instrumentation, runs the normal test suite, and writes reports under `build-coverage/meson-logs/coveragereport/`.
+
 Sanitizer build:
 
 ```sh
