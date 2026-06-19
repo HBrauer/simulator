@@ -27,7 +27,7 @@
   - [ ] summation.
 - [ ] Add CPU affinity/thread configuration from YAML.
 - [x] Add 1, 4, and 12 receiver stress benchmarks.
-- [ ] Add long-running soak test.
+- [x] Add long-running soak test.
 
 ## REST/API
 

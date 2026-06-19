@@ -774,3 +774,47 @@ def test_two_instances_emit_identical_udp_for_same_scenario_time(tmp_path):
             assert proc.returncode in (0, -15), stderr
         sock_1.close()
         sock_2.close()
+
+
+def test_runtime_soak_keeps_streaming_without_send_errors(tmp_path):
+    rest_port = _free_tcp_port()
+    udp_port = _free_udp_port_block()
+    config = tmp_path / "runtime_soak.yaml"
+    _write_config(config, rest_port, udp_port, stream_block_samples=512)
+
+    proc = subprocess.Popen(
+        [
+            str(SIM),
+            "--config",
+            str(config),
+            "--scenario",
+            "scenarios/test_scenario_001.json",
+            "--scenario-time-ns",
+            "450000",
+        ],
+        cwd=ROOT,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        start_metrics = _wait_json(f"http://127.0.0.1:{rest_port}/api/v1/metrics")
+        time.sleep(2.0)
+        end_metrics = _wait_json(f"http://127.0.0.1:{rest_port}/api/v1/metrics")
+
+        _assert_metrics_shape(end_metrics)
+        assert end_metrics["active_streams"] == 5
+        assert end_metrics["samples_rendered"] > start_metrics["samples_rendered"]
+        assert end_metrics["udp_packets_sent"] > start_metrics["udp_packets_sent"]
+        assert end_metrics["udp_bytes_sent"] > start_metrics["udp_bytes_sent"]
+        assert end_metrics["udp_send_errors"] == 0
+        assert all(stream["active"] is True for stream in end_metrics["streams"])
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5.0)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5.0)
+        stderr = proc.stderr.read() if proc.stderr else ""
+        assert proc.returncode in (0, -15), stderr
