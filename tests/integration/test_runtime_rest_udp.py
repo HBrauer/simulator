@@ -11,6 +11,7 @@ from urllib.request import urlopen
 
 ROOT = Path(__file__).resolve().parents[2]
 SIM = ROOT / "build" / "sdr-simulator"
+_PORT_BLOCK_CURSOR = 30000
 
 
 def _free_tcp_port():
@@ -20,13 +21,16 @@ def _free_tcp_port():
 
 
 def _free_udp_port_block(count=5, start=30000):
-    for base in range(start, 60000 - count):
+    global _PORT_BLOCK_CURSOR
+    search_start = max(start, _PORT_BLOCK_CURSOR)
+    for base in range(search_start, 60000 - count):
         sockets = []
         try:
             for port in range(base, base + count):
                 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
                 sock.bind(("127.0.0.1", port))
                 sockets.append(sock)
+            _PORT_BLOCK_CURSOR = base + count + 10
             return base
         except OSError:
             pass
@@ -160,6 +164,86 @@ def _method_error(url, method):
     raise AssertionError("request unexpectedly succeeded")
 
 
+def _assert_keys(obj, keys):
+    missing = set(keys) - set(obj)
+    assert not missing, f"missing keys: {sorted(missing)}"
+
+
+def _assert_receiver_status_shape(status):
+    _assert_keys(
+        status,
+        {
+            "receiver_id",
+            "effective_mode",
+            "frequency_start_hz",
+            "frequency_stop_hz",
+            "center_frequency_hz",
+            "scan_rate_hz_per_s",
+            "output_scale",
+            "bandwidth_hz",
+            "udp_output_host",
+            "udp_outputs",
+            "streams_active",
+        },
+    )
+
+
+def _assert_metrics_shape(metrics):
+    _assert_keys(
+        metrics,
+        {
+            "samples_rendered",
+            "udp_packets_sent",
+            "udp_bytes_sent",
+            "udp_send_errors",
+            "active_streams",
+            "ringbuffer_overruns",
+            "ringbuffer_underruns",
+            "samples_dropped",
+            "streams",
+        },
+    )
+    assert len(metrics["streams"]) == 5
+    for stream in metrics["streams"]:
+        _assert_keys(
+            stream,
+            {
+                "stream_type",
+                "stream_id",
+                "active",
+                "samples_rendered",
+                "udp_packets_sent",
+                "udp_bytes_sent",
+                "udp_send_errors",
+                "ringbuffer_overruns",
+                "ringbuffer_underruns",
+                "samples_dropped",
+            },
+        )
+
+
+def _assert_stream_status_shape(streams):
+    _assert_keys(streams, {"receiver_id", "streams"})
+    assert len(streams["streams"]) == 5
+    for stream in streams["streams"]:
+        _assert_keys(
+            stream,
+            {
+                "stream_type",
+                "stream_id",
+                "udp_port",
+                "sample_rate_hz",
+                "active",
+                "samples_rendered",
+                "udp_packets_sent",
+                "ringbuffer_overruns",
+                "ringbuffer_underruns",
+            },
+        )
+        if stream["stream_type"] == "ddc":
+            _assert_keys(stream, {"center_frequency_hz", "output_scale", "in_receiver_window"})
+
+
 def test_runtime_rest_and_udp_stream(tmp_path):
     rest_port = _free_tcp_port()
     udp_port = _free_udp_port_block()
@@ -191,23 +275,19 @@ def test_runtime_rest_and_udp_stream(tmp_path):
         health = _wait_json(f"http://127.0.0.1:{rest_port}/api/v1/health")
         assert health["status"] == "ok"
         status = _wait_json(f"http://127.0.0.1:{rest_port}/api/v1/status")
+        _assert_receiver_status_shape(status)
         assert status["receiver_id"] == 0
         assert status["center_frequency_hz"] == 10000000000
         scenario = _wait_json(f"http://127.0.0.1:{rest_port}/api/v1/scenario/status")
+        _assert_keys(scenario, {"scenario_id", "loaded", "scenario_time_ns", "source_count", "signal_count"})
         assert scenario["scenario_time_ns"] == 450000
-
-        code, error = _method_error(f"http://127.0.0.1:{rest_port}/api/v1/does-not-exist", "GET")
-        assert code == 404
-        assert error["error"]["code"] == "not_found"
-        code, error = _method_error(f"http://127.0.0.1:{rest_port}/api/v1/status", "POST")
-        assert code == 404
-        assert error["error"]["code"] == "not_found"
 
         packet, addr = udp_sock.recvfrom(4096)
         assert addr[0] == "127.0.0.1"
         assert len(packet) == 256 * 4
         assert any(byte != 0 for byte in packet)
         metrics = _wait_json(f"http://127.0.0.1:{rest_port}/api/v1/metrics")
+        _assert_metrics_shape(metrics)
         assert metrics["active_streams"] == 5
         assert metrics["samples_rendered"] >= 256
         assert metrics["udp_packets_sent"] >= 1
@@ -226,6 +306,7 @@ def test_runtime_rest_and_udp_stream(tmp_path):
         assert "samples_dropped" in metrics["streams"][0]
         assert {stream["stream_id"] for stream in metrics["streams"][1:]} == {0, 1, 2, 3}
         streams = _wait_json(f"http://127.0.0.1:{rest_port}/api/v1/streams")
+        _assert_stream_status_shape(streams)
         assert streams["receiver_id"] == 0
         assert len(streams["streams"]) == 5
         assert streams["streams"][0]["stream_type"] == "iq_80mhz"
@@ -250,6 +331,13 @@ def test_runtime_rest_and_udp_stream(tmp_path):
             cwd=ROOT,
         )
         assert packet == expected
+
+        code, error = _method_error(f"http://127.0.0.1:{rest_port}/api/v1/does-not-exist", "GET")
+        assert code == 404
+        assert error["error"]["code"] == "not_found"
+        code, error = _method_error(f"http://127.0.0.1:{rest_port}/api/v1/status", "POST")
+        assert code == 404
+        assert error["error"]["code"] == "not_found"
 
         code, error = _request_json_error(
             f"http://127.0.0.1:{rest_port}/api/v1/output-scale",

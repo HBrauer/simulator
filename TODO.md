@@ -33,7 +33,7 @@
 
 - [x] Add `/api/v1/streams` or per-stream status endpoint.
 - [x] Add per-stream metrics instead of only receiver-aggregated metrics.
-- [ ] Add JSON schema-style response validation in integration tests.
+- [x] Add JSON schema-style response validation in integration tests.
 - [ ] Add runtime stream enable/disable API if stream switches are implemented.
 - [x] Add REST tests for malformed paths/methods and concurrent runtime updates.
 
