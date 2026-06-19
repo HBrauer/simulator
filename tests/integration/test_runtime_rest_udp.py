@@ -208,6 +208,15 @@ def test_runtime_rest_and_udp_stream(tmp_path):
         assert "ringbuffer_underruns" in metrics["streams"][0]
         assert "samples_dropped" in metrics["streams"][0]
         assert {stream["stream_id"] for stream in metrics["streams"][1:]} == {0, 1, 2, 3}
+        streams = _wait_json(f"http://127.0.0.1:{rest_port}/api/v1/streams")
+        assert streams["receiver_id"] == 0
+        assert len(streams["streams"]) == 5
+        assert streams["streams"][0]["stream_type"] == "iq_80mhz"
+        assert streams["streams"][0]["udp_port"] == udp_port
+        assert streams["streams"][0]["active"] is True
+        ddc_streams = [stream for stream in streams["streams"] if stream["stream_type"] == "ddc"]
+        assert {stream["stream_id"] for stream in ddc_streams} == {0, 1, 2, 3}
+        assert all("in_receiver_window" in stream for stream in ddc_streams)
 
         expected = subprocess.check_output(
             [

@@ -144,6 +144,43 @@ static json_t *stream_metrics_json(const receiver_metrics_t *metrics)
     return streams;
 }
 
+static json_t *stream_status_json(const receiver_config_t *receiver, const receiver_metrics_t *metrics, uint64_t scenario_time_ns)
+{
+    json_t *streams = json_array();
+    json_array_append_new(streams, json_pack(
+        "{s:s,s:i,s:i,s:i,s:b,s:I,s:I,s:I,s:I}",
+        "stream_type", "iq_80mhz",
+        "stream_id", -1,
+        "udp_port", (int)receiver->udp_80mhz_output.port,
+        "sample_rate_hz", (int)receiver->sample_rate_hz,
+        "active", atomic_load(&metrics->streams[0].active),
+        "samples_rendered", (json_int_t)atomic_load(&metrics->streams[0].samples_rendered),
+        "udp_packets_sent", (json_int_t)atomic_load(&metrics->streams[0].udp_packets_sent),
+        "ringbuffer_overruns", (json_int_t)atomic_load(&metrics->streams[0].ringbuffer_overruns),
+        "ringbuffer_underruns", (json_int_t)atomic_load(&metrics->streams[0].ringbuffer_underruns)
+    ));
+    for (size_t i = 0; i < SIM_DDC_COUNT; i++) {
+        const ddc_config_t *ddc = &receiver->ddc[i];
+        const stream_metrics_t *stream = &metrics->streams[1 + i];
+        json_array_append_new(streams, json_pack(
+            "{s:s,s:i,s:i,s:i,s:I,s:f,s:b,s:b,s:I,s:I,s:I,s:I}",
+            "stream_type", "ddc",
+            "stream_id", (int)i,
+            "udp_port", (int)ddc->udp_output.port,
+            "sample_rate_hz", (int)ddc->sample_rate_hz,
+            "center_frequency_hz", (json_int_t)ddc->center_frequency_hz,
+            "output_scale", ddc->output_scale,
+            "in_receiver_window", receiver_ddc_in_window(receiver, ddc, scenario_time_ns),
+            "active", atomic_load(&stream->active),
+            "samples_rendered", (json_int_t)atomic_load(&stream->samples_rendered),
+            "udp_packets_sent", (json_int_t)atomic_load(&stream->udp_packets_sent),
+            "ringbuffer_overruns", (json_int_t)atomic_load(&stream->ringbuffer_overruns),
+            "ringbuffer_underruns", (json_int_t)atomic_load(&stream->ringbuffer_underruns)
+        ));
+    }
+    return json_pack("{s:i,s:o}", "receiver_id", (int)receiver->id, "streams", streams);
+}
+
 static enum MHD_Result answer(void *cls, struct MHD_Connection *connection, const char *url, const char *method, const char *version, const char *upload_data, size_t *upload_data_size, void **con_cls)
 {
     (void)version;
@@ -211,6 +248,12 @@ static enum MHD_Result answer(void *cls, struct MHD_Connection *connection, cons
             "samples_dropped", (json_int_t)atomic_load(&ctx->metrics->samples_dropped)
         );
         json_object_set_new(response, "streams", stream_metrics_json(ctx->metrics));
+        SEND_JSON_AND_FREE(MHD_HTTP_OK, response);
+    }
+    if (strcmp(method, "GET") == 0 && strcmp(url, "/api/v1/streams") == 0) {
+        pthread_mutex_lock(ctx->receiver_lock);
+        json_t *response = stream_status_json(r, ctx->metrics, scenario_time_ns);
+        pthread_mutex_unlock(ctx->receiver_lock);
         SEND_JSON_AND_FREE(MHD_HTTP_OK, response);
     }
     if (strcmp(method, "GET") == 0 && strcmp(url, "/api/v1/config") == 0) {
