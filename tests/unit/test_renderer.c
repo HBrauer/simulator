@@ -106,6 +106,7 @@ START_TEST(renders_ddc_nonzero_visible_signal)
         .center_frequency_hz = 10005000000ULL,
         .bandwidth_hz = SIM_DDC_BANDWIDTH_HZ,
         .sample_rate_hz = SIM_DDC_SAMPLE_RATE_HZ,
+        .output_scale = 1.0,
     };
     iq_ci16_t out[128];
     render_stats_t stats;

@@ -29,6 +29,8 @@ static void apply_scalar(simulator_config_t *config, parse_state_t *state, const
             state->current_ddc->id = (uint32_t)parse_u64(value);
         } else if (strcmp(key, "center_frequency_hz") == 0) {
             state->current_ddc->center_frequency_hz = parse_u64(value);
+        } else if (strcmp(key, "output_scale") == 0) {
+            state->current_ddc->output_scale = parse_double_value(value);
         } else if (strcmp(key, "udp_output_port") == 0) {
             state->current_ddc->udp_output.port = (uint16_t)parse_u64(value);
         }
@@ -53,6 +55,8 @@ static void apply_scalar(simulator_config_t *config, parse_state_t *state, const
             r->frequency_stop_hz = parse_u64(value);
         } else if (strcmp(key, "scan_rate_hz_per_s") == 0) {
             r->scan_rate_hz_per_s = parse_double_value(value);
+        } else if (strcmp(key, "output_scale") == 0) {
+            r->output_scale = parse_double_value(value);
         } else if (strcmp(key, "udp_80mhz_output_port") == 0) {
             r->udp_80mhz_output.port = (uint16_t)parse_u64(value);
         }
@@ -156,13 +160,21 @@ bool config_load_yaml(const char *path, simulator_config_t *config, char *error,
     return config_validate(config, error, error_size);
 }
 
-bool config_validate(const simulator_config_t *config, char *error, size_t error_size)
+bool config_validate(simulator_config_t *config, char *error, size_t error_size)
 {
     if (config->schema_version != 1 || config->receiver_count == 0) {
         snprintf(error, error_size, "config_invalid");
         return false;
     }
     for (size_t i = 0; i < config->receiver_count; i++) {
+        if (config->receivers[i].output_scale == 0.0) {
+            config->receivers[i].output_scale = 1.0;
+        }
+        for (size_t d = 0; d < SIM_DDC_COUNT; d++) {
+            if (config->receivers[i].ddc[d].output_scale == 0.0) {
+                config->receivers[i].ddc[d].output_scale = config->receivers[i].output_scale;
+            }
+        }
         if (!receiver_validate(&config->receivers[i], error, error_size)) {
             return false;
         }

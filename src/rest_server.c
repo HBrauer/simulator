@@ -91,14 +91,16 @@ static json_t *receiver_json(const receiver_config_t *r, uint64_t scenario_time_
         "streams_active", 1
     );
     if (include_ddc) {
+        json_object_set_new(root, "output_scale", json_real(r->output_scale));
         json_t *arr = json_array();
         for (size_t i = 0; i < SIM_DDC_COUNT; i++) {
             json_array_append_new(arr, json_pack(
-                "{s:i,s:I,s:i,s:i,s:{s:i}}",
+                "{s:i,s:I,s:i,s:i,s:f,s:{s:i}}",
                 "ddc_id", (int)r->ddc[i].id,
                 "center_frequency_hz", (json_int_t)r->ddc[i].center_frequency_hz,
                 "bandwidth_hz", (int)r->ddc[i].bandwidth_hz,
                 "sample_rate_hz", (int)r->ddc[i].sample_rate_hz,
+                "output_scale", r->ddc[i].output_scale,
                 "udp_output", "port", (int)r->ddc[i].udp_output.port
             ));
         }
@@ -216,7 +218,7 @@ static enum MHD_Result answer(void *cls, struct MHD_Connection *connection, cons
         pthread_mutex_lock(ctx->receiver_lock);
         const ddc_config_t *d = &r->ddc[ddc_id];
         const bool in_window = receiver_ddc_in_window(r, d, scenario_time_ns);
-        json_t *response = json_pack("{s:i,s:i,s:I,s:i,s:i,s:b,s:{s:i}}", "receiver_id", (int)r->id, "ddc_id", (int)d->id, "center_frequency_hz", (json_int_t)d->center_frequency_hz, "bandwidth_hz", (int)d->bandwidth_hz, "sample_rate_hz", (int)d->sample_rate_hz, "in_receiver_window", in_window, "udp_output", "port", (int)d->udp_output.port);
+        json_t *response = json_pack("{s:i,s:i,s:I,s:i,s:i,s:f,s:b,s:{s:i}}", "receiver_id", (int)r->id, "ddc_id", (int)d->id, "center_frequency_hz", (json_int_t)d->center_frequency_hz, "bandwidth_hz", (int)d->bandwidth_hz, "sample_rate_hz", (int)d->sample_rate_hz, "output_scale", d->output_scale, "in_receiver_window", in_window, "udp_output", "port", (int)d->udp_output.port);
         pthread_mutex_unlock(ctx->receiver_lock);
         SEND_JSON_AND_FREE(MHD_HTTP_OK, response);
     }

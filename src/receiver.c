@@ -50,9 +50,13 @@ bool receiver_validate(const receiver_config_t *receiver, char *error, size_t er
         snprintf(error, error_size, "invalid_port");
         return false;
     }
+    if (receiver->output_scale <= 0.0) {
+        snprintf(error, error_size, "invalid_output_scale");
+        return false;
+    }
     for (size_t i = 0; i < SIM_DDC_COUNT; i++) {
         if (receiver->ddc[i].id != i || receiver->ddc[i].udp_output.port == 0 ||
-            receiver->ddc[i].center_frequency_hz > SIM_MAX_RF_HZ) {
+            receiver->ddc[i].center_frequency_hz > SIM_MAX_RF_HZ || receiver->ddc[i].output_scale <= 0.0) {
             snprintf(error, error_size, "invalid_ddc");
             return false;
         }
