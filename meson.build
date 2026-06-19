@@ -72,6 +72,16 @@ unit_tests = executable(
 
 test('unit', unit_tests, workdir: meson.project_source_root(), suite: 'unit')
 
+renderer_benchmark = executable(
+  'renderer_benchmark',
+  'tests/benchmarks/renderer_benchmark.c',
+  link_with: sim_lib,
+  dependencies: sim_deps,
+  include_directories: include_directories('src')
+)
+
+benchmark('renderer_80mhz_scalar', renderer_benchmark, args: ['1000', '4096'], workdir: meson.project_source_root(), timeout: 60)
+
 pytest = find_program('pytest', required: false)
 if pytest.found()
   test('integration', pytest, args: ['-q', 'tests/integration'], workdir: meson.project_source_root(), suite: 'integration', timeout: 30)
