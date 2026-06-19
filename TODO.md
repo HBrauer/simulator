@@ -41,7 +41,7 @@
 
 - [ ] Add GNU Radio compatibility notes with exact UDP Source settings.
 - [x] Add optional packet-size configuration.
-- [ ] Add packet pacing tests with tolerance.
+- [x] Add packet pacing tests with tolerance.
 - [ ] Add optional framed/timestamped mode as future extension, keeping raw mode default.
 
 ## Tooling And Documentation

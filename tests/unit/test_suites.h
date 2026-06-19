@@ -10,5 +10,6 @@ Suite *timebase_suite(void);
 Suite *iq_file_reader_suite(void);
 Suite *renderer_suite(void);
 Suite *ringbuffer_suite(void);
+Suite *streamer_suite(void);
 
 #endif

@@ -45,15 +45,27 @@ struct streamer_manager {
     stream_worker_t workers[SIM_MAX_RECEIVERS * (1 + SIM_DDC_COUNT)];
 };
 
+uint64_t streamer_block_duration_ns(size_t block_samples, uint32_t sample_rate_hz)
+{
+    if (block_samples == 0 || sample_rate_hz == 0) {
+        return 0;
+    }
+    if (block_samples > UINT64_MAX / 1000000000ULL) {
+        return UINT64_MAX;
+    }
+    const uint64_t sample_ns = (uint64_t)block_samples * 1000000000ULL;
+    return (sample_ns + (uint64_t)sample_rate_hz - 1ULL) / (uint64_t)sample_rate_hz;
+}
+
 static void sleep_for_block(size_t block_samples, uint32_t sample_rate_hz)
 {
-    if (sample_rate_hz == 0) {
+    const uint64_t duration_ns = streamer_block_duration_ns(block_samples, sample_rate_hz);
+    if (duration_ns == 0) {
         return;
     }
-    const double seconds = (double)block_samples / (double)sample_rate_hz;
     struct timespec ts = {
-        .tv_sec = (time_t)seconds,
-        .tv_nsec = (long)((seconds - (double)(time_t)seconds) * 1000000000.0),
+        .tv_sec = (time_t)(duration_ns / 1000000000ULL),
+        .tv_nsec = (long)(duration_ns % 1000000000ULL),
     };
     nanosleep(&ts, NULL);
 }

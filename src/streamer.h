@@ -24,5 +24,6 @@ typedef struct {
 
 bool streamer_manager_start(streamer_manager_t **manager, const streamer_config_t *config);
 void streamer_manager_stop(streamer_manager_t *manager);
+uint64_t streamer_block_duration_ns(size_t block_samples, uint32_t sample_rate_hz);
 
 #endif

@@ -62,6 +62,7 @@ unit_tests = executable(
     'tests/unit/test_renderer.c',
     'tests/unit/test_ringbuffer.c',
     'tests/unit/test_scenario.c',
+    'tests/unit/test_streamer.c',
     'tests/unit/test_timebase.c',
     'tests/unit/test_main.c'
   ),

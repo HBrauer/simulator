@@ -12,6 +12,7 @@ int main(void)
         iq_file_reader_suite(),
         renderer_suite(),
         ringbuffer_suite(),
+        streamer_suite(),
     };
     SRunner *runner = srunner_create(suites[0]);
     for (size_t i = 1; i < sizeof(suites) / sizeof(suites[0]); i++) {
