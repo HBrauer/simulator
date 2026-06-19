@@ -1,0 +1,29 @@
+# Build artifacts
+build/
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+
+# Test/cache artifacts
+.pytest_cache/
+__pycache__/
+*.py[cod]
+*.gcda
+*.gcno
+coverage/
+coverage.xml
+
+# Runtime output
+logs/
+*.log
+*.pcap
+*.iq
+
+# Editor/OS noise
+.vscode/
+.idea/
+*~
+.DS_Store
