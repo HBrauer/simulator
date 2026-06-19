@@ -41,6 +41,7 @@ START_TEST(loads_instance_config)
     ck_assert_uint_eq(config.receivers[0].rest_port, 8100);
     ck_assert_uint_eq(config.receivers[0].ddc[3].udp_output.port, 50004);
     ck_assert_uint_eq(config.stream_block_samples, 1024);
+    ck_assert_int_eq(config.stream_cpu, -1);
     ck_assert(config.receivers[0].stream_enabled);
     ck_assert(config.receivers[0].ddc[0].stream_enabled);
     ck_assert_double_eq_tol(config.receivers[0].output_scale, 1.0, 0.000001);
@@ -74,6 +75,21 @@ START_TEST(rejects_invalid_stream_block_samples)
     char error[128];
     ck_assert(!config_validate(&config, error, sizeof(error)));
     ck_assert_str_eq(error, "invalid_stream_block_samples");
+}
+END_TEST
+
+START_TEST(rejects_invalid_stream_cpu)
+{
+    simulator_config_t config = {
+        .schema_version = 1,
+        .stream_cpu = -2,
+        .receiver_count = 1,
+    };
+    config.receivers[0] = valid_receiver(0, 8100, 50000);
+
+    char error[128];
+    ck_assert(!config_validate(&config, error, sizeof(error)));
+    ck_assert_str_eq(error, "invalid_stream_cpu");
 }
 END_TEST
 
@@ -138,6 +154,7 @@ Suite *config_suite(void)
     tcase_add_test(tc, loads_instance_config);
     tcase_add_test(tc, defaults_stream_block_samples);
     tcase_add_test(tc, rejects_invalid_stream_block_samples);
+    tcase_add_test(tc, rejects_invalid_stream_cpu);
     tcase_add_test(tc, rejects_duplicate_udp_port_within_receiver);
     tcase_add_test(tc, rejects_duplicate_ports_across_receivers);
     tcase_add_test(tc, rejects_invalid_output_scale);

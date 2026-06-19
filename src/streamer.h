@@ -20,6 +20,7 @@ typedef struct {
     pthread_mutex_t *receiver_lock;
     receiver_metrics_t *metrics;
     size_t block_samples;
+    int stream_cpu;
 } streamer_config_t;
 
 bool streamer_manager_start(streamer_manager_t **manager, const streamer_config_t *config);

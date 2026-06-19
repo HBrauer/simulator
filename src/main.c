@@ -137,6 +137,7 @@ int main(int argc, char **argv)
         .receiver_lock = &receiver_lock,
         .metrics = metrics,
         .block_samples = block_samples,
+        .stream_cpu = config.stream_cpu,
     };
     if (!streamer_manager_start(&streamer, &streamer_config)) {
         fprintf(stderr, "failed to start UDP streamers\n");

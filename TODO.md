@@ -25,7 +25,7 @@
   - [ ] NCO complex multiply.
   - [ ] gain/clipping.
   - [ ] summation.
-- [ ] Add CPU affinity/thread configuration from YAML.
+- [x] Add CPU affinity/thread configuration from YAML.
 - [x] Add 1, 4, and 12 receiver stress benchmarks.
 - [x] Add long-running soak test.
 

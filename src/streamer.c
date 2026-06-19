@@ -4,6 +4,9 @@
 #include "ringbuffer.h"
 #include "udp_output.h"
 
+#ifdef __linux__
+#include <sched.h>
+#endif
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdlib.h>
@@ -37,6 +40,7 @@ typedef struct {
     bool udp_started;
     bool ringbuffer_initialized;
     bool ringbuffer_lock_initialized;
+    int stream_cpu;
 } stream_worker_t;
 
 struct streamer_manager {
@@ -73,6 +77,21 @@ static void sleep_for_block(size_t block_samples, uint32_t sample_rate_hz)
 static uint32_t stream_sample_rate(const stream_worker_t *worker, const receiver_config_t *receiver, const ddc_config_t *ddc)
 {
     return worker->kind == STREAM_KIND_80MHZ ? receiver->sample_rate_hz : ddc->sample_rate_hz;
+}
+
+static void apply_stream_affinity(int stream_cpu)
+{
+#ifdef __linux__
+    if (stream_cpu < 0) {
+        return;
+    }
+    cpu_set_t cpuset;
+    CPU_ZERO(&cpuset);
+    CPU_SET((unsigned int)stream_cpu, &cpuset);
+    (void)pthread_setaffinity_np(pthread_self(), sizeof(cpuset), &cpuset);
+#else
+    (void)stream_cpu;
+#endif
 }
 
 static bool stream_enabled(const stream_worker_t *worker, const receiver_config_t *receiver, const ddc_config_t *ddc)
@@ -121,6 +140,7 @@ static void record_underrun(stream_worker_t *worker)
 static void *stream_render_thread_main(void *arg)
 {
     stream_worker_t *worker = arg;
+    apply_stream_affinity(worker->stream_cpu);
     iq_ci16_t *buffer = calloc(worker->block_samples, sizeof(*buffer));
     if (buffer == NULL) {
         return NULL;
@@ -163,6 +183,7 @@ static void *stream_render_thread_main(void *arg)
 static void *stream_udp_thread_main(void *arg)
 {
     stream_worker_t *worker = arg;
+    apply_stream_affinity(worker->stream_cpu);
     pthread_mutex_lock(worker->receiver_lock);
     receiver_config_t receiver_snapshot = *worker->receiver;
     ddc_config_t ddc_snapshot = receiver_snapshot.ddc[worker->ddc_index];
@@ -294,6 +315,7 @@ bool streamer_manager_start(streamer_manager_t **manager, const streamer_config_
             .receiver_lock = config->receiver_lock,
             .kind = STREAM_KIND_80MHZ,
             .block_samples = config->block_samples,
+            .stream_cpu = config->stream_cpu,
         };
         if (!stream_worker_start(worker)) {
             streamer_manager_stop(m);
@@ -314,6 +336,7 @@ bool streamer_manager_start(streamer_manager_t **manager, const streamer_config_
                 .receiver_lock = config->receiver_lock,
                 .kind = STREAM_KIND_DDC,
                 .block_samples = config->block_samples,
+                .stream_cpu = config->stream_cpu,
             };
             if (!stream_worker_start(ddc_worker)) {
                 streamer_manager_stop(m);
