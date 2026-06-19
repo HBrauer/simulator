@@ -183,6 +183,16 @@ def test_runtime_rest_and_udp_stream(tmp_path):
         assert ddc_updated["status"] == "ok"
         ddc_status = _wait_json(f"http://127.0.0.1:{rest_port}/api/v1/ddc/0/status")
         assert ddc_status["center_frequency_hz"] == 10005000001
+        assert ddc_status["in_receiver_window"] is True
+
+        code, ddc_updated = _request_json(
+            f"http://127.0.0.1:{rest_port}/api/v1/ddc/0/configure",
+            {"center_frequency_hz": 10060000000},
+        )
+        assert code == 200
+        assert ddc_updated["status"] == "ok"
+        ddc_status = _wait_json(f"http://127.0.0.1:{rest_port}/api/v1/ddc/0/status")
+        assert ddc_status["in_receiver_window"] is False
     finally:
         proc.terminate()
         try:

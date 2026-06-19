@@ -29,6 +29,16 @@ uint64_t receiver_center_frequency_hz(const receiver_config_t *receiver, uint64_
     return receiver->frequency_start_hz + (uint64_t)llround(position);
 }
 
+bool receiver_ddc_in_window(const receiver_config_t *receiver, const ddc_config_t *ddc, uint64_t scenario_time_ns)
+{
+    const uint64_t receiver_center = receiver_center_frequency_hz(receiver, scenario_time_ns);
+    const int64_t receiver_low = (int64_t)receiver_center - (int64_t)(SIM_RECEIVER_BANDWIDTH_HZ / 2ULL);
+    const int64_t receiver_high = (int64_t)receiver_center + (int64_t)(SIM_RECEIVER_BANDWIDTH_HZ / 2ULL);
+    const int64_t ddc_low = (int64_t)ddc->center_frequency_hz - (int64_t)(ddc->bandwidth_hz / 2U);
+    const int64_t ddc_high = (int64_t)ddc->center_frequency_hz + (int64_t)(ddc->bandwidth_hz / 2U);
+    return ddc_low >= receiver_low && ddc_high <= receiver_high;
+}
+
 bool receiver_validate(const receiver_config_t *receiver, char *error, size_t error_size)
 {
     if (receiver->frequency_start_hz > SIM_MAX_RF_HZ || receiver->frequency_stop_hz > SIM_MAX_RF_HZ ||

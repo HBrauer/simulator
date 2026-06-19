@@ -202,7 +202,8 @@ static enum MHD_Result answer(void *cls, struct MHD_Connection *connection, cons
         }
         pthread_mutex_lock(ctx->receiver_lock);
         const ddc_config_t *d = &r->ddc[ddc_id];
-        json_t *response = json_pack("{s:i,s:i,s:I,s:i,s:i,s:{s:i}}", "receiver_id", (int)r->id, "ddc_id", (int)d->id, "center_frequency_hz", (json_int_t)d->center_frequency_hz, "bandwidth_hz", (int)d->bandwidth_hz, "sample_rate_hz", (int)d->sample_rate_hz, "udp_output", "port", (int)d->udp_output.port);
+        const bool in_window = receiver_ddc_in_window(r, d, scenario_time_ns);
+        json_t *response = json_pack("{s:i,s:i,s:I,s:i,s:i,s:b,s:{s:i}}", "receiver_id", (int)r->id, "ddc_id", (int)d->id, "center_frequency_hz", (json_int_t)d->center_frequency_hz, "bandwidth_hz", (int)d->bandwidth_hz, "sample_rate_hz", (int)d->sample_rate_hz, "in_receiver_window", in_window, "udp_output", "port", (int)d->udp_output.port);
         pthread_mutex_unlock(ctx->receiver_lock);
         SEND_JSON_AND_FREE(MHD_HTTP_OK, response);
     }

@@ -1,4 +1,5 @@
 #include "streamer.h"
+#include "receiver.h"
 #include "renderer.h"
 #include "udp_output.h"
 
@@ -66,7 +67,11 @@ static void *stream_worker_main(void *arg)
         if (worker->kind == STREAM_KIND_80MHZ) {
             renderer_render_80mhz_block(worker->scenario, &receiver_snapshot, scenario_time_ns, buffer, worker->block_samples, &stats);
         } else {
-            renderer_render_ddc_block(worker->scenario, &ddc_snapshot, scenario_time_ns, buffer, worker->block_samples, &stats);
+            if (receiver_ddc_in_window(&receiver_snapshot, &ddc_snapshot, scenario_time_ns)) {
+                renderer_render_ddc_block(worker->scenario, &ddc_snapshot, scenario_time_ns, buffer, worker->block_samples, &stats);
+            } else {
+                memset(buffer, 0, worker->block_samples * sizeof(*buffer));
+            }
         }
         size_t sent = 0;
         (void)udp_output_send(&udp, buffer, worker->block_samples * sizeof(*buffer), &sent);
