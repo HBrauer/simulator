@@ -18,13 +18,24 @@ def _free_tcp_port():
         return sock.getsockname()[1]
 
 
-def _free_udp_port():
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
+def _free_udp_port_block(count=5):
+    for base in range(30000, 60000 - count):
+        sockets = []
+        try:
+            for port in range(base, base + count):
+                sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                sock.bind(("127.0.0.1", port))
+                sockets.append(sock)
+            return base
+        except OSError:
+            pass
+        finally:
+            for sock in sockets:
+                sock.close()
+    raise RuntimeError("could not find a free UDP port block")
 
 
-def _write_config(path, rest_port, udp_base):
+def _write_config(path, rest_port, udp_base, ddc0_center=10005000000):
     path.write_text(
         f"""schema_version: 1
 instance_id: "pytest_runtime"
@@ -41,7 +52,7 @@ receivers:
     udp_80mhz_output_port: {udp_base}
     ddc:
       - ddc_id: 0
-        center_frequency_hz: 10005000000
+        center_frequency_hz: {ddc0_center}
         udp_output_port: {udp_base + 1}
       - ddc_id: 1
         center_frequency_hz: 10010000000
@@ -87,7 +98,7 @@ def _request_json_error(url, payload):
 
 def test_runtime_rest_and_udp_stream(tmp_path):
     rest_port = _free_tcp_port()
-    udp_port = _free_udp_port()
+    udp_port = _free_udp_port_block()
     config = tmp_path / "runtime.yaml"
     _write_config(config, rest_port, udp_port)
 
@@ -201,5 +212,51 @@ def test_runtime_rest_and_udp_stream(tmp_path):
             proc.kill()
             proc.wait(timeout=5.0)
         udp_sock.close()
+        stderr = proc.stderr.read() if proc.stderr else ""
+        assert proc.returncode in (0, -15), stderr
+
+
+def test_ddc_udp_stream_is_empty_when_outside_receiver_window(tmp_path):
+    rest_port = _free_tcp_port()
+    udp_port = _free_udp_port_block()
+    config = tmp_path / "runtime_ddc_outside.yaml"
+    _write_config(config, rest_port, udp_port, ddc0_center=10060000000)
+
+    ddc_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    ddc_sock.bind(("127.0.0.1", udp_port + 1))
+    ddc_sock.settimeout(5.0)
+
+    proc = subprocess.Popen(
+        [
+            str(SIM),
+            "--config",
+            str(config),
+            "--scenario",
+            "scenarios/test_scenario_001.json",
+            "--scenario-time-ns",
+            "450000",
+            "--stream-block-samples",
+            "256",
+        ],
+        cwd=ROOT,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        ddc_status = _wait_json(f"http://127.0.0.1:{rest_port}/api/v1/ddc/0/status")
+        assert ddc_status["in_receiver_window"] is False
+        packet, addr = ddc_sock.recvfrom(4096)
+        assert addr[0] == "127.0.0.1"
+        assert len(packet) == 256 * 4
+        assert all(byte == 0 for byte in packet)
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5.0)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5.0)
+        ddc_sock.close()
         stderr = proc.stderr.read() if proc.stderr else ""
         assert proc.returncode in (0, -15), stderr
