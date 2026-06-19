@@ -18,7 +18,8 @@ typedef struct {
     const scenario_t *scenario;
     const timebase_t *timebase;
     receiver_config_t *receiver;
-    ddc_config_t *ddc;
+    size_t ddc_index;
+    pthread_mutex_t *receiver_lock;
     stream_kind_t kind;
     size_t block_samples;
     pthread_t thread;
@@ -34,10 +35,15 @@ struct streamer_manager {
 static void *stream_worker_main(void *arg)
 {
     stream_worker_t *worker = arg;
-    const char *host = worker->receiver->udp_output_host;
+    pthread_mutex_lock(worker->receiver_lock);
+    receiver_config_t receiver_snapshot = *worker->receiver;
+    ddc_config_t ddc_snapshot = receiver_snapshot.ddc[worker->ddc_index];
+    pthread_mutex_unlock(worker->receiver_lock);
+
+    const char *host = receiver_snapshot.udp_output_host;
     const uint16_t port = worker->kind == STREAM_KIND_80MHZ
-        ? worker->receiver->udp_80mhz_output.port
-        : worker->ddc->udp_output.port;
+        ? receiver_snapshot.udp_80mhz_output.port
+        : ddc_snapshot.udp_output.port;
 
     udp_output_t udp = {.fd = -1};
     if (!udp_output_open(&udp, host, port)) {
@@ -53,10 +59,14 @@ static void *stream_worker_main(void *arg)
     while (atomic_load(worker->running)) {
         render_stats_t stats;
         const uint64_t scenario_time_ns = timebase_now_ns(worker->timebase);
+        pthread_mutex_lock(worker->receiver_lock);
+        receiver_snapshot = *worker->receiver;
+        ddc_snapshot = receiver_snapshot.ddc[worker->ddc_index];
+        pthread_mutex_unlock(worker->receiver_lock);
         if (worker->kind == STREAM_KIND_80MHZ) {
-            renderer_render_80mhz_block(worker->scenario, worker->receiver, scenario_time_ns, buffer, worker->block_samples, &stats);
+            renderer_render_80mhz_block(worker->scenario, &receiver_snapshot, scenario_time_ns, buffer, worker->block_samples, &stats);
         } else {
-            renderer_render_ddc_block(worker->scenario, worker->ddc, scenario_time_ns, buffer, worker->block_samples, &stats);
+            renderer_render_ddc_block(worker->scenario, &ddc_snapshot, scenario_time_ns, buffer, worker->block_samples, &stats);
         }
         size_t sent = 0;
         (void)udp_output_send(&udp, buffer, worker->block_samples * sizeof(*buffer), &sent);
@@ -84,6 +94,7 @@ bool streamer_manager_start(streamer_manager_t **manager, const streamer_config_
             .scenario = config->scenario,
             .timebase = config->timebase,
             .receiver = receiver,
+            .receiver_lock = config->receiver_lock,
             .kind = STREAM_KIND_80MHZ,
             .block_samples = config->block_samples,
         };
@@ -100,7 +111,8 @@ bool streamer_manager_start(streamer_manager_t **manager, const streamer_config_
                 .scenario = config->scenario,
                 .timebase = config->timebase,
                 .receiver = receiver,
-                .ddc = &receiver->ddc[d],
+                .ddc_index = d,
+                .receiver_lock = config->receiver_lock,
                 .kind = STREAM_KIND_DDC,
                 .block_samples = config->block_samples,
             };

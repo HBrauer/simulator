@@ -3,6 +3,7 @@
 
 #include <jansson.h>
 #include <microhttpd.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -152,10 +153,16 @@ static enum MHD_Result answer(void *cls, struct MHD_Connection *connection, cons
         ));
     }
     if (strcmp(method, "GET") == 0 && strcmp(url, "/api/v1/config") == 0) {
-        SEND_JSON_AND_FREE(MHD_HTTP_OK, receiver_json(r, scenario_time_ns, true));
+        pthread_mutex_lock(ctx->receiver_lock);
+        json_t *response = receiver_json(r, scenario_time_ns, true);
+        pthread_mutex_unlock(ctx->receiver_lock);
+        SEND_JSON_AND_FREE(MHD_HTTP_OK, response);
     }
     if (strcmp(method, "GET") == 0 && strcmp(url, "/api/v1/status") == 0) {
-        SEND_JSON_AND_FREE(MHD_HTTP_OK, receiver_json(r, scenario_time_ns, false));
+        pthread_mutex_lock(ctx->receiver_lock);
+        json_t *response = receiver_json(r, scenario_time_ns, false);
+        pthread_mutex_unlock(ctx->receiver_lock);
+        SEND_JSON_AND_FREE(MHD_HTTP_OK, response);
     }
     if (strcmp(method, "POST") == 0 && strcmp(url, "/api/v1/frequency-range") == 0) {
         json_error_t json_error;
@@ -173,24 +180,31 @@ static enum MHD_Result answer(void *cls, struct MHD_Connection *connection, cons
             SEND_JSON_AND_FREE(MHD_HTTP_BAD_REQUEST, error_body("invalid_request", "frequency_start_hz and frequency_stop_hz must be unsigned integer Hz values"));
         }
         json_decref(request);
+        pthread_mutex_lock(ctx->receiver_lock);
         receiver_config_t updated = *r;
         updated.frequency_start_hz = start;
         updated.frequency_stop_hz = stop;
         updated.scan_rate_hz_per_s = scan_rate;
         char error[128];
         if (!receiver_validate(&updated, error, sizeof(error))) {
+            pthread_mutex_unlock(ctx->receiver_lock);
             SEND_JSON_AND_FREE(MHD_HTTP_BAD_REQUEST, error_body(error, "invalid frequency range"));
         }
         *r = updated;
-        SEND_JSON_AND_FREE(MHD_HTTP_OK, receiver_json(r, scenario_time_ns, false));
+        json_t *response = receiver_json(r, scenario_time_ns, false);
+        pthread_mutex_unlock(ctx->receiver_lock);
+        SEND_JSON_AND_FREE(MHD_HTTP_OK, response);
     }
     unsigned ddc_id = 99;
     if (sscanf(url, "/api/v1/ddc/%u/status", &ddc_id) == 1 && strcmp(method, "GET") == 0) {
         if (ddc_id >= SIM_DDC_COUNT) {
             SEND_JSON_AND_FREE(MHD_HTTP_NOT_FOUND, error_body("invalid_ddc_id", "ddc_id must be 0..3"));
         }
+        pthread_mutex_lock(ctx->receiver_lock);
         const ddc_config_t *d = &r->ddc[ddc_id];
-        SEND_JSON_AND_FREE(MHD_HTTP_OK, json_pack("{s:i,s:i,s:I,s:i,s:i,s:{s:i}}", "receiver_id", (int)r->id, "ddc_id", (int)d->id, "center_frequency_hz", (json_int_t)d->center_frequency_hz, "bandwidth_hz", (int)d->bandwidth_hz, "sample_rate_hz", (int)d->sample_rate_hz, "udp_output", "port", (int)d->udp_output.port));
+        json_t *response = json_pack("{s:i,s:i,s:I,s:i,s:i,s:{s:i}}", "receiver_id", (int)r->id, "ddc_id", (int)d->id, "center_frequency_hz", (json_int_t)d->center_frequency_hz, "bandwidth_hz", (int)d->bandwidth_hz, "sample_rate_hz", (int)d->sample_rate_hz, "udp_output", "port", (int)d->udp_output.port);
+        pthread_mutex_unlock(ctx->receiver_lock);
+        SEND_JSON_AND_FREE(MHD_HTTP_OK, response);
     }
     if (sscanf(url, "/api/v1/ddc/%u/configure", &ddc_id) == 1 && strcmp(method, "POST") == 0) {
         if (ddc_id >= SIM_DDC_COUNT) {
@@ -210,7 +224,9 @@ static enum MHD_Result answer(void *cls, struct MHD_Connection *connection, cons
         if (center > SIM_MAX_RF_HZ) {
             SEND_JSON_AND_FREE(MHD_HTTP_BAD_REQUEST, error_body("invalid_frequency", "center_frequency_hz must be between 0 and 40000000000"));
         }
+        pthread_mutex_lock(ctx->receiver_lock);
         r->ddc[ddc_id].center_frequency_hz = center;
+        pthread_mutex_unlock(ctx->receiver_lock);
         SEND_JSON_AND_FREE(MHD_HTTP_OK, json_pack("{s:s}", "status", "ok"));
     }
 

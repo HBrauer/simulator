@@ -7,6 +7,7 @@
 #include "udp_output.h"
 
 #include <signal.h>
+#include <pthread.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -80,6 +81,12 @@ int main(int argc, char **argv)
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
 
+    pthread_mutex_t receiver_lock;
+    if (pthread_mutex_init(&receiver_lock, NULL) != 0) {
+        fprintf(stderr, "failed to initialize receiver lock\n");
+        return 6;
+    }
+
     size_t block_samples = 1024;
     if (block_samples_arg != NULL) {
         block_samples = (size_t)strtoull(block_samples_arg, NULL, 10);
@@ -95,10 +102,12 @@ int main(int argc, char **argv)
             .receiver = &config.receivers[i],
             .scenario = &scenario,
             .timebase = &timebase,
+            .receiver_lock = &receiver_lock,
             .version = "0.1.0",
         };
         if (!rest_server_start(&servers[i], &context)) {
             fprintf(stderr, "failed to start REST server for receiver %u\n", config.receivers[i].id);
+            pthread_mutex_destroy(&receiver_lock);
             return 5;
         }
         printf("receiver %u REST http://%s:%u/api/v1\n", config.receivers[i].id, config.receivers[i].rest_bind_host, config.receivers[i].rest_port);
@@ -109,6 +118,7 @@ int main(int argc, char **argv)
         .config = &config,
         .scenario = &scenario,
         .timebase = &timebase,
+        .receiver_lock = &receiver_lock,
         .block_samples = block_samples,
     };
     if (!streamer_manager_start(&streamer, &streamer_config)) {
@@ -116,6 +126,7 @@ int main(int argc, char **argv)
         for (size_t i = 0; i < config.receiver_count; i++) {
             rest_server_stop(servers[i]);
         }
+        pthread_mutex_destroy(&receiver_lock);
         return 7;
     }
 
@@ -127,5 +138,6 @@ int main(int argc, char **argv)
     for (size_t i = 0; i < config.receiver_count; i++) {
         rest_server_stop(servers[i]);
     }
+    pthread_mutex_destroy(&receiver_lock);
     return 0;
 }

@@ -5,6 +5,7 @@
 #include "timebase.h"
 
 #include <stdbool.h>
+#include <pthread.h>
 
 typedef struct rest_server rest_server_t;
 
@@ -12,6 +13,7 @@ typedef struct {
     receiver_config_t *receiver;
     const scenario_t *scenario;
     const timebase_t *timebase;
+    pthread_mutex_t *receiver_lock;
     const char *version;
 } rest_context_t;
 
