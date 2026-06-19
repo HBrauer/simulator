@@ -16,6 +16,8 @@
 #define SIM_DDC_BANDWIDTH_HZ 20000000U
 #define SIM_DDC_SAMPLE_RATE_HZ 24576000U
 #define SIM_MAX_RF_HZ 40000000000ULL
+#define SIM_DEFAULT_STREAM_BLOCK_SAMPLES 1024U
+#define SIM_MAX_STREAM_BLOCK_SAMPLES 4096U
 
 typedef struct {
     int16_t i;
@@ -55,6 +57,7 @@ typedef struct {
     char instance_id[SIM_MAX_ID];
     char scenario_file[SIM_MAX_PATH];
     char log_path[SIM_MAX_PATH];
+    size_t stream_block_samples;
     size_t receiver_count;
     receiver_config_t receivers[SIM_MAX_RECEIVERS];
 } simulator_config_t;

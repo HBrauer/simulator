@@ -40,7 +40,7 @@
 ## UDP And Interop
 
 - [ ] Add GNU Radio compatibility notes with exact UDP Source settings.
-- [ ] Add optional packet-size configuration.
+- [x] Add optional packet-size configuration.
 - [ ] Add packet pacing tests with tolerance.
 - [ ] Add optional framed/timestamped mode as future extension, keeping raw mode default.
 

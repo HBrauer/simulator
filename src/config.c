@@ -73,6 +73,8 @@ static void apply_scalar(simulator_config_t *config, parse_state_t *state, const
         sim_strlcpy(config->scenario_file, value, sizeof(config->scenario_file));
     } else if (strcmp(key, "log_path") == 0) {
         sim_strlcpy(config->log_path, value, sizeof(config->log_path));
+    } else if (strcmp(key, "stream_block_samples") == 0) {
+        config->stream_block_samples = (size_t)parse_u64(value);
     }
 }
 
@@ -164,6 +166,13 @@ bool config_validate(simulator_config_t *config, char *error, size_t error_size)
 {
     if (config->schema_version != 1 || config->receiver_count == 0) {
         snprintf(error, error_size, "config_invalid");
+        return false;
+    }
+    if (config->stream_block_samples == 0) {
+        config->stream_block_samples = SIM_DEFAULT_STREAM_BLOCK_SAMPLES;
+    }
+    if (config->stream_block_samples > SIM_MAX_STREAM_BLOCK_SAMPLES) {
+        snprintf(error, error_size, "invalid_stream_block_samples");
         return false;
     }
     for (size_t i = 0; i < config->receiver_count; i++) {

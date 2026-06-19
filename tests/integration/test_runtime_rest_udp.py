@@ -40,12 +40,16 @@ def _free_udp_port_block(count=5, start=30000):
     raise RuntimeError("could not find a free UDP port block")
 
 
-def _write_config(path, rest_port, udp_base, ddc0_center=10005000000):
+def _write_config(path, rest_port, udp_base, ddc0_center=10005000000, stream_block_samples=None):
+    stream_block_samples_line = ""
+    if stream_block_samples is not None:
+        stream_block_samples_line = f"stream_block_samples: {stream_block_samples}\n"
     path.write_text(
         f"""schema_version: 1
 instance_id: "pytest_runtime"
 scenario_file: "scenarios/test_scenario_001.json"
 log_path: "logs/pytest_runtime.log"
+{stream_block_samples_line}\
 receivers:
   - receiver_id: 0
     rest_bind_host: "127.0.0.1"
@@ -420,6 +424,49 @@ def test_runtime_rest_and_udp_stream(tmp_path):
         assert ddc_updated["status"] == "ok"
         ddc_status = _wait_json(f"http://127.0.0.1:{rest_port}/api/v1/ddc/0/status")
         assert ddc_status["in_receiver_window"] is False
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5.0)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5.0)
+        udp_sock.close()
+        stderr = proc.stderr.read() if proc.stderr else ""
+        assert proc.returncode in (0, -15), stderr
+
+
+def test_stream_block_samples_config_controls_udp_packet_size(tmp_path):
+    rest_port = _free_tcp_port()
+    udp_port = _free_udp_port_block()
+    config = tmp_path / "runtime_packet_size.yaml"
+    _write_config(config, rest_port, udp_port, stream_block_samples=128)
+
+    udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    udp_sock.bind(("127.0.0.1", udp_port))
+    udp_sock.settimeout(5.0)
+
+    proc = subprocess.Popen(
+        [
+            str(SIM),
+            "--config",
+            str(config),
+            "--scenario",
+            "scenarios/test_scenario_001.json",
+            "--scenario-time-ns",
+            "450000",
+        ],
+        cwd=ROOT,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        health = _wait_json(f"http://127.0.0.1:{rest_port}/api/v1/health")
+        assert health["status"] == "ok"
+        packet, addr = udp_sock.recvfrom(4096)
+        assert addr[0] == "127.0.0.1"
+        assert len(packet) == 128 * 4
     finally:
         proc.terminate()
         try:

@@ -2,6 +2,7 @@ schema_version: 1
 instance_id: "sim_instance_001"
 scenario_file: "scenarios/test_scenario_001.json"
 log_path: "logs/instance_001.log"
+stream_block_samples: 1024
 receivers:
   - receiver_id: 0
     rest_bind_host: "127.0.0.1"

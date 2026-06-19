@@ -30,6 +30,8 @@ build/sdr-simulator \
   --scenario scenarios/test_scenario_001.json
 ```
 
+`stream_block_samples` in the instance YAML controls the raw UDP datagram payload size in IQ samples. The default is 1024 samples, and the allowed range is 1 to 4096 samples. `--stream-block-samples` overrides the YAML value for ad hoc runs.
+
 Useful REST endpoints for receiver 0 in the sample config:
 
 ```text
@@ -97,6 +99,6 @@ The benchmark reports scalar 80-MHz renderer throughput in samples per second. I
 
 - DSP path is scalar and correctness-first.
 - Resampling is nearest-neighbor sample-rate mapping, not a production FIR/polyphase resampler.
-- UDP streaming is paced by sample rate, but not yet a zero-copy ringbuffer pipeline.
-- Metrics are per receiver, aggregated across that receiver's 80-MHz and DDC streams.
+- UDP streaming uses a renderer-to-UDP ringbuffer pipeline with sample-rate pacing.
+- Metrics are available per receiver and per stream.
 - Noise, gain, frontend impairments, IQ imbalance, and high-performance SIMD kernels are not yet implemented.

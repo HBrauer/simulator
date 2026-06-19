@@ -100,10 +100,10 @@ int main(int argc, char **argv)
         receiver_metrics_init(&metrics[i]);
     }
 
-    size_t block_samples = 1024;
+    size_t block_samples = config.stream_block_samples;
     if (block_samples_arg != NULL) {
         block_samples = (size_t)strtoull(block_samples_arg, NULL, 10);
-        if (block_samples == 0 || block_samples > 4096) {
+        if (block_samples == 0 || block_samples > SIM_MAX_STREAM_BLOCK_SAMPLES) {
             fprintf(stderr, "invalid --stream-block-samples\n");
             return 6;
         }
