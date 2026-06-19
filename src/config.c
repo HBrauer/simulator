@@ -166,11 +166,42 @@ bool config_validate(const simulator_config_t *config, char *error, size_t error
         if (!receiver_validate(&config->receivers[i], error, error_size)) {
             return false;
         }
+        const receiver_config_t *receiver = &config->receivers[i];
+        uint16_t ports[1 + SIM_DDC_COUNT];
+        ports[0] = receiver->udp_80mhz_output.port;
+        for (size_t d = 0; d < SIM_DDC_COUNT; d++) {
+            ports[1 + d] = receiver->ddc[d].udp_output.port;
+        }
+        for (size_t p = 0; p < 1 + SIM_DDC_COUNT; p++) {
+            for (size_t q = p + 1; q < 1 + SIM_DDC_COUNT; q++) {
+                if (ports[p] == ports[q]) {
+                    snprintf(error, error_size, "duplicate_udp_port");
+                    return false;
+                }
+            }
+        }
         for (size_t j = i + 1; j < config->receiver_count; j++) {
-            if (config->receivers[i].id == config->receivers[j].id ||
-                config->receivers[i].rest_port == config->receivers[j].rest_port) {
+            if (config->receivers[i].id == config->receivers[j].id) {
                 snprintf(error, error_size, "duplicate_receiver");
                 return false;
+            }
+            if (config->receivers[i].rest_port == config->receivers[j].rest_port) {
+                snprintf(error, error_size, "duplicate_rest_port");
+                return false;
+            }
+            const receiver_config_t *other = &config->receivers[j];
+            uint16_t other_ports[1 + SIM_DDC_COUNT];
+            other_ports[0] = other->udp_80mhz_output.port;
+            for (size_t d = 0; d < SIM_DDC_COUNT; d++) {
+                other_ports[1 + d] = other->ddc[d].udp_output.port;
+            }
+            for (size_t p = 0; p < 1 + SIM_DDC_COUNT; p++) {
+                for (size_t q = 0; q < 1 + SIM_DDC_COUNT; q++) {
+                    if (ports[p] == other_ports[q]) {
+                        snprintf(error, error_size, "duplicate_udp_port");
+                        return false;
+                    }
+                }
             }
         }
     }
