@@ -138,6 +138,7 @@ int main(int argc, char **argv)
         .metrics = metrics,
         .block_samples = block_samples,
         .stream_cpu = config.stream_cpu,
+        .framed_udp = config.framed_udp,
     };
     if (!streamer_manager_start(&streamer, &streamer_config)) {
         fprintf(stderr, "failed to start UDP streamers\n");

@@ -14,6 +14,8 @@
 #include <time.h>
 #include <unistd.h>
 
+#define STREAM_FRAME_HEADER_BYTES 24U
+
 typedef enum {
     STREAM_KIND_80MHZ,
     STREAM_KIND_DDC
@@ -41,6 +43,7 @@ typedef struct {
     bool ringbuffer_initialized;
     bool ringbuffer_lock_initialized;
     int stream_cpu;
+    bool framed_udp;
 } stream_worker_t;
 
 struct streamer_manager {
@@ -92,6 +95,39 @@ static void apply_stream_affinity(int stream_cpu)
 #else
     (void)stream_cpu;
 #endif
+}
+
+static void write_le16(uint8_t *out, uint16_t value)
+{
+    out[0] = (uint8_t)(value & 0xffU);
+    out[1] = (uint8_t)((value >> 8U) & 0xffU);
+}
+
+static void write_le32(uint8_t *out, uint32_t value)
+{
+    for (size_t i = 0; i < 4; i++) {
+        out[i] = (uint8_t)((value >> (8U * i)) & 0xffU);
+    }
+}
+
+static void write_le64(uint8_t *out, uint64_t value)
+{
+    for (size_t i = 0; i < 8; i++) {
+        out[i] = (uint8_t)((value >> (8U * i)) & 0xffU);
+    }
+}
+
+static void write_frame_header(const stream_worker_t *worker, uint8_t *out, uint64_t scenario_time_ns)
+{
+    out[0] = 'S';
+    out[1] = 'D';
+    out[2] = 'R';
+    out[3] = '1';
+    write_le16(out + 4, 1U);
+    write_le16(out + 6, STREAM_FRAME_HEADER_BYTES);
+    write_le32(out + 8, (uint32_t)worker->packet_bytes);
+    write_le32(out + 12, worker->kind == STREAM_KIND_80MHZ ? UINT32_MAX : (uint32_t)worker->ddc_index);
+    write_le64(out + 16, scenario_time_ns);
 }
 
 static bool stream_enabled(const stream_worker_t *worker, const receiver_config_t *receiver, const ddc_config_t *ddc)
@@ -199,13 +235,16 @@ static void *stream_udp_thread_main(void *arg)
         return NULL;
     }
 
-    uint8_t *packet = calloc(1, worker->packet_bytes);
+    const size_t send_capacity = worker->framed_udp ? worker->packet_bytes + STREAM_FRAME_HEADER_BYTES : worker->packet_bytes;
+    uint8_t *packet = calloc(1, send_capacity);
     if (packet == NULL) {
         udp_output_close(&udp);
         return NULL;
     }
+    uint8_t *payload = worker->framed_udp ? packet + STREAM_FRAME_HEADER_BYTES : packet;
 
     while (atomic_load(worker->running)) {
+        const uint64_t scenario_time_ns = timebase_now_ns(worker->timebase);
         pthread_mutex_lock(worker->receiver_lock);
         receiver_snapshot = *worker->receiver;
         ddc_snapshot = receiver_snapshot.ddc[worker->ddc_index];
@@ -219,7 +258,7 @@ static void *stream_udp_thread_main(void *arg)
         bool got_packet = false;
         pthread_mutex_lock(&worker->ringbuffer_lock);
         if (ringbuffer_fill(&worker->ringbuffer) >= worker->packet_bytes) {
-            (void)ringbuffer_read(&worker->ringbuffer, packet, worker->packet_bytes);
+            (void)ringbuffer_read(&worker->ringbuffer, payload, worker->packet_bytes);
             got_packet = true;
         }
         pthread_mutex_unlock(&worker->ringbuffer_lock);
@@ -231,7 +270,11 @@ static void *stream_udp_thread_main(void *arg)
         }
 
         size_t sent = 0;
-        if (udp_output_send(&udp, packet, worker->packet_bytes, &sent)) {
+        if (worker->framed_udp) {
+            write_frame_header(worker, packet, scenario_time_ns);
+        }
+        const size_t send_bytes = worker->framed_udp ? worker->packet_bytes + STREAM_FRAME_HEADER_BYTES : worker->packet_bytes;
+        if (udp_output_send(&udp, packet, send_bytes, &sent)) {
             atomic_fetch_add(&worker->metrics->udp_packets_sent, 1);
             atomic_fetch_add(&worker->metrics->udp_bytes_sent, sent);
             atomic_fetch_add(&worker->metrics->samples_rendered, worker->block_samples);
@@ -316,6 +359,7 @@ bool streamer_manager_start(streamer_manager_t **manager, const streamer_config_
             .kind = STREAM_KIND_80MHZ,
             .block_samples = config->block_samples,
             .stream_cpu = config->stream_cpu,
+            .framed_udp = config->framed_udp,
         };
         if (!stream_worker_start(worker)) {
             streamer_manager_stop(m);
@@ -337,6 +381,7 @@ bool streamer_manager_start(streamer_manager_t **manager, const streamer_config_
                 .kind = STREAM_KIND_DDC,
                 .block_samples = config->block_samples,
                 .stream_cpu = config->stream_cpu,
+                .framed_udp = config->framed_udp,
             };
             if (!stream_worker_start(ddc_worker)) {
                 streamer_manager_stop(m);

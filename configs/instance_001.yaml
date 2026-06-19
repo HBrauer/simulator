@@ -4,6 +4,7 @@ scenario_file: "scenarios/test_scenario_001.json"
 log_path: "logs/instance_001.log"
 stream_block_samples: 1024
 stream_cpu: -1
+framed_udp: false
 receivers:
   - receiver_id: 0
     rest_bind_host: "127.0.0.1"

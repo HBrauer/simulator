@@ -42,6 +42,7 @@ START_TEST(loads_instance_config)
     ck_assert_uint_eq(config.receivers[0].ddc[3].udp_output.port, 50004);
     ck_assert_uint_eq(config.stream_block_samples, 1024);
     ck_assert_int_eq(config.stream_cpu, -1);
+    ck_assert(!config.framed_udp);
     ck_assert(config.receivers[0].stream_enabled);
     ck_assert(config.receivers[0].ddc[0].stream_enabled);
     ck_assert_double_eq_tol(config.receivers[0].output_scale, 1.0, 0.000001);

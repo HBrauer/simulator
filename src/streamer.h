@@ -21,6 +21,7 @@ typedef struct {
     receiver_metrics_t *metrics;
     size_t block_samples;
     int stream_cpu;
+    bool framed_udp;
 } streamer_config_t;
 
 bool streamer_manager_start(streamer_manager_t **manager, const streamer_config_t *config);

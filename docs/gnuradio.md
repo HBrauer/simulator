@@ -1,6 +1,6 @@
 # GNU Radio UDP Compatibility
 
-The simulator sends raw CI16 IQ over UDP. There is no packet header in the default mode.
+The simulator sends raw CI16 IQ over UDP by default. Set `framed_udp: true` only when a receiver needs a small simulator header before each payload.
 
 ## UDP Source Settings
 
@@ -57,3 +57,18 @@ For parallel simulator instances, use unique UDP port ranges per instance. The s
 - no timestamp.
 - no packet framing beyond UDP datagram boundaries.
 - packet loss detection must be external, using receiver-side counters or future framed mode.
+
+## Optional Framed Mode
+
+When `framed_udp: true`, each UDP datagram starts with a 24-byte little-endian header:
+
+| Offset | Size | Field |
+| --- | --- | --- |
+| 0 | 4 | Magic bytes `SDR1`. |
+| 4 | 2 | Header version, currently `1`. |
+| 6 | 2 | Header byte length, currently `24`. |
+| 8 | 4 | Raw CI16 payload byte length. |
+| 12 | 4 | Stream ID. `0xffffffff` means the 80-MHz stream; DDC streams use IDs `0..3`. |
+| 16 | 8 | Scenario time in nanoseconds. |
+
+The raw CI16 payload immediately follows the header and uses the same sample layout as raw mode.
