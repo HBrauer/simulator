@@ -3,6 +3,7 @@
 
 #include "sim_types.h"
 #include "metrics.h"
+#include "asset_cache.h"
 #include "timebase.h"
 
 #include <stdbool.h>
@@ -14,6 +15,7 @@ typedef struct streamer_manager streamer_manager_t;
 typedef struct {
     simulator_config_t *config;
     const scenario_t *scenario;
+    const asset_cache_t *asset_cache;
     const timebase_t *timebase;
     pthread_mutex_t *receiver_lock;
     receiver_metrics_t *metrics;

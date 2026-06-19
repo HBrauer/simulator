@@ -26,6 +26,7 @@ common_args = [
 add_project_arguments(common_args, language: 'c')
 
 sim_sources = files(
+  'src/asset_cache.c',
   'src/config.c',
   'src/iq_file_reader.c',
   'src/nco.c',
@@ -56,6 +57,7 @@ unit_tests = executable(
   'unit_tests',
   files(
     'tests/unit/test_config.c',
+    'tests/unit/test_asset_cache.c',
     'tests/unit/test_iq_file_reader.c',
     'tests/unit/test_renderer.c',
     'tests/unit/test_ringbuffer.c',

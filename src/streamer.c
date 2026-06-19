@@ -18,6 +18,7 @@ typedef enum {
 typedef struct {
     atomic_bool *running;
     const scenario_t *scenario;
+    const asset_cache_t *asset_cache;
     const timebase_t *timebase;
     receiver_config_t *receiver;
     receiver_metrics_t *metrics;
@@ -80,10 +81,10 @@ static void *stream_worker_main(void *arg)
         ddc_snapshot = receiver_snapshot.ddc[worker->ddc_index];
         pthread_mutex_unlock(worker->receiver_lock);
         if (worker->kind == STREAM_KIND_80MHZ) {
-            renderer_render_80mhz_block(worker->scenario, &receiver_snapshot, scenario_time_ns, buffer, worker->block_samples, &stats);
+            renderer_render_80mhz_block(worker->scenario, worker->asset_cache, &receiver_snapshot, scenario_time_ns, buffer, worker->block_samples, &stats);
         } else {
             if (receiver_ddc_in_window(&receiver_snapshot, &ddc_snapshot, scenario_time_ns)) {
-                renderer_render_ddc_block(worker->scenario, &ddc_snapshot, scenario_time_ns, buffer, worker->block_samples, &stats);
+                renderer_render_ddc_block(worker->scenario, worker->asset_cache, &ddc_snapshot, scenario_time_ns, buffer, worker->block_samples, &stats);
             } else {
                 memset(buffer, 0, worker->block_samples * sizeof(*buffer));
             }
@@ -121,6 +122,7 @@ bool streamer_manager_start(streamer_manager_t **manager, const streamer_config_
         *worker = (stream_worker_t){
             .running = &m->running,
             .scenario = config->scenario,
+            .asset_cache = config->asset_cache,
             .timebase = config->timebase,
             .receiver = receiver,
             .metrics = &config->metrics[i],
@@ -139,6 +141,7 @@ bool streamer_manager_start(streamer_manager_t **manager, const streamer_config_
             *ddc_worker = (stream_worker_t){
                 .running = &m->running,
                 .scenario = config->scenario,
+                .asset_cache = config->asset_cache,
                 .timebase = config->timebase,
                 .receiver = receiver,
                 .metrics = &config->metrics[i],

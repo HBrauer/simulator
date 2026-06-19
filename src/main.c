@@ -1,3 +1,4 @@
+#include "asset_cache.h"
 #include "config.h"
 #include "metrics.h"
 #include "renderer.h"
@@ -59,6 +60,11 @@ int main(int argc, char **argv)
         fprintf(stderr, "scenario error: %s\n", error);
         return 3;
     }
+    asset_cache_t asset_cache;
+    if (!asset_cache_load(&asset_cache, &scenario, error, sizeof(error))) {
+        fprintf(stderr, "asset cache error: %s\n", error);
+        return 4;
+    }
 
     timebase_t timebase;
     timebase_init(&timebase);
@@ -70,12 +76,14 @@ int main(int argc, char **argv)
         const size_t samples = (size_t)strtoull(once_arg, NULL, 10);
         iq_ci16_t *buffer = calloc(samples, sizeof(*buffer));
         if (buffer == NULL) {
+            asset_cache_free(&asset_cache);
             return 4;
         }
         render_stats_t stats;
-        renderer_render_80mhz_block(&scenario, &config.receivers[0], timebase_now_ns(&timebase), buffer, samples, &stats);
+        renderer_render_80mhz_block(&scenario, &asset_cache, &config.receivers[0], timebase_now_ns(&timebase), buffer, samples, &stats);
         fwrite(buffer, sizeof(*buffer), samples, stdout);
         free(buffer);
+        asset_cache_free(&asset_cache);
         return 0;
     }
 
@@ -114,6 +122,7 @@ int main(int argc, char **argv)
         if (!rest_server_start(&servers[i], &context)) {
             fprintf(stderr, "failed to start REST server for receiver %u\n", config.receivers[i].id);
             pthread_mutex_destroy(&receiver_lock);
+            asset_cache_free(&asset_cache);
             return 5;
         }
         printf("receiver %u REST http://%s:%u/api/v1\n", config.receivers[i].id, config.receivers[i].rest_bind_host, config.receivers[i].rest_port);
@@ -123,6 +132,7 @@ int main(int argc, char **argv)
     streamer_config_t streamer_config = {
         .config = &config,
         .scenario = &scenario,
+        .asset_cache = &asset_cache,
         .timebase = &timebase,
         .receiver_lock = &receiver_lock,
         .metrics = metrics,
@@ -134,6 +144,7 @@ int main(int argc, char **argv)
             rest_server_stop(servers[i]);
         }
         pthread_mutex_destroy(&receiver_lock);
+        asset_cache_free(&asset_cache);
         return 7;
     }
 
@@ -146,5 +157,6 @@ int main(int argc, char **argv)
         rest_server_stop(servers[i]);
     }
     pthread_mutex_destroy(&receiver_lock);
+    asset_cache_free(&asset_cache);
     return 0;
 }
