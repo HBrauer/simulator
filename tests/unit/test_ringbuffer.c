@@ -11,7 +11,9 @@ START_TEST(wraps_and_preserves_order)
     const uint8_t in2[] = {4, 5};
     uint8_t out[4] = {0};
     ck_assert_uint_eq(ringbuffer_write(&rb, in1, sizeof(in1)), 3);
+    ck_assert_uint_eq(ringbuffer_available(&rb), 1);
     ck_assert_uint_eq(ringbuffer_read(&rb, out, 2), 2);
+    ck_assert_uint_eq(ringbuffer_fill(&rb), 1);
     ck_assert_uint_eq(out[0], 1);
     ck_assert_uint_eq(out[1], 2);
     ck_assert_uint_eq(ringbuffer_write(&rb, in2, sizeof(in2)), 2);

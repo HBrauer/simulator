@@ -53,3 +53,8 @@ size_t ringbuffer_fill(const ringbuffer_t *rb)
 {
     return rb->fill;
 }
+
+size_t ringbuffer_available(const ringbuffer_t *rb)
+{
+    return rb->capacity - rb->fill;
+}

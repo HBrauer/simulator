@@ -16,8 +16,8 @@
 
 ## Runtime And Performance
 
-- [ ] Replace direct render-send loop with renderer-to-UDP ringbuffer pipeline.
-- [ ] Add per-stream underrun/overrun/drop counters.
+- [x] Replace direct render-send loop with renderer-to-UDP ringbuffer pipeline.
+- [x] Add per-stream underrun/overrun/drop counters.
 - [ ] Add configurable stream enable/disable switches to avoid rendering unused streams.
 - [ ] Add batch asset reads/cache memory limit handling for larger IQ files.
 - [ ] Add SIMD/VOLK or hand-vectorized hot loops for:

@@ -196,11 +196,17 @@ def test_runtime_rest_and_udp_stream(tmp_path):
         assert metrics["udp_packets_sent"] >= 1
         assert metrics["udp_bytes_sent"] >= 256 * 4
         assert metrics["udp_send_errors"] == 0
+        assert "ringbuffer_overruns" in metrics
+        assert "ringbuffer_underruns" in metrics
+        assert "samples_dropped" in metrics
         assert len(metrics["streams"]) == 5
         assert metrics["streams"][0]["stream_type"] == "iq_80mhz"
         assert metrics["streams"][0]["stream_id"] == -1
         assert metrics["streams"][0]["active"] is True
         assert metrics["streams"][0]["udp_packets_sent"] >= 1
+        assert "ringbuffer_overruns" in metrics["streams"][0]
+        assert "ringbuffer_underruns" in metrics["streams"][0]
+        assert "samples_dropped" in metrics["streams"][0]
         assert {stream["stream_id"] for stream in metrics["streams"][1:]} == {0, 1, 2, 3}
 
         expected = subprocess.check_output(

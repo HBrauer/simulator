@@ -128,14 +128,17 @@ static json_t *stream_metrics_json(const receiver_metrics_t *metrics)
     for (size_t i = 0; i < 1 + SIM_DDC_COUNT; i++) {
         const stream_metrics_t *stream = &metrics->streams[i];
         json_array_append_new(streams, json_pack(
-            "{s:s,s:i,s:b,s:I,s:I,s:I,s:I}",
+            "{s:s,s:i,s:b,s:I,s:I,s:I,s:I,s:I,s:I,s:I}",
             "stream_type", i == 0 ? "iq_80mhz" : "ddc",
             "stream_id", i == 0 ? -1 : (int)i - 1,
             "active", atomic_load(&stream->active),
             "samples_rendered", (json_int_t)atomic_load(&stream->samples_rendered),
             "udp_packets_sent", (json_int_t)atomic_load(&stream->udp_packets_sent),
             "udp_bytes_sent", (json_int_t)atomic_load(&stream->udp_bytes_sent),
-            "udp_send_errors", (json_int_t)atomic_load(&stream->udp_send_errors)
+            "udp_send_errors", (json_int_t)atomic_load(&stream->udp_send_errors),
+            "ringbuffer_overruns", (json_int_t)atomic_load(&stream->ringbuffer_overruns),
+            "ringbuffer_underruns", (json_int_t)atomic_load(&stream->ringbuffer_underruns),
+            "samples_dropped", (json_int_t)atomic_load(&stream->samples_dropped)
         ));
     }
     return streams;
@@ -197,12 +200,15 @@ static enum MHD_Result answer(void *cls, struct MHD_Connection *connection, cons
     }
     if (strcmp(method, "GET") == 0 && strcmp(url, "/api/v1/metrics") == 0) {
         json_t *response = json_pack(
-            "{s:I,s:I,s:I,s:I,s:I}",
+            "{s:I,s:I,s:I,s:I,s:I,s:I,s:I,s:I}",
             "samples_rendered", (json_int_t)atomic_load(&ctx->metrics->samples_rendered),
             "udp_packets_sent", (json_int_t)atomic_load(&ctx->metrics->udp_packets_sent),
             "udp_bytes_sent", (json_int_t)atomic_load(&ctx->metrics->udp_bytes_sent),
             "udp_send_errors", (json_int_t)atomic_load(&ctx->metrics->udp_send_errors),
-            "active_streams", (json_int_t)atomic_load(&ctx->metrics->active_streams)
+            "active_streams", (json_int_t)atomic_load(&ctx->metrics->active_streams),
+            "ringbuffer_overruns", (json_int_t)atomic_load(&ctx->metrics->ringbuffer_overruns),
+            "ringbuffer_underruns", (json_int_t)atomic_load(&ctx->metrics->ringbuffer_underruns),
+            "samples_dropped", (json_int_t)atomic_load(&ctx->metrics->samples_dropped)
         );
         json_object_set_new(response, "streams", stream_metrics_json(ctx->metrics));
         SEND_JSON_AND_FREE(MHD_HTTP_OK, response);
