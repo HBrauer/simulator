@@ -87,3 +87,8 @@ pytest = find_program('pytest', required: false)
 if pytest.found()
   test('integration', pytest, args: ['-q', 'tests/integration'], workdir: meson.project_source_root(), suite: 'integration', timeout: 30)
 endif
+
+clang_tidy_runner = find_program('scripts/run_clang_tidy.sh', required: false)
+if clang_tidy_runner.found()
+  run_target('clang-tidy', command: [clang_tidy_runner, meson.current_build_dir()])
+endif

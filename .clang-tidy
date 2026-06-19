@@ -1,0 +1,12 @@
+Checks: >
+  -*,
+  clang-analyzer-*,
+  -clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling,
+  bugprone-*,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-unsafe-functions,
+  performance-*,
+  portability-*
+WarningsAsErrors: ''
+HeaderFilterRegex: '^(src|tests)/'
+SystemHeaders: false

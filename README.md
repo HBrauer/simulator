@@ -77,6 +77,7 @@ cppcheck --enable=warning,style,performance,portability \
   --inline-suppr \
   --suppress=missingIncludeSystem \
   src tests/unit tests/benchmarks
+meson compile -C build clang-tidy
 ```
 
 Coverage report:

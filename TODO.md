@@ -47,7 +47,7 @@
 ## Tooling And Documentation
 
 - [x] Add coverage target/report.
-- [ ] Add clang-tidy configuration and target.
+- [x] Add clang-tidy configuration and target.
 - [ ] Add benchmark result logging format.
 - [ ] Add architecture diagram for threads/data flow.
 - [ ] Add config and scenario schema docs.
