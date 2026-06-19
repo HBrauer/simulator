@@ -80,6 +80,57 @@ static receiver_config_t fixed_center_receiver(void)
     };
 }
 
+static void setup_constant_signal(scenario_t *scenario, asset_cache_t *cache, iq_ci16_t *asset_samples, uint64_t signal_center_hz)
+{
+    memset(scenario, 0, sizeof(*scenario));
+    memset(cache, 0, sizeof(*cache));
+    scenario->schema_version = 1;
+    snprintf(scenario->scenario_id, sizeof(scenario->scenario_id), "%s", "unit_scan");
+    scenario->source_count = 1;
+    scenario->signal_count = 1;
+    for (size_t sample = 0; sample < 8; sample++) {
+        asset_samples[sample] = (iq_ci16_t){.i = 1000, .q = 0};
+    }
+
+    scenario_source_t *source = &scenario->sources[0];
+    snprintf(source->id, sizeof(source->id), "%s", "scan_src");
+    snprintf(source->source_type, sizeof(source->source_type), "%s", "iq_file");
+    snprintf(source->format, sizeof(source->format), "%s", "ci16");
+    snprintf(source->byte_order, sizeof(source->byte_order), "%s", "little_endian");
+    snprintf(source->iq_layout, sizeof(source->iq_layout), "%s", "interleaved_iq");
+    source->sample_rate_hz = 1000;
+    source->bandwidth_hz = 1000;
+    source->sample_count = 8;
+    source->nominal_level_dbfs = 0.0;
+
+    scenario_signal_t *signal = &scenario->signals[0];
+    snprintf(signal->signal_id, sizeof(signal->signal_id), "%s", "scan_sig");
+    snprintf(signal->source_reference, sizeof(signal->source_reference), "%s", "scan_src");
+    signal->center_frequency_hz = signal_center_hz;
+    signal->bandwidth_hz = 1000;
+    signal->power_dbm = -40.0;
+    signal->start_time_s = 0.0;
+    signal->repeat_interval_s = 1.0;
+
+    cache->asset_count = 1;
+    snprintf(cache->assets[0].source_id, sizeof(cache->assets[0].source_id), "%s", "scan_src");
+    cache->assets[0].sample_count = 8;
+    cache->assets[0].samples = asset_samples;
+}
+
+static receiver_config_t scanner_receiver(void)
+{
+    return (receiver_config_t){
+        .id = 0,
+        .frequency_start_hz = 9960000000ULL,
+        .frequency_stop_hz = 10060000000ULL,
+        .bandwidth_hz = SIM_RECEIVER_BANDWIDTH_HZ,
+        .sample_rate_hz = SIM_RECEIVER_SAMPLE_RATE_HZ,
+        .scan_rate_hz_per_s = 100000000000.0,
+        .output_scale = 1.0,
+    };
+}
+
 START_TEST(renders_nonzero_visible_signal)
 {
     simulator_config_t config;
@@ -197,6 +248,58 @@ START_TEST(renderer_clips_after_mixing_two_signals)
 }
 END_TEST
 
+START_TEST(scanner_moves_fixed_rf_signal_through_baseband)
+{
+    scenario_t scenario;
+    asset_cache_t cache;
+    iq_ci16_t asset_samples[8];
+    setup_constant_signal(&scenario, &cache, asset_samples, 9980000000ULL);
+
+    const receiver_config_t receiver = scanner_receiver();
+    iq_ci16_t positive_offset[4];
+    iq_ci16_t zero_offset[4];
+    iq_ci16_t negative_offset[4];
+    render_stats_t stats;
+
+    ck_assert(renderer_render_80mhz_block(&scenario, &cache, &receiver, 0, positive_offset, 4, &stats));
+    ck_assert_uint_eq(stats.active_signals, 1);
+    ck_assert(renderer_render_80mhz_block(&scenario, &cache, &receiver, 200000ULL, zero_offset, 4, &stats));
+    ck_assert_uint_eq(stats.active_signals, 1);
+    ck_assert(renderer_render_80mhz_block(&scenario, &cache, &receiver, 400000ULL, negative_offset, 4, &stats));
+    ck_assert_uint_eq(stats.active_signals, 1);
+
+    ck_assert_int_gt(positive_offset[1].q, 900);
+    ck_assert_int_eq(zero_offset[1].q, 0);
+    ck_assert_int_lt(negative_offset[1].q, -900);
+}
+END_TEST
+
+START_TEST(scanner_same_time_is_deterministic_across_instances)
+{
+    scenario_t scenario;
+    asset_cache_t cache;
+    iq_ci16_t asset_samples[8];
+    setup_constant_signal(&scenario, &cache, asset_samples, 9980000000ULL);
+
+    receiver_config_t receiver_a = scanner_receiver();
+    receiver_config_t receiver_b = scanner_receiver();
+    receiver_b.id = 7;
+    receiver_b.rest_port = 9100;
+    receiver_b.udp_80mhz_output.port = 55000;
+
+    iq_ci16_t out_a[8];
+    iq_ci16_t out_b[8];
+    render_stats_t stats_a;
+    render_stats_t stats_b;
+    ck_assert(renderer_render_80mhz_block(&scenario, &cache, &receiver_a, 400000ULL, out_a, 8, &stats_a));
+    ck_assert(renderer_render_80mhz_block(&scenario, &cache, &receiver_b, 400000ULL, out_b, 8, &stats_b));
+
+    ck_assert_uint_eq(stats_a.active_signals, 1);
+    ck_assert_uint_eq(stats_b.active_signals, 1);
+    ck_assert_mem_eq(out_a, out_b, sizeof(out_a));
+}
+END_TEST
+
 START_TEST(renders_ddc_nonzero_visible_signal)
 {
     scenario_t scenario;
@@ -232,6 +335,8 @@ Suite *renderer_suite(void)
     tcase_add_test(tc, renderer_clips_after_nominal_level_gain);
     tcase_add_test(tc, renderer_mixes_two_signals_without_clipping);
     tcase_add_test(tc, renderer_clips_after_mixing_two_signals);
+    tcase_add_test(tc, scanner_moves_fixed_rf_signal_through_baseband);
+    tcase_add_test(tc, scanner_same_time_is_deterministic_across_instances);
     tcase_add_test(tc, renders_ddc_nonzero_visible_signal);
     suite_add_tcase(suite, tc);
     return suite;

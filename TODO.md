@@ -8,9 +8,9 @@
   - [ ] optional liquid-dsp backend.
   - [ ] golden tests against Python/numpy.
 - [ ] Add explicit receiver/DDC passband filtering.
-- [ ] Add scanner swept-signal golden tests:
-  - [ ] fixed RF signal moves through 80-MHz baseband over scenario time.
-  - [ ] same scenario time across instances gives identical baseband offset.
+- [x] Add scanner swept-signal golden tests:
+  - [x] fixed RF signal moves through 80-MHz baseband over scenario time.
+  - [x] same scenario time across instances gives identical baseband offset.
 - [x] Add multi-signal mixing tests with clipping and non-clipping cases.
 - [x] Add scenario validation for duplicate IDs and missing source references with exact error codes.
 
