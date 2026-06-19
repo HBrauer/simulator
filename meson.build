@@ -81,7 +81,9 @@ renderer_benchmark = executable(
   include_directories: include_directories('src')
 )
 
-benchmark('renderer_80mhz_scalar', renderer_benchmark, args: ['1000', '4096'], workdir: meson.project_source_root(), timeout: 60)
+benchmark('renderer_80mhz_scalar_1_receiver', renderer_benchmark, args: ['1000', '4096', '--receivers', '1'], workdir: meson.project_source_root(), timeout: 60)
+benchmark('renderer_80mhz_scalar_4_receivers', renderer_benchmark, args: ['1000', '4096', '--receivers', '4'], workdir: meson.project_source_root(), timeout: 60)
+benchmark('renderer_80mhz_scalar_12_receivers', renderer_benchmark, args: ['1000', '4096', '--receivers', '12'], workdir: meson.project_source_root(), timeout: 60)
 
 pytest = find_program('pytest', required: false)
 if pytest.found()

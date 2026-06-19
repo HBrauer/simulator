@@ -26,7 +26,7 @@
   - [ ] gain/clipping.
   - [ ] summation.
 - [ ] Add CPU affinity/thread configuration from YAML.
-- [ ] Add 1, 4, and 12 receiver stress benchmarks.
+- [x] Add 1, 4, and 12 receiver stress benchmarks.
 - [ ] Add long-running soak test.
 
 ## REST/API
