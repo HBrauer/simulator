@@ -1,8 +1,10 @@
 #include "rest_server.h"
 #include "receiver.h"
 
+#include <arpa/inet.h>
 #include <jansson.h>
 #include <microhttpd.h>
+#include <netinet/in.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -12,6 +14,7 @@
 struct rest_server {
     struct MHD_Daemon *daemon;
     rest_context_t context;
+    struct sockaddr_in bind_addr;
     time_t started_at;
 };
 
@@ -244,7 +247,23 @@ bool rest_server_start(rest_server_t **server, const rest_context_t *context)
     }
     s->context = *context;
     s->started_at = time(NULL);
-    s->daemon = MHD_start_daemon(MHD_USE_SELECT_INTERNALLY, context->receiver->rest_port, NULL, NULL, answer, s, MHD_OPTION_END);
+    memset(&s->bind_addr, 0, sizeof(s->bind_addr));
+    s->bind_addr.sin_family = AF_INET;
+    s->bind_addr.sin_port = htons(context->receiver->rest_port);
+    if (inet_pton(AF_INET, context->receiver->rest_bind_host, &s->bind_addr.sin_addr) != 1) {
+        free(s);
+        return false;
+    }
+    s->daemon = MHD_start_daemon(
+        MHD_USE_SELECT_INTERNALLY,
+        context->receiver->rest_port,
+        NULL,
+        NULL,
+        answer,
+        s,
+        MHD_OPTION_SOCK_ADDR,
+        (struct sockaddr *)&s->bind_addr,
+        MHD_OPTION_END);
     if (s->daemon == NULL) {
         free(s);
         return false;
