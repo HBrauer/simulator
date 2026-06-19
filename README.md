@@ -100,9 +100,10 @@ meson test -C build-sanitize
 
 ```sh
 build/renderer_benchmark 1000 4096
+build/renderer_benchmark 1000 4096 --json build/renderer_benchmark.json
 ```
 
-The benchmark reports scalar 80-MHz renderer throughput in samples per second. It is intended for comparing renderer changes on the same machine, not as a final full-system throughput claim.
+The benchmark reports scalar 80-MHz renderer throughput in samples per second. The optional JSON report records `benchmark`, `blocks`, `samples_per_block`, `total_samples`, `seconds`, and `samples_per_second`. It is intended for comparing renderer changes on the same machine, not as a final full-system throughput claim.
 
 ## Current Limits
 

@@ -48,7 +48,7 @@
 
 - [x] Add coverage target/report.
 - [x] Add clang-tidy configuration and target.
-- [ ] Add benchmark result logging format.
+- [x] Add benchmark result logging format.
 - [ ] Add architecture diagram for threads/data flow.
 - [ ] Add config and scenario schema docs.
 - [ ] Add release checklist.
