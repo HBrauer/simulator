@@ -5,6 +5,12 @@
 #include "test_suites.h"
 
 #include <check.h>
+#include <math.h>
+
+static int16_t interpolate_i16(int16_t a, int16_t b, double frac)
+{
+    return (int16_t)lrint((double)a + frac * ((double)b - (double)a));
+}
 
 START_TEST(renders_nonzero_visible_signal)
 {
@@ -27,7 +33,7 @@ START_TEST(renders_nonzero_visible_signal)
 }
 END_TEST
 
-START_TEST(renderer_80mhz_maps_24576_source_to_98304_output)
+START_TEST(renderer_80mhz_linearly_interpolates_24576_source_to_98304_output)
 {
     simulator_config_t config;
     scenario_t scenario;
@@ -43,10 +49,15 @@ START_TEST(renderer_80mhz_maps_24576_source_to_98304_output)
     iq_ci16_t out[8];
     render_stats_t stats;
     ck_assert(renderer_render_80mhz_block(&scenario, &cache, &config.receivers[0], 450000ULL, out, 8, &stats));
-    ck_assert_int_eq(out[0].i, out[1].i);
-    ck_assert_int_eq(out[1].i, out[2].i);
-    ck_assert_int_eq(out[2].i, out[3].i);
-    ck_assert_int_ne(out[3].i, out[4].i);
+    const cached_asset_t *asset = asset_cache_find(&cache, "asset_fsk_001");
+    ck_assert_ptr_nonnull(asset);
+    const size_t offset = 11059;
+    ck_assert_int_eq(out[0].i, asset->samples[offset].i);
+    ck_assert_int_eq(out[0].q, asset->samples[offset].q);
+    ck_assert_int_eq(out[1].i, interpolate_i16(asset->samples[offset].i, asset->samples[offset + 1].i, 0.25));
+    ck_assert_int_eq(out[2].i, interpolate_i16(asset->samples[offset].i, asset->samples[offset + 1].i, 0.50));
+    ck_assert_int_eq(out[3].i, interpolate_i16(asset->samples[offset].i, asset->samples[offset + 1].i, 0.75));
+    ck_assert_int_eq(out[4].i, asset->samples[offset + 1].i);
     asset_cache_free(&cache);
 }
 END_TEST
@@ -81,7 +92,7 @@ Suite *renderer_suite(void)
     Suite *suite = suite_create("renderer");
     TCase *tc = tcase_create("core");
     tcase_add_test(tc, renders_nonzero_visible_signal);
-    tcase_add_test(tc, renderer_80mhz_maps_24576_source_to_98304_output);
+    tcase_add_test(tc, renderer_80mhz_linearly_interpolates_24576_source_to_98304_output);
     tcase_add_test(tc, renders_ddc_nonzero_visible_signal);
     suite_add_tcase(suite, tc);
     return suite;

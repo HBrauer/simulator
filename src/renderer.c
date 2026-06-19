@@ -45,7 +45,7 @@ static bool renderer_render_window_block(
         }
 
         const double source_per_output = (double)source->sample_rate_hz / (double)output_sample_rate_hz;
-        const uint64_t needed_source_samples = (uint64_t)ceil((double)count * source_per_output) + 1ULL;
+        const uint64_t needed_source_samples = (uint64_t)ceil((double)(count > 0 ? count - 1 : 0) * source_per_output) + 2ULL;
         if (needed_source_samples > 4096ULL) {
             continue;
         }
@@ -61,12 +61,19 @@ static bool renderer_render_window_block(
         double osc_c = 1.0;
         double osc_s = 0.0;
         for (size_t i = 0; i < count; i++) {
-            const size_t src_index = (size_t)floor((double)i * source_per_output);
+            const double source_position = (double)i * source_per_output;
+            const size_t src_index = (size_t)floor(source_position);
+            const double frac = source_position - (double)src_index;
             if (src_index >= read_count) {
                 break;
             }
-            const double ii = (double)source_samples[src_index].i;
-            const double qq = (double)source_samples[src_index].q;
+            const size_t next_index = src_index + 1 < read_count ? src_index + 1 : src_index;
+            const double i0 = (double)source_samples[src_index].i;
+            const double q0 = (double)source_samples[src_index].q;
+            const double i1 = (double)source_samples[next_index].i;
+            const double q1 = (double)source_samples[next_index].q;
+            const double ii = i0 + frac * (i1 - i0);
+            const double qq = q0 + frac * (q1 - q0);
             out[i].i = sim_clip_i16((double)out[i].i + (ii * osc_c - qq * osc_s));
             out[i].q = sim_clip_i16((double)out[i].q + (ii * osc_s + qq * osc_c));
             const double next_c = osc_c * step_c - osc_s * step_s;
