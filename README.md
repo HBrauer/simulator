@@ -105,6 +105,13 @@ build/renderer_benchmark 1000 4096 --json build/renderer_benchmark.json
 
 The benchmark reports scalar 80-MHz renderer throughput in samples per second. The optional JSON report records `benchmark`, `blocks`, `samples_per_block`, `total_samples`, `seconds`, and `samples_per_second`. It is intended for comparing renderer changes on the same machine, not as a final full-system throughput claim.
 
+## Documentation
+
+- [Architecture](docs/architecture.md)
+- [Config and scenario schemas](docs/schemas.md)
+- [GNU Radio UDP compatibility](docs/gnuradio.md)
+- [Release checklist](docs/release_checklist.md)
+
 ## Current Limits
 
 - DSP path is scalar and correctness-first.

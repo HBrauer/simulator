@@ -39,7 +39,7 @@
 
 ## UDP And Interop
 
-- [ ] Add GNU Radio compatibility notes with exact UDP Source settings.
+- [x] Add GNU Radio compatibility notes with exact UDP Source settings.
 - [x] Add optional packet-size configuration.
 - [x] Add packet pacing tests with tolerance.
 - [ ] Add optional framed/timestamped mode as future extension, keeping raw mode default.
@@ -49,6 +49,6 @@
 - [x] Add coverage target/report.
 - [x] Add clang-tidy configuration and target.
 - [x] Add benchmark result logging format.
-- [ ] Add architecture diagram for threads/data flow.
-- [ ] Add config and scenario schema docs.
-- [ ] Add release checklist.
+- [x] Add architecture diagram for threads/data flow.
+- [x] Add config and scenario schema docs.
+- [x] Add release checklist.
