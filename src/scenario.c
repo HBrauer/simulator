@@ -96,11 +96,13 @@ bool scenario_load_json(const char *path, scenario_t *scenario, char *error, siz
             !get_json_string(src, "iq_layout", out->iq_layout, sizeof(out->iq_layout)) ||
             !get_json_u32(src, "sample_rate_hz", &out->sample_rate_hz) ||
             !get_json_u32(src, "bandwidth_hz", &out->bandwidth_hz) ||
-            !get_json_u64(src, "sample_count", &out->sample_count) ||
             !get_json_double(src, "nominal_level_dbfs", &out->nominal_level_dbfs)) {
             json_decref(root);
             snprintf(error, error_size, "source_invalid");
             return false;
+        }
+        if (!get_json_u64(src, "sample_count", &out->sample_count)) {
+            out->sample_count = 0;
         }
         out->center_frequency_hz = json_integer_value(json_object_get(src, "center_frequency_hz"));
     }
@@ -136,14 +138,14 @@ const scenario_source_t *scenario_find_source(const scenario_t *scenario, const 
     return NULL;
 }
 
-bool scenario_validate(const scenario_t *scenario, const char *base_dir, char *error, size_t error_size)
+bool scenario_validate(scenario_t *scenario, const char *base_dir, char *error, size_t error_size)
 {
     (void)base_dir;
     for (size_t i = 0; i < scenario->source_count; i++) {
-        const scenario_source_t *source = &scenario->sources[i];
+        scenario_source_t *source = &scenario->sources[i];
         if (strcmp(source->source_type, "iq_file") != 0 || strcmp(source->format, "ci16") != 0 ||
             strcmp(source->byte_order, "little_endian") != 0 || strcmp(source->iq_layout, "interleaved_iq") != 0 ||
-            source->sample_count == 0 || source->sample_rate_hz == 0) {
+            source->sample_rate_hz == 0) {
             snprintf(error, error_size, "source_unsupported");
             return false;
         }
@@ -151,6 +153,7 @@ bool scenario_validate(const scenario_t *scenario, const char *base_dir, char *e
         if (!iq_file_reader_open(&reader, source->file, source->sample_count, error, error_size)) {
             return false;
         }
+        source->sample_count = reader.sample_count;
         iq_file_reader_close(&reader);
     }
     for (size_t i = 0; i < scenario->signal_count; i++) {
