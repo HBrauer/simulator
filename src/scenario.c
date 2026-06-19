@@ -143,6 +143,12 @@ bool scenario_validate(scenario_t *scenario, const char *base_dir, char *error, 
     (void)base_dir;
     for (size_t i = 0; i < scenario->source_count; i++) {
         scenario_source_t *source = &scenario->sources[i];
+        for (size_t j = i + 1; j < scenario->source_count; j++) {
+            if (strcmp(source->id, scenario->sources[j].id) == 0) {
+                snprintf(error, error_size, "duplicate_source_id");
+                return false;
+            }
+        }
         if (strcmp(source->source_type, "iq_file") != 0 || strcmp(source->format, "ci16") != 0 ||
             strcmp(source->byte_order, "little_endian") != 0 || strcmp(source->iq_layout, "interleaved_iq") != 0 ||
             source->sample_rate_hz == 0) {
@@ -158,10 +164,16 @@ bool scenario_validate(scenario_t *scenario, const char *base_dir, char *error, 
     }
     for (size_t i = 0; i < scenario->signal_count; i++) {
         const scenario_signal_t *signal = &scenario->signals[i];
+        for (size_t j = i + 1; j < scenario->signal_count; j++) {
+            if (strcmp(signal->signal_id, scenario->signals[j].signal_id) == 0) {
+                snprintf(error, error_size, "duplicate_signal_id");
+                return false;
+            }
+        }
         const scenario_source_t *source = scenario_find_source(scenario, signal->source_reference);
         if (source == NULL || signal->center_frequency_hz > SIM_MAX_RF_HZ || signal->start_time_s < 0.0 ||
             signal->start_time_s >= 86400.0 || signal->repeat_interval_s <= 0.0) {
-            snprintf(error, error_size, "signal_invalid");
+            snprintf(error, error_size, source == NULL ? "missing_source_reference" : "signal_invalid");
             return false;
         }
         const double duration = (double)source->sample_count / (double)source->sample_rate_hz;
