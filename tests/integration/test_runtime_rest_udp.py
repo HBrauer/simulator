@@ -214,6 +214,21 @@ def test_runtime_rest_and_udp_stream(tmp_path):
         assert packet == expected
 
         code, error = _request_json_error(
+            f"http://127.0.0.1:{rest_port}/api/v1/output-scale",
+            {"output_scale": 0},
+        )
+        assert code == 400
+        assert error["error"]["code"] == "invalid_output_scale"
+
+        code, scaled = _request_json(
+            f"http://127.0.0.1:{rest_port}/api/v1/output-scale",
+            {"output_scale": 0.5},
+        )
+        assert code == 200
+        assert scaled["output_scale"] == 0.5
+        assert all(ddc["output_scale"] == 0.5 for ddc in scaled["ddc"])
+
+        code, error = _request_json_error(
             f"http://127.0.0.1:{rest_port}/api/v1/frequency-range",
             {"frequency_start_hz": 1000},
         )
@@ -246,14 +261,22 @@ def test_runtime_rest_and_udp_stream(tmp_path):
         assert code == 400
         assert error["error"]["code"] == "invalid_request"
 
+        code, error = _request_json_error(
+            f"http://127.0.0.1:{rest_port}/api/v1/ddc/0/configure",
+            {"output_scale": -1.0},
+        )
+        assert code == 400
+        assert error["error"]["code"] == "invalid_output_scale"
+
         code, ddc_updated = _request_json(
             f"http://127.0.0.1:{rest_port}/api/v1/ddc/0/configure",
-            {"center_frequency_hz": 10005000001},
+            {"center_frequency_hz": 10005000001, "output_scale": 0.25},
         )
         assert code == 200
         assert ddc_updated["status"] == "ok"
         ddc_status = _wait_json(f"http://127.0.0.1:{rest_port}/api/v1/ddc/0/status")
         assert ddc_status["center_frequency_hz"] == 10005000001
+        assert ddc_status["output_scale"] == 0.25
         assert ddc_status["in_receiver_window"] is True
 
         code, ddc_updated = _request_json(

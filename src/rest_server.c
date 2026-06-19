@@ -74,24 +74,34 @@ static bool json_get_optional_double(json_t *object, const char *key, double def
     return true;
 }
 
+static bool json_get_double(json_t *object, const char *key, double *out)
+{
+    json_t *value = json_object_get(object, key);
+    if (!json_is_number(value)) {
+        return false;
+    }
+    *out = json_number_value(value);
+    return true;
+}
+
 static json_t *receiver_json(const receiver_config_t *r, uint64_t scenario_time_ns, bool include_ddc)
 {
     const char *mode = receiver_effective_mode(r) == RECEIVER_MODE_FIXED ? "fixed" : "scan";
     json_t *root = json_pack(
-        "{s:i,s:s,s:I,s:I,s:I,s:f,s:I,s:s,s:{s:{s:i}},s:b}",
+        "{s:i,s:s,s:I,s:I,s:I,s:f,s:f,s:I,s:s,s:{s:{s:i}},s:b}",
         "receiver_id", (int)r->id,
         "effective_mode", mode,
         "frequency_start_hz", (json_int_t)r->frequency_start_hz,
         "frequency_stop_hz", (json_int_t)r->frequency_stop_hz,
         "center_frequency_hz", (json_int_t)receiver_center_frequency_hz(r, scenario_time_ns),
         "scan_rate_hz_per_s", r->scan_rate_hz_per_s,
+        "output_scale", r->output_scale,
         "bandwidth_hz", (json_int_t)r->bandwidth_hz,
         "udp_output_host", r->udp_output_host,
         "udp_outputs", "iq_80mhz", "port", (int)r->udp_80mhz_output.port,
         "streams_active", 1
     );
     if (include_ddc) {
-        json_object_set_new(root, "output_scale", json_real(r->output_scale));
         json_t *arr = json_array();
         for (size_t i = 0; i < SIM_DDC_COUNT; i++) {
             json_array_append_new(arr, json_pack(
@@ -210,6 +220,30 @@ static enum MHD_Result answer(void *cls, struct MHD_Connection *connection, cons
         pthread_mutex_unlock(ctx->receiver_lock);
         SEND_JSON_AND_FREE(MHD_HTTP_OK, response);
     }
+    if (strcmp(method, "POST") == 0 && strcmp(url, "/api/v1/output-scale") == 0) {
+        json_error_t json_error;
+        json_t *request = json_loads(request_body->data, 0, &json_error);
+        if (request == NULL) {
+            SEND_JSON_AND_FREE(MHD_HTTP_BAD_REQUEST, error_body("invalid_json", json_error.text));
+        }
+        double output_scale = 0.0;
+        if (!json_get_double(request, "output_scale", &output_scale)) {
+            json_decref(request);
+            SEND_JSON_AND_FREE(MHD_HTTP_BAD_REQUEST, error_body("invalid_request", "output_scale must be a positive number"));
+        }
+        json_decref(request);
+        if (output_scale <= 0.0) {
+            SEND_JSON_AND_FREE(MHD_HTTP_BAD_REQUEST, error_body("invalid_output_scale", "output_scale must be greater than zero"));
+        }
+        pthread_mutex_lock(ctx->receiver_lock);
+        r->output_scale = output_scale;
+        for (size_t i = 0; i < SIM_DDC_COUNT; i++) {
+            r->ddc[i].output_scale = output_scale;
+        }
+        json_t *response = receiver_json(r, scenario_time_ns, true);
+        pthread_mutex_unlock(ctx->receiver_lock);
+        SEND_JSON_AND_FREE(MHD_HTTP_OK, response);
+    }
     unsigned ddc_id = 99;
     if (sscanf(url, "/api/v1/ddc/%u/status", &ddc_id) == 1 && strcmp(method, "GET") == 0) {
         if (ddc_id >= SIM_DDC_COUNT) {
@@ -231,17 +265,28 @@ static enum MHD_Result answer(void *cls, struct MHD_Connection *connection, cons
         if (request == NULL) {
             SEND_JSON_AND_FREE(MHD_HTTP_BAD_REQUEST, error_body("invalid_json", json_error.text));
         }
-        uint64_t center = 0;
-        if (!json_get_u64(request, "center_frequency_hz", &center)) {
+        pthread_mutex_lock(ctx->receiver_lock);
+        uint64_t center = r->ddc[ddc_id].center_frequency_hz;
+        double output_scale = r->ddc[ddc_id].output_scale;
+        pthread_mutex_unlock(ctx->receiver_lock);
+        const bool has_center = json_object_get(request, "center_frequency_hz") != NULL;
+        const bool has_scale = json_object_get(request, "output_scale") != NULL;
+        if ((!has_center && !has_scale) ||
+            (has_center && !json_get_u64(request, "center_frequency_hz", &center)) ||
+            (has_scale && !json_get_double(request, "output_scale", &output_scale))) {
             json_decref(request);
-            SEND_JSON_AND_FREE(MHD_HTTP_BAD_REQUEST, error_body("invalid_request", "center_frequency_hz must be an unsigned integer Hz value"));
+            SEND_JSON_AND_FREE(MHD_HTTP_BAD_REQUEST, error_body("invalid_request", "center_frequency_hz must be an unsigned integer Hz value and output_scale must be a positive number"));
         }
         json_decref(request);
         if (center > SIM_MAX_RF_HZ) {
             SEND_JSON_AND_FREE(MHD_HTTP_BAD_REQUEST, error_body("invalid_frequency", "center_frequency_hz must be between 0 and 40000000000"));
         }
+        if (output_scale <= 0.0) {
+            SEND_JSON_AND_FREE(MHD_HTTP_BAD_REQUEST, error_body("invalid_output_scale", "output_scale must be greater than zero"));
+        }
         pthread_mutex_lock(ctx->receiver_lock);
         r->ddc[ddc_id].center_frequency_hz = center;
+        r->ddc[ddc_id].output_scale = output_scale;
         pthread_mutex_unlock(ctx->receiver_lock);
         SEND_JSON_AND_FREE(MHD_HTTP_OK, json_pack("{s:s}", "status", "ok"));
     }
