@@ -157,11 +157,12 @@ static enum MHD_Result answer(void *cls, struct MHD_Connection *connection, cons
     }
     if (strcmp(method, "GET") == 0 && strcmp(url, "/api/v1/metrics") == 0) {
         SEND_JSON_AND_FREE(MHD_HTTP_OK, json_pack(
-            "{s:I,s:I,s:I,s:I}",
+            "{s:I,s:I,s:I,s:I,s:I}",
             "samples_rendered", (json_int_t)atomic_load(&ctx->metrics->samples_rendered),
             "udp_packets_sent", (json_int_t)atomic_load(&ctx->metrics->udp_packets_sent),
             "udp_bytes_sent", (json_int_t)atomic_load(&ctx->metrics->udp_bytes_sent),
-            "udp_send_errors", (json_int_t)atomic_load(&ctx->metrics->udp_send_errors)
+            "udp_send_errors", (json_int_t)atomic_load(&ctx->metrics->udp_send_errors),
+            "active_streams", (json_int_t)atomic_load(&ctx->metrics->active_streams)
         ));
     }
     if (strcmp(method, "GET") == 0 && strcmp(url, "/api/v1/config") == 0) {

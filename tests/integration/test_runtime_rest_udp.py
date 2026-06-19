@@ -191,6 +191,7 @@ def test_runtime_rest_and_udp_stream(tmp_path):
         assert len(packet) == 256 * 4
         assert any(byte != 0 for byte in packet)
         metrics = _wait_json(f"http://127.0.0.1:{rest_port}/api/v1/metrics")
+        assert metrics["active_streams"] == 5
         assert metrics["samples_rendered"] >= 256
         assert metrics["udp_packets_sent"] >= 1
         assert metrics["udp_bytes_sent"] >= 256 * 4

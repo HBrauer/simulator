@@ -135,6 +135,7 @@ bool streamer_manager_start(streamer_manager_t **manager, const streamer_config_
             return false;
         }
         worker->started = true;
+        atomic_fetch_add(&worker->metrics->active_streams, 1);
 
         for (size_t d = 0; d < SIM_DDC_COUNT; d++) {
             stream_worker_t *ddc_worker = &m->workers[m->worker_count++];
@@ -155,6 +156,7 @@ bool streamer_manager_start(streamer_manager_t **manager, const streamer_config_
                 return false;
             }
             ddc_worker->started = true;
+            atomic_fetch_add(&ddc_worker->metrics->active_streams, 1);
         }
     }
 
@@ -171,6 +173,7 @@ void streamer_manager_stop(streamer_manager_t *manager)
     for (size_t i = 0; i < manager->worker_count; i++) {
         if (manager->workers[i].started) {
             pthread_join(manager->workers[i].thread, NULL);
+            atomic_fetch_sub(&manager->workers[i].metrics->active_streams, 1);
         }
     }
     free(manager);
