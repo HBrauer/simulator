@@ -155,6 +155,15 @@ static enum MHD_Result answer(void *cls, struct MHD_Connection *connection, cons
             "signal_count", (int)ctx->scenario->signal_count
         ));
     }
+    if (strcmp(method, "GET") == 0 && strcmp(url, "/api/v1/metrics") == 0) {
+        SEND_JSON_AND_FREE(MHD_HTTP_OK, json_pack(
+            "{s:I,s:I,s:I,s:I}",
+            "samples_rendered", (json_int_t)atomic_load(&ctx->metrics->samples_rendered),
+            "udp_packets_sent", (json_int_t)atomic_load(&ctx->metrics->udp_packets_sent),
+            "udp_bytes_sent", (json_int_t)atomic_load(&ctx->metrics->udp_bytes_sent),
+            "udp_send_errors", (json_int_t)atomic_load(&ctx->metrics->udp_send_errors)
+        ));
+    }
     if (strcmp(method, "GET") == 0 && strcmp(url, "/api/v1/config") == 0) {
         pthread_mutex_lock(ctx->receiver_lock);
         json_t *response = receiver_json(r, scenario_time_ns, true);

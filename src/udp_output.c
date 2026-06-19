@@ -12,16 +12,10 @@ bool udp_output_open(udp_output_t *output, const char *host, uint16_t port)
     if (output->fd < 0) {
         return false;
     }
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(port);
-    if (inet_pton(AF_INET, host, &addr.sin_addr) != 1) {
-        close(output->fd);
-        output->fd = -1;
-        return false;
-    }
-    if (connect(output->fd, (const struct sockaddr *)&addr, sizeof(addr)) != 0) {
+    memset(&output->addr, 0, sizeof(output->addr));
+    output->addr.sin_family = AF_INET;
+    output->addr.sin_port = htons(port);
+    if (inet_pton(AF_INET, host, &output->addr.sin_addr) != 1) {
         close(output->fd);
         output->fd = -1;
         return false;
@@ -39,7 +33,7 @@ void udp_output_close(udp_output_t *output)
 
 bool udp_output_send(udp_output_t *output, const void *data, size_t bytes, size_t *sent_bytes)
 {
-    const ssize_t n = send(output->fd, data, bytes, 0);
+    const ssize_t n = sendto(output->fd, data, bytes, 0, (const struct sockaddr *)&output->addr, sizeof(output->addr));
     if (n < 0) {
         *sent_bytes = 0;
         return false;

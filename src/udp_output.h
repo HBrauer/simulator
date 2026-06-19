@@ -2,11 +2,13 @@
 #define UDP_OUTPUT_H
 
 #include <stdbool.h>
+#include <netinet/in.h>
 #include <stddef.h>
 #include <stdint.h>
 
 typedef struct {
     int fd;
+    struct sockaddr_in addr;
 } udp_output_t;
 
 bool udp_output_open(udp_output_t *output, const char *host, uint16_t port);

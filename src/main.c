@@ -1,4 +1,5 @@
 #include "config.h"
+#include "metrics.h"
 #include "renderer.h"
 #include "rest_server.h"
 #include "scenario.h"
@@ -86,6 +87,10 @@ int main(int argc, char **argv)
         fprintf(stderr, "failed to initialize receiver lock\n");
         return 6;
     }
+    receiver_metrics_t metrics[SIM_MAX_RECEIVERS];
+    for (size_t i = 0; i < SIM_MAX_RECEIVERS; i++) {
+        receiver_metrics_init(&metrics[i]);
+    }
 
     size_t block_samples = 1024;
     if (block_samples_arg != NULL) {
@@ -103,6 +108,7 @@ int main(int argc, char **argv)
             .scenario = &scenario,
             .timebase = &timebase,
             .receiver_lock = &receiver_lock,
+            .metrics = &metrics[i],
             .version = "0.1.0",
         };
         if (!rest_server_start(&servers[i], &context)) {
@@ -119,6 +125,7 @@ int main(int argc, char **argv)
         .scenario = &scenario,
         .timebase = &timebase,
         .receiver_lock = &receiver_lock,
+        .metrics = metrics,
         .block_samples = block_samples,
     };
     if (!streamer_manager_start(&streamer, &streamer_config)) {

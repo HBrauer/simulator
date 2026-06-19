@@ -2,6 +2,7 @@
 #define STREAMER_H
 
 #include "sim_types.h"
+#include "metrics.h"
 #include "timebase.h"
 
 #include <stdbool.h>
@@ -15,6 +16,7 @@ typedef struct {
     const scenario_t *scenario;
     const timebase_t *timebase;
     pthread_mutex_t *receiver_lock;
+    receiver_metrics_t *metrics;
     size_t block_samples;
 } streamer_config_t;
 

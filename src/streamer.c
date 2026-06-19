@@ -20,6 +20,7 @@ typedef struct {
     const scenario_t *scenario;
     const timebase_t *timebase;
     receiver_config_t *receiver;
+    receiver_metrics_t *metrics;
     size_t ddc_index;
     pthread_mutex_t *receiver_lock;
     stream_kind_t kind;
@@ -88,7 +89,13 @@ static void *stream_worker_main(void *arg)
             }
         }
         size_t sent = 0;
-        (void)udp_output_send(&udp, buffer, worker->block_samples * sizeof(*buffer), &sent);
+        if (udp_output_send(&udp, buffer, worker->block_samples * sizeof(*buffer), &sent)) {
+            atomic_fetch_add(&worker->metrics->udp_packets_sent, 1);
+            atomic_fetch_add(&worker->metrics->udp_bytes_sent, sent);
+            atomic_fetch_add(&worker->metrics->samples_rendered, worker->block_samples);
+        } else {
+            atomic_fetch_add(&worker->metrics->udp_send_errors, 1);
+        }
         const uint32_t sample_rate = worker->kind == STREAM_KIND_80MHZ
             ? receiver_snapshot.sample_rate_hz
             : ddc_snapshot.sample_rate_hz;
@@ -116,6 +123,7 @@ bool streamer_manager_start(streamer_manager_t **manager, const streamer_config_
             .scenario = config->scenario,
             .timebase = config->timebase,
             .receiver = receiver,
+            .metrics = &config->metrics[i],
             .receiver_lock = config->receiver_lock,
             .kind = STREAM_KIND_80MHZ,
             .block_samples = config->block_samples,
@@ -133,6 +141,7 @@ bool streamer_manager_start(streamer_manager_t **manager, const streamer_config_
                 .scenario = config->scenario,
                 .timebase = config->timebase,
                 .receiver = receiver,
+                .metrics = &config->metrics[i],
                 .ddc_index = d,
                 .receiver_lock = config->receiver_lock,
                 .kind = STREAM_KIND_DDC,
