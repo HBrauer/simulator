@@ -1,6 +1,7 @@
 import json
 import socket
 import subprocess
+import threading
 import time
 from urllib.error import HTTPError
 from urllib.request import Request
@@ -150,6 +151,15 @@ def _request_json_error(url, payload):
     raise AssertionError("request unexpectedly succeeded")
 
 
+def _method_error(url, method):
+    request = Request(url, method=method)
+    try:
+        urlopen(request, timeout=2.0)
+    except HTTPError as exc:
+        return exc.code, json.loads(exc.read().decode("utf-8"))
+    raise AssertionError("request unexpectedly succeeded")
+
+
 def test_runtime_rest_and_udp_stream(tmp_path):
     rest_port = _free_tcp_port()
     udp_port = _free_udp_port_block()
@@ -185,6 +195,13 @@ def test_runtime_rest_and_udp_stream(tmp_path):
         assert status["center_frequency_hz"] == 10000000000
         scenario = _wait_json(f"http://127.0.0.1:{rest_port}/api/v1/scenario/status")
         assert scenario["scenario_time_ns"] == 450000
+
+        code, error = _method_error(f"http://127.0.0.1:{rest_port}/api/v1/does-not-exist", "GET")
+        assert code == 404
+        assert error["error"]["code"] == "not_found"
+        code, error = _method_error(f"http://127.0.0.1:{rest_port}/api/v1/status", "POST")
+        assert code == 404
+        assert error["error"]["code"] == "not_found"
 
         packet, addr = udp_sock.recvfrom(4096)
         assert addr[0] == "127.0.0.1"
@@ -323,6 +340,93 @@ def test_runtime_rest_and_udp_stream(tmp_path):
             proc.kill()
             proc.wait(timeout=5.0)
         udp_sock.close()
+        stderr = proc.stderr.read() if proc.stderr else ""
+        assert proc.returncode in (0, -15), stderr
+
+
+def test_concurrent_rest_updates_and_status_reads(tmp_path):
+    rest_port = _free_tcp_port()
+    udp_port = _free_udp_port_block()
+    config = tmp_path / "runtime_concurrent.yaml"
+    _write_config(config, rest_port, udp_port)
+
+    proc = subprocess.Popen(
+        [
+            str(SIM),
+            "--config",
+            str(config),
+            "--scenario",
+            "scenarios/test_scenario_001.json",
+            "--scenario-time-ns",
+            "450000",
+            "--stream-block-samples",
+            "128",
+        ],
+        cwd=ROOT,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    errors = []
+
+    def update_output_scale():
+        try:
+            for index in range(20):
+                scale = 0.25 + (index % 4) * 0.25
+                code, body = _request_json(
+                    f"http://127.0.0.1:{rest_port}/api/v1/output-scale",
+                    {"output_scale": scale},
+                )
+                assert code == 200
+                assert body["output_scale"] == scale
+        except Exception as exc:  # pragma: no cover - diagnostic path
+            errors.append(exc)
+
+    def update_ddc():
+        try:
+            for index in range(20):
+                code, body = _request_json(
+                    f"http://127.0.0.1:{rest_port}/api/v1/ddc/0/configure",
+                    {
+                        "center_frequency_hz": 10005000000 + index,
+                        "output_scale": 0.5,
+                    },
+                )
+                assert code == 200
+                assert body["status"] == "ok"
+        except Exception as exc:  # pragma: no cover - diagnostic path
+            errors.append(exc)
+
+    def read_status():
+        try:
+            for _ in range(40):
+                status = _wait_json(f"http://127.0.0.1:{rest_port}/api/v1/status")
+                assert status["receiver_id"] == 0
+                streams = _wait_json(f"http://127.0.0.1:{rest_port}/api/v1/streams")
+                assert len(streams["streams"]) == 5
+        except Exception as exc:  # pragma: no cover - diagnostic path
+            errors.append(exc)
+
+    try:
+        _wait_json(f"http://127.0.0.1:{rest_port}/api/v1/health")
+        threads = [
+            threading.Thread(target=update_output_scale),
+            threading.Thread(target=update_ddc),
+            threading.Thread(target=read_status),
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10.0)
+        assert not errors
+        assert all(not thread.is_alive() for thread in threads)
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5.0)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5.0)
         stderr = proc.stderr.read() if proc.stderr else ""
         assert proc.returncode in (0, -15), stderr
 

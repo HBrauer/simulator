@@ -35,7 +35,7 @@
 - [x] Add per-stream metrics instead of only receiver-aggregated metrics.
 - [ ] Add JSON schema-style response validation in integration tests.
 - [ ] Add runtime stream enable/disable API if stream switches are implemented.
-- [ ] Add REST tests for malformed paths/methods and concurrent runtime updates.
+- [x] Add REST tests for malformed paths/methods and concurrent runtime updates.
 
 ## UDP And Interop
 
