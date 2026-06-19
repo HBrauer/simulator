@@ -1,0 +1,131 @@
+#include "streamer.h"
+#include "renderer.h"
+#include "udp_output.h"
+
+#include <pthread.h>
+#include <stdatomic.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+typedef enum {
+    STREAM_KIND_80MHZ,
+    STREAM_KIND_DDC
+} stream_kind_t;
+
+typedef struct {
+    atomic_bool *running;
+    const scenario_t *scenario;
+    const timebase_t *timebase;
+    receiver_config_t *receiver;
+    ddc_config_t *ddc;
+    stream_kind_t kind;
+    size_t block_samples;
+    pthread_t thread;
+    bool started;
+} stream_worker_t;
+
+struct streamer_manager {
+    atomic_bool running;
+    size_t worker_count;
+    stream_worker_t workers[SIM_MAX_RECEIVERS * (1 + SIM_DDC_COUNT)];
+};
+
+static void *stream_worker_main(void *arg)
+{
+    stream_worker_t *worker = arg;
+    const char *host = worker->receiver->udp_output_host;
+    const uint16_t port = worker->kind == STREAM_KIND_80MHZ
+        ? worker->receiver->udp_80mhz_output.port
+        : worker->ddc->udp_output.port;
+
+    udp_output_t udp = {.fd = -1};
+    if (!udp_output_open(&udp, host, port)) {
+        return NULL;
+    }
+
+    iq_ci16_t *buffer = calloc(worker->block_samples, sizeof(*buffer));
+    if (buffer == NULL) {
+        udp_output_close(&udp);
+        return NULL;
+    }
+
+    while (atomic_load(worker->running)) {
+        render_stats_t stats;
+        const uint64_t scenario_time_ns = timebase_now_ns(worker->timebase);
+        if (worker->kind == STREAM_KIND_80MHZ) {
+            renderer_render_80mhz_block(worker->scenario, worker->receiver, scenario_time_ns, buffer, worker->block_samples, &stats);
+        } else {
+            renderer_render_ddc_block(worker->scenario, worker->ddc, scenario_time_ns, buffer, worker->block_samples, &stats);
+        }
+        size_t sent = 0;
+        (void)udp_output_send(&udp, buffer, worker->block_samples * sizeof(*buffer), &sent);
+        usleep(10000);
+    }
+
+    free(buffer);
+    udp_output_close(&udp);
+    return NULL;
+}
+
+bool streamer_manager_start(streamer_manager_t **manager, const streamer_config_t *config)
+{
+    streamer_manager_t *m = calloc(1, sizeof(*m));
+    if (m == NULL) {
+        return false;
+    }
+    atomic_init(&m->running, true);
+
+    for (size_t i = 0; i < config->config->receiver_count; i++) {
+        receiver_config_t *receiver = &config->config->receivers[i];
+        stream_worker_t *worker = &m->workers[m->worker_count++];
+        *worker = (stream_worker_t){
+            .running = &m->running,
+            .scenario = config->scenario,
+            .timebase = config->timebase,
+            .receiver = receiver,
+            .kind = STREAM_KIND_80MHZ,
+            .block_samples = config->block_samples,
+        };
+        if (pthread_create(&worker->thread, NULL, stream_worker_main, worker) != 0) {
+            streamer_manager_stop(m);
+            return false;
+        }
+        worker->started = true;
+
+        for (size_t d = 0; d < SIM_DDC_COUNT; d++) {
+            stream_worker_t *ddc_worker = &m->workers[m->worker_count++];
+            *ddc_worker = (stream_worker_t){
+                .running = &m->running,
+                .scenario = config->scenario,
+                .timebase = config->timebase,
+                .receiver = receiver,
+                .ddc = &receiver->ddc[d],
+                .kind = STREAM_KIND_DDC,
+                .block_samples = config->block_samples,
+            };
+            if (pthread_create(&ddc_worker->thread, NULL, stream_worker_main, ddc_worker) != 0) {
+                streamer_manager_stop(m);
+                return false;
+            }
+            ddc_worker->started = true;
+        }
+    }
+
+    *manager = m;
+    return true;
+}
+
+void streamer_manager_stop(streamer_manager_t *manager)
+{
+    if (manager == NULL) {
+        return;
+    }
+    atomic_store(&manager->running, false);
+    for (size_t i = 0; i < manager->worker_count; i++) {
+        if (manager->workers[i].started) {
+            pthread_join(manager->workers[i].thread, NULL);
+        }
+    }
+    free(manager);
+}

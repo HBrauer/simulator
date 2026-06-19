@@ -34,6 +34,7 @@ sim_sources = files(
   'src/rest_server.c',
   'src/ringbuffer.c',
   'src/scenario.c',
+  'src/streamer.c',
   'src/timebase.c',
   'src/udp_output.c'
 )

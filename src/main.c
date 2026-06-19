@@ -2,6 +2,7 @@
 #include "renderer.h"
 #include "rest_server.h"
 #include "scenario.h"
+#include "streamer.h"
 #include "timebase.h"
 #include "udp_output.h"
 
@@ -36,6 +37,7 @@ int main(int argc, char **argv)
     const char *scenario_path = arg_value(argc, argv, "--scenario");
     const char *scenario_time_arg = arg_value(argc, argv, "--scenario-time-ns");
     const char *once_arg = arg_value(argc, argv, "--render-once-samples");
+    const char *block_samples_arg = arg_value(argc, argv, "--stream-block-samples");
     if (config_path == NULL) {
         config_path = "configs/instance_001.yaml";
     }
@@ -78,6 +80,15 @@ int main(int argc, char **argv)
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
 
+    size_t block_samples = 1024;
+    if (block_samples_arg != NULL) {
+        block_samples = (size_t)strtoull(block_samples_arg, NULL, 10);
+        if (block_samples == 0 || block_samples > 4096) {
+            fprintf(stderr, "invalid --stream-block-samples\n");
+            return 6;
+        }
+    }
+
     rest_server_t *servers[SIM_MAX_RECEIVERS] = {0};
     for (size_t i = 0; i < config.receiver_count; i++) {
         rest_context_t context = {
@@ -93,10 +104,26 @@ int main(int argc, char **argv)
         printf("receiver %u REST http://%s:%u/api/v1\n", config.receivers[i].id, config.receivers[i].rest_bind_host, config.receivers[i].rest_port);
     }
 
+    streamer_manager_t *streamer = NULL;
+    streamer_config_t streamer_config = {
+        .config = &config,
+        .scenario = &scenario,
+        .timebase = &timebase,
+        .block_samples = block_samples,
+    };
+    if (!streamer_manager_start(&streamer, &streamer_config)) {
+        fprintf(stderr, "failed to start UDP streamers\n");
+        for (size_t i = 0; i < config.receiver_count; i++) {
+            rest_server_stop(servers[i]);
+        }
+        return 7;
+    }
+
     while (keep_running) {
         sleep(1);
     }
 
+    streamer_manager_stop(streamer);
     for (size_t i = 0; i < config.receiver_count; i++) {
         rest_server_stop(servers[i]);
     }
