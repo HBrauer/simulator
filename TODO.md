@@ -11,7 +11,7 @@
 - [ ] Add scanner swept-signal golden tests:
   - [ ] fixed RF signal moves through 80-MHz baseband over scenario time.
   - [ ] same scenario time across instances gives identical baseband offset.
-- [ ] Add multi-signal mixing tests with clipping and non-clipping cases.
+- [x] Add multi-signal mixing tests with clipping and non-clipping cases.
 - [x] Add scenario validation for duplicate IDs and missing source references with exact error codes.
 
 ## Runtime And Performance

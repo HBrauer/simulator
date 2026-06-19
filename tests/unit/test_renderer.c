@@ -6,6 +6,8 @@
 
 #include <check.h>
 #include <math.h>
+#include <stdio.h>
+#include <string.h>
 
 static int16_t interpolate_scaled_i16(int16_t a, int16_t b, double frac, double gain)
 {
@@ -17,6 +19,65 @@ static int16_t interpolate_scaled_i16(int16_t a, int16_t b, double frac, double 
         return -32768;
     }
     return (int16_t)lrint(value);
+}
+
+static void setup_two_signal_mix(scenario_t *scenario, asset_cache_t *cache, iq_ci16_t *asset_a, iq_ci16_t *asset_b, int16_t a_i, int16_t a_q, int16_t b_i, int16_t b_q)
+{
+    memset(scenario, 0, sizeof(*scenario));
+    memset(cache, 0, sizeof(*cache));
+    scenario->schema_version = 1;
+    snprintf(scenario->scenario_id, sizeof(scenario->scenario_id), "%s", "unit_mix");
+    scenario->source_count = 2;
+    scenario->signal_count = 2;
+    cache->asset_count = 2;
+
+    const char *ids[] = {"src_a", "src_b"};
+    iq_ci16_t *assets[] = {asset_a, asset_b};
+    const int16_t i_values[] = {a_i, b_i};
+    const int16_t q_values[] = {a_q, b_q};
+
+    for (size_t index = 0; index < 2; index++) {
+        for (size_t sample = 0; sample < 8; sample++) {
+            assets[index][sample] = (iq_ci16_t){.i = i_values[index], .q = q_values[index]};
+        }
+
+        scenario_source_t *source = &scenario->sources[index];
+        snprintf(source->id, sizeof(source->id), "%s", ids[index]);
+        snprintf(source->source_type, sizeof(source->source_type), "%s", "iq_file");
+        snprintf(source->format, sizeof(source->format), "%s", "ci16");
+        snprintf(source->byte_order, sizeof(source->byte_order), "%s", "little_endian");
+        snprintf(source->iq_layout, sizeof(source->iq_layout), "%s", "interleaved_iq");
+        source->sample_rate_hz = SIM_RECEIVER_SAMPLE_RATE_HZ;
+        source->bandwidth_hz = 1000;
+        source->sample_count = 8;
+        source->nominal_level_dbfs = 0.0;
+
+        scenario_signal_t *signal = &scenario->signals[index];
+        snprintf(signal->signal_id, sizeof(signal->signal_id), "sig_%zu", index);
+        snprintf(signal->source_reference, sizeof(signal->source_reference), "%s", ids[index]);
+        signal->center_frequency_hz = 10000000000ULL;
+        signal->bandwidth_hz = 1000;
+        signal->power_dbm = -40.0;
+        signal->start_time_s = 0.0;
+        signal->repeat_interval_s = 1.0;
+
+        cached_asset_t *asset = &cache->assets[index];
+        snprintf(asset->source_id, sizeof(asset->source_id), "%s", ids[index]);
+        asset->sample_count = 8;
+        asset->samples = assets[index];
+    }
+}
+
+static receiver_config_t fixed_center_receiver(void)
+{
+    return (receiver_config_t){
+        .id = 0,
+        .frequency_start_hz = 9960000000ULL,
+        .frequency_stop_hz = 10040000000ULL,
+        .bandwidth_hz = SIM_RECEIVER_BANDWIDTH_HZ,
+        .sample_rate_hz = SIM_RECEIVER_SAMPLE_RATE_HZ,
+        .output_scale = 1.0,
+    };
 }
 
 START_TEST(renders_nonzero_visible_signal)
@@ -92,6 +153,50 @@ START_TEST(renderer_clips_after_nominal_level_gain)
 }
 END_TEST
 
+START_TEST(renderer_mixes_two_signals_without_clipping)
+{
+    scenario_t scenario;
+    asset_cache_t cache;
+    iq_ci16_t asset_a[8];
+    iq_ci16_t asset_b[8];
+    setup_two_signal_mix(&scenario, &cache, asset_a, asset_b, 1000, 100, 2000, -400);
+
+    const receiver_config_t receiver = fixed_center_receiver();
+    iq_ci16_t out[4];
+    render_stats_t stats;
+    ck_assert(renderer_render_80mhz_block(&scenario, &cache, &receiver, 0, out, 4, &stats));
+
+    ck_assert_uint_eq(stats.samples_rendered, 4);
+    ck_assert_uint_eq(stats.active_signals, 2);
+    for (size_t index = 0; index < 4; index++) {
+        ck_assert_int_eq(out[index].i, 3000);
+        ck_assert_int_eq(out[index].q, -300);
+    }
+}
+END_TEST
+
+START_TEST(renderer_clips_after_mixing_two_signals)
+{
+    scenario_t scenario;
+    asset_cache_t cache;
+    iq_ci16_t asset_a[8];
+    iq_ci16_t asset_b[8];
+    setup_two_signal_mix(&scenario, &cache, asset_a, asset_b, 30000, -30000, 30000, -30000);
+
+    const receiver_config_t receiver = fixed_center_receiver();
+    iq_ci16_t out[4];
+    render_stats_t stats;
+    ck_assert(renderer_render_80mhz_block(&scenario, &cache, &receiver, 0, out, 4, &stats));
+
+    ck_assert_uint_eq(stats.samples_rendered, 4);
+    ck_assert_uint_eq(stats.active_signals, 2);
+    for (size_t index = 0; index < 4; index++) {
+        ck_assert_int_eq(out[index].i, 32767);
+        ck_assert_int_eq(out[index].q, -32768);
+    }
+}
+END_TEST
+
 START_TEST(renders_ddc_nonzero_visible_signal)
 {
     scenario_t scenario;
@@ -125,6 +230,8 @@ Suite *renderer_suite(void)
     tcase_add_test(tc, renders_nonzero_visible_signal);
     tcase_add_test(tc, renderer_80mhz_linearly_interpolates_24576_source_to_98304_output);
     tcase_add_test(tc, renderer_clips_after_nominal_level_gain);
+    tcase_add_test(tc, renderer_mixes_two_signals_without_clipping);
+    tcase_add_test(tc, renderer_clips_after_mixing_two_signals);
     tcase_add_test(tc, renders_ddc_nonzero_visible_signal);
     suite_add_tcase(suite, tc);
     return suite;
