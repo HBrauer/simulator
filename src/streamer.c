@@ -7,6 +7,7 @@
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 typedef enum {
@@ -32,6 +33,19 @@ struct streamer_manager {
     size_t worker_count;
     stream_worker_t workers[SIM_MAX_RECEIVERS * (1 + SIM_DDC_COUNT)];
 };
+
+static void sleep_for_block(size_t block_samples, uint32_t sample_rate_hz)
+{
+    if (sample_rate_hz == 0) {
+        return;
+    }
+    const double seconds = (double)block_samples / (double)sample_rate_hz;
+    struct timespec ts = {
+        .tv_sec = (time_t)seconds,
+        .tv_nsec = (long)((seconds - (double)(time_t)seconds) * 1000000000.0),
+    };
+    nanosleep(&ts, NULL);
+}
 
 static void *stream_worker_main(void *arg)
 {
@@ -75,7 +89,10 @@ static void *stream_worker_main(void *arg)
         }
         size_t sent = 0;
         (void)udp_output_send(&udp, buffer, worker->block_samples * sizeof(*buffer), &sent);
-        usleep(10000);
+        const uint32_t sample_rate = worker->kind == STREAM_KIND_80MHZ
+            ? receiver_snapshot.sample_rate_hz
+            : ddc_snapshot.sample_rate_hz;
+        sleep_for_block(worker->block_samples, sample_rate);
     }
 
     free(buffer);
