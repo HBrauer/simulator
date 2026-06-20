@@ -14,6 +14,7 @@ static receiver_config_t valid_receiver(uint32_t id, uint16_t rest_port, uint16_
         .sample_rate_hz = SIM_RECEIVER_SAMPLE_RATE_HZ,
         .scan_rate_hz_per_s = 100000000000.0,
         .output_scale = 1.0,
+        .rf_reference_power_dbm = -55.0,
         .stream_enabled = true,
         .udp_80mhz_output = {.port = udp_base},
     };
@@ -24,6 +25,7 @@ static receiver_config_t valid_receiver(uint32_t id, uint16_t rest_port, uint16_
             .bandwidth_hz = SIM_DDC_BANDWIDTH_HZ,
             .sample_rate_hz = SIM_DDC_SAMPLE_RATE_HZ,
             .output_scale = 1.0,
+            .rf_reference_power_dbm = -55.0,
             .stream_enabled = true,
             .udp_output = {.port = (uint16_t)(udp_base + 1 + i)},
         };
@@ -44,6 +46,8 @@ START_TEST(loads_instance_config)
     ck_assert_int_eq(config.stream_cpu, -1);
     ck_assert(!config.framed_udp);
     ck_assert_uint_eq(config.asset_cache_max_bytes, 0);
+    ck_assert_double_eq_tol(config.receivers[0].rf_reference_power_dbm, -55.0, 0.000001);
+    ck_assert_double_eq_tol(config.receivers[0].ddc[0].rf_reference_power_dbm, -55.0, 0.000001);
     ck_assert(config.receivers[0].stream_enabled);
     ck_assert(config.receivers[0].ddc[0].stream_enabled);
     ck_assert_double_eq_tol(config.receivers[0].output_scale, 1.0, 0.000001);

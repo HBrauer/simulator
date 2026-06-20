@@ -24,6 +24,7 @@ static bool renderer_render_window_block(
     uint64_t window_bandwidth_hz,
     uint32_t output_sample_rate_hz,
     double output_scale,
+    double rf_reference_power_dbm,
     uint64_t scenario_time_ns,
     iq_ci16_t *out,
     size_t count,
@@ -56,7 +57,7 @@ static bool renderer_render_window_block(
         const iq_ci16_t *source_samples = &asset->samples[sample_offset];
 
         const double offset_hz = (double)((int64_t)signal->center_frequency_hz - (int64_t)window_center_hz);
-        const double source_gain = output_scale * pow(10.0, -source->nominal_level_dbfs / 20.0);
+        const double source_gain = output_scale * pow(10.0, (signal->power_dbm - rf_reference_power_dbm) / 20.0);
         const double phase_step = 2.0 * M_PI * offset_hz / (double)output_sample_rate_hz;
         const double step_c = cos(phase_step);
         const double step_s = sin(phase_step);
@@ -96,10 +97,10 @@ static bool renderer_render_window_block(
 bool renderer_render_80mhz_block(const scenario_t *scenario, const asset_cache_t *cache, const receiver_config_t *receiver, uint64_t scenario_time_ns, iq_ci16_t *out, size_t count, render_stats_t *stats)
 {
     const uint64_t center_hz = receiver_center_frequency_hz(receiver, scenario_time_ns);
-    return renderer_render_window_block(scenario, cache, center_hz, SIM_RECEIVER_BANDWIDTH_HZ, SIM_RECEIVER_SAMPLE_RATE_HZ, receiver->output_scale, scenario_time_ns, out, count, stats);
+    return renderer_render_window_block(scenario, cache, center_hz, SIM_RECEIVER_BANDWIDTH_HZ, SIM_RECEIVER_SAMPLE_RATE_HZ, receiver->output_scale, receiver->rf_reference_power_dbm, scenario_time_ns, out, count, stats);
 }
 
 bool renderer_render_ddc_block(const scenario_t *scenario, const asset_cache_t *cache, const ddc_config_t *ddc, uint64_t scenario_time_ns, iq_ci16_t *out, size_t count, render_stats_t *stats)
 {
-    return renderer_render_window_block(scenario, cache, ddc->center_frequency_hz, ddc->bandwidth_hz, ddc->sample_rate_hz, ddc->output_scale, scenario_time_ns, out, count, stats);
+    return renderer_render_window_block(scenario, cache, ddc->center_frequency_hz, ddc->bandwidth_hz, ddc->sample_rate_hz, ddc->output_scale, ddc->rf_reference_power_dbm, scenario_time_ns, out, count, stats);
 }

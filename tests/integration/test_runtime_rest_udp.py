@@ -185,6 +185,7 @@ def _assert_receiver_status_shape(status):
             "center_frequency_hz",
             "scan_rate_hz_per_s",
             "output_scale",
+            "rf_reference_power_dbm",
             "stream_enabled",
             "bandwidth_hz",
             "udp_output_host",
@@ -248,7 +249,7 @@ def _assert_stream_status_shape(streams):
             },
         )
         if stream["stream_type"] == "ddc":
-            _assert_keys(stream, {"center_frequency_hz", "output_scale", "in_receiver_window"})
+            _assert_keys(stream, {"center_frequency_hz", "output_scale", "rf_reference_power_dbm", "in_receiver_window"})
 
 
 def _wait_stream_state(rest_port, stream_type, stream_id, enabled):

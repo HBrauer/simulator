@@ -77,6 +77,7 @@ static receiver_config_t fixed_center_receiver(void)
         .bandwidth_hz = SIM_RECEIVER_BANDWIDTH_HZ,
         .sample_rate_hz = SIM_RECEIVER_SAMPLE_RATE_HZ,
         .output_scale = 1.0,
+        .rf_reference_power_dbm = -40.0,
     };
 }
 
@@ -128,6 +129,7 @@ static receiver_config_t scanner_receiver(void)
         .sample_rate_hz = SIM_RECEIVER_SAMPLE_RATE_HZ,
         .scan_rate_hz_per_s = 100000000000.0,
         .output_scale = 1.0,
+        .rf_reference_power_dbm = -40.0,
     };
 }
 
@@ -170,7 +172,7 @@ START_TEST(renderer_80mhz_linearly_interpolates_24576_source_to_98304_output)
     ck_assert(renderer_render_80mhz_block(&scenario, &cache, &config.receivers[0], 450000ULL, out, 8, &stats));
     const cached_asset_t *asset = asset_cache_find(&cache, "asset_fsk_001");
     ck_assert_ptr_nonnull(asset);
-    const double gain = pow(10.0, -scenario.sources[0].nominal_level_dbfs / 20.0);
+    const double gain = 1.0;
     const size_t offset = 11059;
     ck_assert_int_eq(out[0].i, interpolate_scaled_i16(asset->samples[offset].i, asset->samples[offset].i, 0.0, gain));
     ck_assert_int_eq(out[0].q, interpolate_scaled_i16(asset->samples[offset].q, asset->samples[offset].q, 0.0, gain));
@@ -182,7 +184,7 @@ START_TEST(renderer_80mhz_linearly_interpolates_24576_source_to_98304_output)
 }
 END_TEST
 
-START_TEST(renderer_clips_after_nominal_level_gain)
+START_TEST(renderer_applies_rf_power_relative_to_reference)
 {
     simulator_config_t config;
     scenario_t scenario;
@@ -190,7 +192,8 @@ START_TEST(renderer_clips_after_nominal_level_gain)
     ck_assert_msg(config_load_yaml("configs/instance_001.yaml", &config, error, sizeof(error)), "%s", error);
     ck_assert_msg(scenario_load_json("scenarios/test_scenario_001.json", &scenario, error, sizeof(error)), "%s", error);
     ck_assert_msg(scenario_validate(&scenario, ".", error, sizeof(error)), "%s", error);
-    scenario.sources[0].nominal_level_dbfs = -120.0;
+    scenario.signals[0].power_dbm = -49.0;
+    config.receivers[0].rf_reference_power_dbm = -55.0;
     config.receivers[0].frequency_start_hz = 9965000000ULL;
     config.receivers[0].frequency_stop_hz = 10045000000ULL;
 
@@ -199,7 +202,10 @@ START_TEST(renderer_clips_after_nominal_level_gain)
     iq_ci16_t out[4];
     render_stats_t stats;
     ck_assert(renderer_render_80mhz_block(&scenario, &cache, &config.receivers[0], 450000ULL, out, 4, &stats));
-    ck_assert(out[0].i == 32767 || out[0].i == -32768);
+    const cached_asset_t *asset = asset_cache_find(&cache, "asset_fsk_001");
+    ck_assert_ptr_nonnull(asset);
+    const double gain = pow(10.0, 6.0 / 20.0);
+    ck_assert_int_eq(out[0].i, interpolate_scaled_i16(asset->samples[11059].i, asset->samples[11059].i, 0.0, gain));
     asset_cache_free(&cache);
 }
 END_TEST
@@ -315,6 +321,7 @@ START_TEST(renders_ddc_nonzero_visible_signal)
         .bandwidth_hz = SIM_DDC_BANDWIDTH_HZ,
         .sample_rate_hz = SIM_DDC_SAMPLE_RATE_HZ,
         .output_scale = 1.0,
+        .rf_reference_power_dbm = -55.0,
     };
     iq_ci16_t out[128];
     render_stats_t stats;
@@ -332,7 +339,7 @@ Suite *renderer_suite(void)
     TCase *tc = tcase_create("core");
     tcase_add_test(tc, renders_nonzero_visible_signal);
     tcase_add_test(tc, renderer_80mhz_linearly_interpolates_24576_source_to_98304_output);
-    tcase_add_test(tc, renderer_clips_after_nominal_level_gain);
+    tcase_add_test(tc, renderer_applies_rf_power_relative_to_reference);
     tcase_add_test(tc, renderer_mixes_two_signals_without_clipping);
     tcase_add_test(tc, renderer_clips_after_mixing_two_signals);
     tcase_add_test(tc, scanner_moves_fixed_rf_signal_through_baseband);

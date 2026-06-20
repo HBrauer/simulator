@@ -108,7 +108,7 @@ static json_t *receiver_json(const receiver_config_t *r, uint64_t scenario_time_
 {
     const char *mode = receiver_effective_mode(r) == RECEIVER_MODE_FIXED ? "fixed" : "scan";
     json_t *root = json_pack(
-        "{s:i,s:s,s:I,s:I,s:I,s:f,s:f,s:b,s:I,s:s,s:{s:{s:i}},s:b}",
+        "{s:i,s:s,s:I,s:I,s:I,s:f,s:f,s:f,s:b,s:I,s:s,s:{s:{s:i}},s:b}",
         "receiver_id", (int)r->id,
         "effective_mode", mode,
         "frequency_start_hz", (json_int_t)r->frequency_start_hz,
@@ -116,6 +116,7 @@ static json_t *receiver_json(const receiver_config_t *r, uint64_t scenario_time_
         "center_frequency_hz", (json_int_t)receiver_center_frequency_hz(r, scenario_time_ns),
         "scan_rate_hz_per_s", r->scan_rate_hz_per_s,
         "output_scale", r->output_scale,
+        "rf_reference_power_dbm", r->rf_reference_power_dbm,
         "stream_enabled", r->stream_enabled,
         "bandwidth_hz", (json_int_t)r->bandwidth_hz,
         "udp_output_host", r->udp_output_host,
@@ -126,12 +127,13 @@ static json_t *receiver_json(const receiver_config_t *r, uint64_t scenario_time_
         json_t *arr = json_array();
         for (size_t i = 0; i < SIM_DDC_COUNT; i++) {
             json_array_append_new(arr, json_pack(
-                "{s:i,s:I,s:i,s:i,s:f,s:b,s:{s:i}}",
+                "{s:i,s:I,s:i,s:i,s:f,s:f,s:b,s:{s:i}}",
                 "ddc_id", (int)r->ddc[i].id,
                 "center_frequency_hz", (json_int_t)r->ddc[i].center_frequency_hz,
                 "bandwidth_hz", (int)r->ddc[i].bandwidth_hz,
                 "sample_rate_hz", (int)r->ddc[i].sample_rate_hz,
                 "output_scale", r->ddc[i].output_scale,
+                "rf_reference_power_dbm", r->ddc[i].rf_reference_power_dbm,
                 "stream_enabled", r->ddc[i].stream_enabled,
                 "udp_output", "port", (int)r->ddc[i].udp_output.port
             ));
@@ -185,13 +187,14 @@ static json_t *stream_status_json(const receiver_config_t *receiver, const recei
         const ddc_config_t *ddc = &receiver->ddc[i];
         const stream_metrics_t *stream = &metrics->streams[1 + i];
         json_array_append_new(streams, json_pack(
-            "{s:s,s:i,s:i,s:i,s:I,s:f,s:b,s:b,s:b,s:I,s:I,s:I,s:I}",
+            "{s:s,s:i,s:i,s:i,s:I,s:f,s:f,s:b,s:b,s:b,s:I,s:I,s:I,s:I}",
             "stream_type", "ddc",
             "stream_id", (int)i,
             "udp_port", (int)ddc->udp_output.port,
             "sample_rate_hz", (int)ddc->sample_rate_hz,
             "center_frequency_hz", (json_int_t)ddc->center_frequency_hz,
             "output_scale", ddc->output_scale,
+            "rf_reference_power_dbm", ddc->rf_reference_power_dbm,
             "in_receiver_window", receiver_ddc_in_window(receiver, ddc, scenario_time_ns),
             "enabled", ddc->stream_enabled,
             "active", atomic_load(&stream->active),
@@ -372,7 +375,7 @@ static enum MHD_Result answer(void *cls, struct MHD_Connection *connection, cons
         pthread_mutex_lock(ctx->receiver_lock);
         const ddc_config_t *d = &r->ddc[ddc_id];
         const bool in_window = receiver_ddc_in_window(r, d, scenario_time_ns);
-        json_t *response = json_pack("{s:i,s:i,s:I,s:i,s:i,s:f,s:b,s:b,s:{s:i}}", "receiver_id", (int)r->id, "ddc_id", (int)d->id, "center_frequency_hz", (json_int_t)d->center_frequency_hz, "bandwidth_hz", (int)d->bandwidth_hz, "sample_rate_hz", (int)d->sample_rate_hz, "output_scale", d->output_scale, "stream_enabled", d->stream_enabled, "in_receiver_window", in_window, "udp_output", "port", (int)d->udp_output.port);
+        json_t *response = json_pack("{s:i,s:i,s:I,s:i,s:i,s:f,s:f,s:b,s:b,s:{s:i}}", "receiver_id", (int)r->id, "ddc_id", (int)d->id, "center_frequency_hz", (json_int_t)d->center_frequency_hz, "bandwidth_hz", (int)d->bandwidth_hz, "sample_rate_hz", (int)d->sample_rate_hz, "output_scale", d->output_scale, "rf_reference_power_dbm", d->rf_reference_power_dbm, "stream_enabled", d->stream_enabled, "in_receiver_window", in_window, "udp_output", "port", (int)d->udp_output.port);
         pthread_mutex_unlock(ctx->receiver_lock);
         SEND_JSON_AND_FREE(MHD_HTTP_OK, response);
     }

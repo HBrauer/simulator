@@ -30,6 +30,7 @@ Receiver fields:
 | `frequency_stop_hz` | integer | yes | RF range stop, greater than start and `<= 40000000000`. |
 | `scan_rate_hz_per_s` | number | yes | Used when range is wider than 80 MHz. |
 | `output_scale` | number | no | Receiver output multiplier. Defaults to `1.0`; must be positive when set. |
+| `rf_reference_power_dbm` | number | no | RF power that preserves the source's `nominal_level_dbfs`. Defaults to `-55.0`. |
 | `stream_enabled` | boolean | no | Enables the 80-MHz UDP stream. Defaults to `true`. |
 | `udp_80mhz_output_port` | integer | yes | Unique across all receiver/DDC UDP outputs. |
 | `ddc` | array | yes | Four DDC entries with IDs `0..3`. |
@@ -92,7 +93,7 @@ Signal fields:
 | `source_reference` | string | yes | Must match an existing source `id`. |
 | `center_frequency_hz` | integer | yes | Absolute RF center frequency. |
 | `bandwidth_hz` | integer | yes | Signal bandwidth. |
-| `power_dbm` | number | yes | RF power value; calibrated RF-to-dBFS modeling is still pending. |
+| `power_dbm` | number | yes | RF power. Digital level is `nominal_level_dbfs + (power_dbm - rf_reference_power_dbm)` before `output_scale`. |
 | `start_time_s` | number | yes | Scenario start time for playback. |
 | `repeat_interval_s` | number | yes | Must be positive enough to repeat the source without invalid wrapping. |
 

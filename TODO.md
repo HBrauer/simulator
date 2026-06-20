@@ -2,7 +2,7 @@
 
 ## Correctness
 
-- [ ] Add a calibrated RF power model that maps `power_dbm` plus source `nominal_level_dbfs` to digital dBFS.
+- [x] Add a calibrated RF power model that maps `power_dbm` plus source `nominal_level_dbfs` to digital dBFS.
 - [ ] Replace linear interpolation with a production resampler path:
   - [ ] FIR/polyphase scalar reference.
   - [ ] optional liquid-dsp backend.

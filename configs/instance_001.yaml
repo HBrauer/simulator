@@ -14,6 +14,7 @@ receivers:
     frequency_start_hz: 9960000000
     frequency_stop_hz: 10040000000
     scan_rate_hz_per_s: 100000000000
+    rf_reference_power_dbm: -55.0
     stream_enabled: true
     udp_80mhz_output_port: 50000
     ddc:
