@@ -368,6 +368,37 @@ START_TEST(renders_ddc_nonzero_visible_signal)
 }
 END_TEST
 
+START_TEST(renderer_applies_window_passband_gain)
+{
+    scenario_t scenario;
+    asset_cache_t cache;
+    iq_ci16_t asset_samples[8];
+    setup_constant_signal(&scenario, &cache, asset_samples, 10000000000ULL);
+    scenario.signals[0].bandwidth_hz = 2000000;
+    scenario.sources[0].sample_rate_hz = SIM_RECEIVER_SAMPLE_RATE_HZ;
+
+    const receiver_config_t receiver = fixed_center_receiver();
+    render_stats_t stats;
+    iq_ci16_t out[4];
+
+    scenario.signals[0].center_frequency_hz = 10039000000ULL;
+    ck_assert(renderer_render_80mhz_block(&scenario, &cache, &receiver, 0, out, 4, &stats));
+    ck_assert_uint_eq(stats.active_signals, 1);
+    ck_assert_int_eq(out[0].i, 1000);
+
+    scenario.signals[0].center_frequency_hz = 10040500000ULL;
+    ck_assert(renderer_render_80mhz_block(&scenario, &cache, &receiver, 0, out, 4, &stats));
+    ck_assert_uint_eq(stats.active_signals, 1);
+    ck_assert_int_eq(out[0].i, 500);
+
+    scenario.signals[0].center_frequency_hz = 10041500000ULL;
+    ck_assert(renderer_render_80mhz_block(&scenario, &cache, &receiver, 0, out, 4, &stats));
+    ck_assert_uint_eq(stats.active_signals, 0);
+    ck_assert_int_eq(out[0].i, 0);
+    ck_assert_int_eq(out[0].q, 0);
+}
+END_TEST
+
 Suite *renderer_suite(void)
 {
     Suite *suite = suite_create("renderer");
@@ -380,6 +411,7 @@ Suite *renderer_suite(void)
     tcase_add_test(tc, scanner_moves_fixed_rf_signal_through_baseband);
     tcase_add_test(tc, scanner_same_time_is_deterministic_across_instances);
     tcase_add_test(tc, renders_ddc_nonzero_visible_signal);
+    tcase_add_test(tc, renderer_applies_window_passband_gain);
     suite_add_tcase(suite, tc);
     return suite;
 }

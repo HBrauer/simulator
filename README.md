@@ -118,7 +118,8 @@ The benchmark reports scalar 80-MHz renderer throughput in samples per second. T
 ## Current Limits
 
 - DSP path is scalar and correctness-first.
-- Resampling is nearest-neighbor sample-rate mapping, not a production FIR/polyphase resampler.
+- Resampling uses a scalar Hann-windowed sinc FIR path; no optional SIMD or liquid-dsp backend is enabled yet.
+- Receiver and DDC windows use an explicit rectangular passband gain based on signal/window bandwidth overlap.
 - UDP streaming uses a renderer-to-UDP ringbuffer pipeline with sample-rate pacing.
 - Metrics are available per receiver and per stream.
 - Noise, gain, frontend impairments, IQ imbalance, and high-performance SIMD kernels are not yet implemented.

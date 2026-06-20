@@ -53,13 +53,23 @@ static void resample_sinc_ci16(const iq_ci16_t *samples, size_t sample_count, do
     *out_q = acc_q / weight_sum;
 }
 
-static bool signal_intersects(uint64_t signal_center, uint32_t signal_bw, uint64_t window_center, uint64_t window_bw)
+static double signal_passband_gain(uint64_t signal_center, uint32_t signal_bw, uint64_t window_center, uint64_t window_bw)
 {
     const int64_t sig_lo = (int64_t)signal_center - (int64_t)(signal_bw / 2U);
     const int64_t sig_hi = (int64_t)signal_center + (int64_t)(signal_bw / 2U);
     const int64_t win_lo = (int64_t)window_center - (int64_t)(window_bw / 2ULL);
     const int64_t win_hi = (int64_t)window_center + (int64_t)(window_bw / 2ULL);
-    return sig_hi >= win_lo && sig_lo <= win_hi;
+    if (signal_bw == 0U) {
+        const int64_t signal = (int64_t)signal_center;
+        return signal >= win_lo && signal <= win_hi ? 1.0 : 0.0;
+    }
+    const int64_t overlap_lo = sig_lo > win_lo ? sig_lo : win_lo;
+    const int64_t overlap_hi = sig_hi < win_hi ? sig_hi : win_hi;
+    if (overlap_hi <= overlap_lo) {
+        return 0.0;
+    }
+    const double power_fraction = (double)(overlap_hi - overlap_lo) / (double)signal_bw;
+    return sqrt(power_fraction);
 }
 
 static bool renderer_render_window_block(
@@ -85,9 +95,9 @@ static bool renderer_render_window_block(
         const scenario_signal_t *signal = &scenario->signals[s];
         const scenario_source_t *source = scenario_find_source(scenario, signal->source_reference);
         const cached_asset_t *asset = asset_cache_find(cache, signal->source_reference);
+        const double passband_gain = signal_passband_gain(signal->center_frequency_hz, signal->bandwidth_hz, window_center_hz, window_bandwidth_hz);
         uint64_t sample_offset = 0;
-        if (source == NULL || asset == NULL || !signal_intersects(signal->center_frequency_hz, signal->bandwidth_hz, window_center_hz, window_bandwidth_hz) ||
-            !iq_signal_active(signal, source, day_s, &sample_offset)) {
+        if (source == NULL || asset == NULL || passband_gain <= 0.0 || !iq_signal_active(signal, source, day_s, &sample_offset)) {
             continue;
         }
 
@@ -102,7 +112,7 @@ static bool renderer_render_window_block(
         const iq_ci16_t *source_samples = &asset->samples[sample_offset];
 
         const double offset_hz = (double)((int64_t)signal->center_frequency_hz - (int64_t)window_center_hz);
-        const double source_gain = output_scale * pow(10.0, (signal->power_dbm - rf_reference_power_dbm) / 20.0);
+        const double source_gain = passband_gain * output_scale * pow(10.0, (signal->power_dbm - rf_reference_power_dbm) / 20.0);
         const double phase_step = 2.0 * M_PI * offset_hz / (double)output_sample_rate_hz;
         const double step_c = cos(phase_step);
         const double step_s = sin(phase_step);

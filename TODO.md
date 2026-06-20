@@ -7,7 +7,7 @@
   - [x] FIR/polyphase scalar reference.
   - [ ] optional liquid-dsp backend.
   - [x] golden tests against Python/numpy.
-- [ ] Add explicit receiver/DDC passband filtering.
+- [x] Add explicit receiver/DDC passband filtering.
 - [x] Add scanner swept-signal golden tests:
   - [x] fixed RF signal moves through 80-MHz baseband over scenario time.
   - [x] same scenario time across instances gives identical baseband offset.
