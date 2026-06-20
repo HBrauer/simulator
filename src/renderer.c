@@ -72,6 +72,72 @@ static double signal_passband_gain(uint64_t signal_center, uint32_t signal_bw, u
     return sqrt(power_fraction);
 }
 
+static void mix_accumulate_sample(iq_ci16_t *out, size_t index, double sample_i, double sample_q, double gain, double osc_c, double osc_s)
+{
+    const double ii = gain * sample_i;
+    const double qq = gain * sample_q;
+    out[index].i = sim_clip_i16((double)out[index].i + (ii * osc_c - qq * osc_s));
+    out[index].q = sim_clip_i16((double)out[index].q + (ii * osc_s + qq * osc_c));
+}
+
+static void render_direct_baseband(const iq_ci16_t *source_samples, size_t read_count, iq_ci16_t *out, size_t count, double source_gain)
+{
+    const size_t limit = read_count < count ? read_count : count;
+    for (size_t i = 0; i < limit; i++) {
+        out[i].i = sim_clip_i16((double)out[i].i + source_gain * (double)source_samples[i].i);
+        out[i].q = sim_clip_i16((double)out[i].q + source_gain * (double)source_samples[i].q);
+    }
+}
+
+static void render_direct_nco(const iq_ci16_t *source_samples, size_t read_count, iq_ci16_t *out, size_t count, double source_gain, double step_c, double step_s)
+{
+    const size_t limit = read_count < count ? read_count : count;
+    double osc_c = 1.0;
+    double osc_s = 0.0;
+    for (size_t i = 0; i < limit; i++) {
+        mix_accumulate_sample(out, i, (double)source_samples[i].i, (double)source_samples[i].q, source_gain, osc_c, osc_s);
+        const double next_c = osc_c * step_c - osc_s * step_s;
+        const double next_s = osc_s * step_c + osc_c * step_s;
+        osc_c = next_c;
+        osc_s = next_s;
+    }
+}
+
+static void render_resampled_baseband(const iq_ci16_t *source_samples, size_t read_count, iq_ci16_t *out, size_t count, double source_gain, double source_per_output)
+{
+    for (size_t i = 0; i < count; i++) {
+        const double source_position = (double)i * source_per_output;
+        if ((size_t)floor(source_position) >= read_count) {
+            break;
+        }
+        double resampled_i = 0.0;
+        double resampled_q = 0.0;
+        resample_sinc_ci16(source_samples, read_count, source_position, &resampled_i, &resampled_q);
+        out[i].i = sim_clip_i16((double)out[i].i + source_gain * resampled_i);
+        out[i].q = sim_clip_i16((double)out[i].q + source_gain * resampled_q);
+    }
+}
+
+static void render_resampled_nco(const iq_ci16_t *source_samples, size_t read_count, iq_ci16_t *out, size_t count, double source_gain, double source_per_output, double step_c, double step_s)
+{
+    double osc_c = 1.0;
+    double osc_s = 0.0;
+    for (size_t i = 0; i < count; i++) {
+        const double source_position = (double)i * source_per_output;
+        if ((size_t)floor(source_position) >= read_count) {
+            break;
+        }
+        double resampled_i = 0.0;
+        double resampled_q = 0.0;
+        resample_sinc_ci16(source_samples, read_count, source_position, &resampled_i, &resampled_q);
+        mix_accumulate_sample(out, i, resampled_i, resampled_q, source_gain, osc_c, osc_s);
+        const double next_c = osc_c * step_c - osc_s * step_s;
+        const double next_s = osc_s * step_c + osc_c * step_s;
+        osc_c = next_c;
+        osc_s = next_s;
+    }
+}
+
 static bool renderer_render_window_block(
     const scenario_t *scenario,
     const asset_cache_t *cache,
@@ -116,24 +182,14 @@ static bool renderer_render_window_block(
         const double phase_step = 2.0 * M_PI * offset_hz / (double)output_sample_rate_hz;
         const double step_c = cos(phase_step);
         const double step_s = sin(phase_step);
-        double osc_c = 1.0;
-        double osc_s = 0.0;
-        for (size_t i = 0; i < count; i++) {
-            const double source_position = (double)i * source_per_output;
-            if ((size_t)floor(source_position) >= read_count) {
-                break;
-            }
-            double resampled_i = 0.0;
-            double resampled_q = 0.0;
-            resample_sinc_ci16(source_samples, read_count, source_position, &resampled_i, &resampled_q);
-            const double ii = source_gain * resampled_i;
-            const double qq = source_gain * resampled_q;
-            out[i].i = sim_clip_i16((double)out[i].i + (ii * osc_c - qq * osc_s));
-            out[i].q = sim_clip_i16((double)out[i].q + (ii * osc_s + qq * osc_c));
-            const double next_c = osc_c * step_c - osc_s * step_s;
-            const double next_s = osc_s * step_c + osc_c * step_s;
-            osc_c = next_c;
-            osc_s = next_s;
+        if (source->sample_rate_hz == output_sample_rate_hz && offset_hz == 0.0) {
+            render_direct_baseband(source_samples, read_count, out, count, source_gain);
+        } else if (source->sample_rate_hz == output_sample_rate_hz) {
+            render_direct_nco(source_samples, read_count, out, count, source_gain, step_c, step_s);
+        } else if (offset_hz == 0.0) {
+            render_resampled_baseband(source_samples, read_count, out, count, source_gain, source_per_output);
+        } else {
+            render_resampled_nco(source_samples, read_count, out, count, source_gain, source_per_output, step_c, step_s);
         }
         if (stats != NULL) {
             stats->active_signals++;

@@ -21,6 +21,7 @@
 - [x] Add configurable stream enable/disable switches to avoid rendering unused streams.
 - [x] Add batch asset reads/cache memory limit handling for larger IQ files.
 - [ ] Add SIMD/VOLK or hand-vectorized hot loops for:
+  - [x] scalar hot-path split for direct baseband, direct NCO, resampled baseband, and resampled NCO rendering.
   - [ ] interpolation.
   - [ ] NCO complex multiply.
   - [ ] gain/clipping.
