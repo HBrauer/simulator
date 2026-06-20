@@ -8,6 +8,51 @@
 #include <math.h>
 #include <string.h>
 
+#define RESAMPLER_RADIUS 4
+
+static double sinc_value(double x)
+{
+    if (fabs(x) < 1e-12) {
+        return 1.0;
+    }
+    return sin(M_PI * x) / (M_PI * x);
+}
+
+static double hann_window(double distance)
+{
+    const double normalized = fabs(distance) / (double)RESAMPLER_RADIUS;
+    if (normalized >= 1.0) {
+        return 0.0;
+    }
+    return 0.5 + 0.5 * cos(M_PI * normalized);
+}
+
+static void resample_sinc_ci16(const iq_ci16_t *samples, size_t sample_count, double source_position, double *out_i, double *out_q)
+{
+    const int64_t center = (int64_t)floor(source_position);
+    double acc_i = 0.0;
+    double acc_q = 0.0;
+    double weight_sum = 0.0;
+    for (int tap = -RESAMPLER_RADIUS + 1; tap <= RESAMPLER_RADIUS; tap++) {
+        const int64_t index = center + tap;
+        if (index < 0 || (uint64_t)index >= sample_count) {
+            continue;
+        }
+        const double distance = source_position - (double)index;
+        const double weight = sinc_value(distance) * hann_window(distance);
+        acc_i += (double)samples[index].i * weight;
+        acc_q += (double)samples[index].q * weight;
+        weight_sum += weight;
+    }
+    if (fabs(weight_sum) < 1e-12) {
+        *out_i = 0.0;
+        *out_q = 0.0;
+        return;
+    }
+    *out_i = acc_i / weight_sum;
+    *out_q = acc_q / weight_sum;
+}
+
 static bool signal_intersects(uint64_t signal_center, uint32_t signal_bw, uint64_t window_center, uint64_t window_bw)
 {
     const int64_t sig_lo = (int64_t)signal_center - (int64_t)(signal_bw / 2U);
@@ -47,7 +92,7 @@ static bool renderer_render_window_block(
         }
 
         const double source_per_output = (double)source->sample_rate_hz / (double)output_sample_rate_hz;
-        const uint64_t needed_source_samples = (uint64_t)ceil((double)(count > 0 ? count - 1 : 0) * source_per_output) + 2ULL;
+        const uint64_t needed_source_samples = (uint64_t)ceil((double)(count > 0 ? count - 1 : 0) * source_per_output) + (uint64_t)RESAMPLER_RADIUS + 2ULL;
         if (needed_source_samples > 4096ULL) {
             continue;
         }
@@ -65,18 +110,14 @@ static bool renderer_render_window_block(
         double osc_s = 0.0;
         for (size_t i = 0; i < count; i++) {
             const double source_position = (double)i * source_per_output;
-            const size_t src_index = (size_t)floor(source_position);
-            const double frac = source_position - (double)src_index;
-            if (src_index >= read_count) {
+            if ((size_t)floor(source_position) >= read_count) {
                 break;
             }
-            const size_t next_index = src_index + 1 < read_count ? src_index + 1 : src_index;
-            const double i0 = (double)source_samples[src_index].i;
-            const double q0 = (double)source_samples[src_index].q;
-            const double i1 = (double)source_samples[next_index].i;
-            const double q1 = (double)source_samples[next_index].q;
-            const double ii = source_gain * (i0 + frac * (i1 - i0));
-            const double qq = source_gain * (q0 + frac * (q1 - q0));
+            double resampled_i = 0.0;
+            double resampled_q = 0.0;
+            resample_sinc_ci16(source_samples, read_count, source_position, &resampled_i, &resampled_q);
+            const double ii = source_gain * resampled_i;
+            const double qq = source_gain * resampled_q;
             out[i].i = sim_clip_i16((double)out[i].i + (ii * osc_c - qq * osc_s));
             out[i].q = sim_clip_i16((double)out[i].q + (ii * osc_s + qq * osc_c));
             const double next_c = osc_c * step_c - osc_s * step_s;

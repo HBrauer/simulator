@@ -60,7 +60,7 @@ build/sdr-simulator \
 Expected hash at the current implementation state:
 
 ```text
-502c8f1822c3c6a487a8d1f82e9876be32a1e7e78b9ce98fb90e6f22fd7781f4
+3ba633e9e4e83cd97f0fad2e69b2c5e39d7654f3f6e8f6e3f8673c63adea09fa
 ```
 
 ## Tests

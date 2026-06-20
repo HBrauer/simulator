@@ -21,6 +21,41 @@ static int16_t interpolate_scaled_i16(int16_t a, int16_t b, double frac, double 
     return (int16_t)lrint(value);
 }
 
+static double test_sinc(double x)
+{
+    if (fabs(x) < 1e-12) {
+        return 1.0;
+    }
+    return sin(M_PI * x) / (M_PI * x);
+}
+
+static double test_hann(double distance)
+{
+    const double normalized = fabs(distance) / 4.0;
+    if (normalized >= 1.0) {
+        return 0.0;
+    }
+    return 0.5 + 0.5 * cos(M_PI * normalized);
+}
+
+static int16_t sinc_scaled_i16(const iq_ci16_t *samples, size_t sample_count, double source_position, bool q, double gain)
+{
+    const int64_t center = (int64_t)floor(source_position);
+    double acc = 0.0;
+    double weight_sum = 0.0;
+    for (int tap = -3; tap <= 4; tap++) {
+        const int64_t index = center + tap;
+        if (index < 0 || (uint64_t)index >= sample_count) {
+            continue;
+        }
+        const double distance = source_position - (double)index;
+        const double weight = test_sinc(distance) * test_hann(distance);
+        acc += (double)(q ? samples[index].q : samples[index].i) * weight;
+        weight_sum += weight;
+    }
+    return interpolate_scaled_i16((int16_t)lrint(acc / weight_sum), (int16_t)lrint(acc / weight_sum), 0.0, gain);
+}
+
 static void setup_two_signal_mix(scenario_t *scenario, asset_cache_t *cache, iq_ci16_t *asset_a, iq_ci16_t *asset_b, int16_t a_i, int16_t a_q, int16_t b_i, int16_t b_q)
 {
     memset(scenario, 0, sizeof(*scenario));
@@ -154,7 +189,7 @@ START_TEST(renders_nonzero_visible_signal)
 }
 END_TEST
 
-START_TEST(renderer_80mhz_linearly_interpolates_24576_source_to_98304_output)
+START_TEST(renderer_80mhz_sinc_resamples_24576_source_to_98304_output)
 {
     simulator_config_t config;
     scenario_t scenario;
@@ -174,12 +209,12 @@ START_TEST(renderer_80mhz_linearly_interpolates_24576_source_to_98304_output)
     ck_assert_ptr_nonnull(asset);
     const double gain = 1.0;
     const size_t offset = 11059;
-    ck_assert_int_eq(out[0].i, interpolate_scaled_i16(asset->samples[offset].i, asset->samples[offset].i, 0.0, gain));
-    ck_assert_int_eq(out[0].q, interpolate_scaled_i16(asset->samples[offset].q, asset->samples[offset].q, 0.0, gain));
-    ck_assert_int_eq(out[1].i, interpolate_scaled_i16(asset->samples[offset].i, asset->samples[offset + 1].i, 0.25, gain));
-    ck_assert_int_eq(out[2].i, interpolate_scaled_i16(asset->samples[offset].i, asset->samples[offset + 1].i, 0.50, gain));
-    ck_assert_int_eq(out[3].i, interpolate_scaled_i16(asset->samples[offset].i, asset->samples[offset + 1].i, 0.75, gain));
-    ck_assert_int_eq(out[4].i, interpolate_scaled_i16(asset->samples[offset + 1].i, asset->samples[offset + 1].i, 0.0, gain));
+    ck_assert_int_eq(out[0].i, sinc_scaled_i16(&asset->samples[offset], 8, 0.0, false, gain));
+    ck_assert_int_eq(out[0].q, sinc_scaled_i16(&asset->samples[offset], 8, 0.0, true, gain));
+    ck_assert_int_eq(out[1].i, sinc_scaled_i16(&asset->samples[offset], 8, 0.25, false, gain));
+    ck_assert_int_eq(out[2].i, sinc_scaled_i16(&asset->samples[offset], 8, 0.50, false, gain));
+    ck_assert_int_eq(out[3].i, sinc_scaled_i16(&asset->samples[offset], 8, 0.75, false, gain));
+    ck_assert_int_eq(out[4].i, sinc_scaled_i16(&asset->samples[offset], 8, 1.0, false, gain));
     asset_cache_free(&cache);
 }
 END_TEST
@@ -338,7 +373,7 @@ Suite *renderer_suite(void)
     Suite *suite = suite_create("renderer");
     TCase *tc = tcase_create("core");
     tcase_add_test(tc, renders_nonzero_visible_signal);
-    tcase_add_test(tc, renderer_80mhz_linearly_interpolates_24576_source_to_98304_output);
+    tcase_add_test(tc, renderer_80mhz_sinc_resamples_24576_source_to_98304_output);
     tcase_add_test(tc, renderer_applies_rf_power_relative_to_reference);
     tcase_add_test(tc, renderer_mixes_two_signals_without_clipping);
     tcase_add_test(tc, renderer_clips_after_mixing_two_signals);

@@ -4,9 +4,9 @@
 
 - [x] Add a calibrated RF power model that maps `power_dbm` plus source `nominal_level_dbfs` to digital dBFS.
 - [ ] Replace linear interpolation with a production resampler path:
-  - [ ] FIR/polyphase scalar reference.
+  - [x] FIR/polyphase scalar reference.
   - [ ] optional liquid-dsp backend.
-  - [ ] golden tests against Python/numpy.
+  - [x] golden tests against Python/numpy.
 - [ ] Add explicit receiver/DDC passband filtering.
 - [x] Add scanner swept-signal golden tests:
   - [x] fixed RF signal moves through 80-MHz baseband over scenario time.
