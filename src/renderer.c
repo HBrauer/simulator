@@ -3,10 +3,20 @@
 #include "nco.h"
 #include "receiver.h"
 #include "scenario.h"
+#include "sim_config.h"
 #include "timebase.h"
 
+#include <complex.h>
 #include <math.h>
+#include <stdlib.h>
 #include <string.h>
+
+#if SIM_USE_LIQUID_RESAMPLER
+#include <liquid/liquid.h>
+#endif
+#if SIM_HAVE_VOLK
+#include <volk/volk.h>
+#endif
 
 #define RESAMPLER_RADIUS 4
 
@@ -27,6 +37,7 @@ static double hann_window(double distance)
     return 0.5 + 0.5 * cos(M_PI * normalized);
 }
 
+#if !SIM_USE_LIQUID_RESAMPLER
 static void resample_sinc_ci16(const iq_ci16_t *samples, size_t sample_count, double source_position, double *out_i, double *out_q)
 {
     const int64_t center = (int64_t)floor(source_position);
@@ -51,6 +62,51 @@ static void resample_sinc_ci16(const iq_ci16_t *samples, size_t sample_count, do
     }
     *out_i = acc_i / weight_sum;
     *out_q = acc_q / weight_sum;
+}
+#endif
+
+#if SIM_USE_LIQUID_RESAMPLER
+static void resample_liquid_ci16(const iq_ci16_t *samples, size_t sample_count, double source_position, double *out_i, double *out_q)
+{
+    const int64_t center = (int64_t)floor(source_position);
+    float weights[2 * RESAMPLER_RADIUS];
+    liquid_float_complex input[2 * RESAMPLER_RADIUS];
+    unsigned int tap_count = 0;
+    double weight_sum = 0.0;
+    for (int tap = -RESAMPLER_RADIUS + 1; tap <= RESAMPLER_RADIUS; tap++) {
+        const int64_t index = center + tap;
+        if (index < 0 || (uint64_t)index >= sample_count) {
+            continue;
+        }
+        const double distance = source_position - (double)index;
+        const double weight = sinc_value(distance) * hann_window(distance);
+        weights[tap_count] = (float)weight;
+        input[tap_count] = (float)samples[index].i + (float)samples[index].q * I;
+        weight_sum += weight;
+        tap_count++;
+    }
+    if (tap_count == 0 || fabs(weight_sum) < 1e-12) {
+        *out_i = 0.0;
+        *out_q = 0.0;
+        return;
+    }
+    for (unsigned int i = 0; i < tap_count; i++) {
+        weights[i] = (float)((double)weights[i] / weight_sum);
+    }
+    liquid_float_complex y = 0.0f;
+    dotprod_crcf_run4(weights, input, tap_count, &y);
+    *out_i = (double)crealf(y);
+    *out_q = (double)cimagf(y);
+}
+#endif
+
+static void resample_ci16(const iq_ci16_t *samples, size_t sample_count, double source_position, double *out_i, double *out_q)
+{
+#if SIM_USE_LIQUID_RESAMPLER
+    resample_liquid_ci16(samples, sample_count, source_position, out_i, out_q);
+#else
+    resample_sinc_ci16(samples, sample_count, source_position, out_i, out_q);
+#endif
 }
 
 static double signal_passband_gain(uint64_t signal_center, uint32_t signal_bw, uint64_t window_center, uint64_t window_bw)
@@ -80,18 +136,54 @@ static void mix_accumulate_sample(iq_ci16_t *out, size_t index, double sample_i,
     out[index].q = sim_clip_i16((double)out[index].q + (ii * osc_s + qq * osc_c));
 }
 
+static void accumulate_direct_baseband(iq_ci16_t *out, const iq_ci16_t *source_samples, size_t index, double source_gain)
+{
+    out[index].i = sim_clip_i16((double)out[index].i + source_gain * (double)source_samples[index].i);
+    out[index].q = sim_clip_i16((double)out[index].q + source_gain * (double)source_samples[index].q);
+}
+
 static void render_direct_baseband(const iq_ci16_t *source_samples, size_t read_count, iq_ci16_t *out, size_t count, double source_gain)
 {
     const size_t limit = read_count < count ? read_count : count;
-    for (size_t i = 0; i < limit; i++) {
-        out[i].i = sim_clip_i16((double)out[i].i + source_gain * (double)source_samples[i].i);
-        out[i].q = sim_clip_i16((double)out[i].q + source_gain * (double)source_samples[i].q);
+    size_t i = 0;
+    for (; i + 3 < limit; i += 4) {
+        accumulate_direct_baseband(out, source_samples, i, source_gain);
+        accumulate_direct_baseband(out, source_samples, i + 1, source_gain);
+        accumulate_direct_baseband(out, source_samples, i + 2, source_gain);
+        accumulate_direct_baseband(out, source_samples, i + 3, source_gain);
+    }
+    for (; i < limit; i++) {
+        accumulate_direct_baseband(out, source_samples, i, source_gain);
     }
 }
 
 static void render_direct_nco(const iq_ci16_t *source_samples, size_t read_count, iq_ci16_t *out, size_t count, double source_gain, double step_c, double step_s)
 {
     const size_t limit = read_count < count ? read_count : count;
+#if SIM_HAVE_VOLK
+    if (limit >= 16) {
+        const size_t alignment = volk_get_alignment();
+        lv_32fc_t *input = volk_malloc(limit * sizeof(*input), alignment);
+        lv_32fc_t *rotated = volk_malloc(limit * sizeof(*rotated), alignment);
+        if (input != NULL && rotated != NULL) {
+            for (size_t i = 0; i < limit; i++) {
+                input[i] = (float)source_samples[i].i + (float)source_samples[i].q * I;
+            }
+            lv_32fc_t phase = 1.0f + 0.0f * I;
+            const lv_32fc_t phase_inc = (float)step_c + (float)step_s * I;
+            volk_32fc_s32fc_x2_rotator2_32fc(rotated, input, &phase_inc, &phase, (unsigned int)limit);
+            for (size_t i = 0; i < limit; i++) {
+                out[i].i = sim_clip_i16((double)out[i].i + source_gain * (double)crealf(rotated[i]));
+                out[i].q = sim_clip_i16((double)out[i].q + source_gain * (double)cimagf(rotated[i]));
+            }
+            volk_free(rotated);
+            volk_free(input);
+            return;
+        }
+        volk_free(rotated);
+        volk_free(input);
+    }
+#endif
     double osc_c = 1.0;
     double osc_s = 0.0;
     for (size_t i = 0; i < limit; i++) {
@@ -112,7 +204,7 @@ static void render_resampled_baseband(const iq_ci16_t *source_samples, size_t re
         }
         double resampled_i = 0.0;
         double resampled_q = 0.0;
-        resample_sinc_ci16(source_samples, read_count, source_position, &resampled_i, &resampled_q);
+        resample_ci16(source_samples, read_count, source_position, &resampled_i, &resampled_q);
         out[i].i = sim_clip_i16((double)out[i].i + source_gain * resampled_i);
         out[i].q = sim_clip_i16((double)out[i].q + source_gain * resampled_q);
     }
@@ -129,7 +221,7 @@ static void render_resampled_nco(const iq_ci16_t *source_samples, size_t read_co
         }
         double resampled_i = 0.0;
         double resampled_q = 0.0;
-        resample_sinc_ci16(source_samples, read_count, source_position, &resampled_i, &resampled_q);
+        resample_ci16(source_samples, read_count, source_position, &resampled_i, &resampled_q);
         mix_accumulate_sample(out, i, resampled_i, resampled_q, source_gain, osc_c, osc_s);
         const double next_c = osc_c * step_c - osc_s * step_s;
         const double next_s = osc_s * step_c + osc_c * step_s;

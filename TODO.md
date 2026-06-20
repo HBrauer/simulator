@@ -3,9 +3,9 @@
 ## Correctness
 
 - [x] Add a calibrated RF power model that maps `power_dbm` plus source `nominal_level_dbfs` to digital dBFS.
-- [ ] Replace linear interpolation with a production resampler path:
+- [x] Replace linear interpolation with a production resampler path:
   - [x] FIR/polyphase scalar reference.
-  - [ ] optional liquid-dsp backend.
+  - [x] optional liquid-dsp backend.
   - [x] golden tests against Python/numpy.
 - [x] Add explicit receiver/DDC passband filtering.
 - [x] Add scanner swept-signal golden tests:
@@ -20,12 +20,12 @@
 - [x] Add per-stream underrun/overrun/drop counters.
 - [x] Add configurable stream enable/disable switches to avoid rendering unused streams.
 - [x] Add batch asset reads/cache memory limit handling for larger IQ files.
-- [ ] Add SIMD/VOLK or hand-vectorized hot loops for:
+- [x] Add SIMD/VOLK or hand-vectorized hot loops for:
   - [x] scalar hot-path split for direct baseband, direct NCO, resampled baseband, and resampled NCO rendering.
-  - [ ] interpolation.
-  - [ ] NCO complex multiply.
-  - [ ] gain/clipping.
-  - [ ] summation.
+  - [x] interpolation.
+  - [x] NCO complex multiply.
+  - [x] gain/clipping.
+  - [x] summation.
 - [x] Add CPU affinity/thread configuration from YAML.
 - [x] Add 1, 4, and 12 receiver stress benchmarks.
 - [x] Add long-running soak test.

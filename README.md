@@ -117,8 +117,9 @@ The benchmark reports scalar 80-MHz renderer throughput in samples per second. T
 
 ## Current Limits
 
-- DSP path is scalar and correctness-first, with specialized direct/resampled and baseband/NCO render loops.
-- Resampling uses a scalar Hann-windowed sinc FIR path; no optional SIMD or liquid-dsp backend is enabled yet.
+- DSP path is correctness-first, with specialized direct/resampled and baseband/NCO render loops.
+- Resampling uses a scalar Hann-windowed sinc FIR path by default; `-Dliquid_resampler=enabled` builds the optional liquid-dsp dot-product backend.
+- VOLK is detected by Meson and used for direct NCO rotation when available.
 - Receiver and DDC windows use an explicit rectangular passband gain based on signal/window bandwidth overlap.
 - UDP streaming uses a renderer-to-UDP ringbuffer pipeline with sample-rate pacing.
 - Metrics are available per receiver and per stream.

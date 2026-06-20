@@ -12,6 +12,15 @@ microhttpd_dep = dependency('libmicrohttpd', required: true)
 jansson_dep = dependency('jansson', required: true)
 yaml_dep = dependency('yaml-0.1', required: true)
 check_dep = dependency('check', required: true)
+liquid_resampler_opt = get_option('liquid_resampler')
+volk_accel_opt = get_option('volk_accel')
+liquid_dep = cc.find_library('liquid', required: liquid_resampler_opt)
+volk_dep = dependency('volk', required: volk_accel_opt)
+
+config_data = configuration_data()
+config_data.set10('SIM_USE_LIQUID_RESAMPLER', liquid_dep.found() and not liquid_resampler_opt.disabled())
+config_data.set10('SIM_HAVE_VOLK', volk_dep.found() and not volk_accel_opt.disabled())
+configure_file(output: 'sim_config.h', configuration: config_data)
 
 common_args = [
   '-D_GNU_SOURCE',
@@ -41,15 +50,23 @@ sim_sources = files(
 )
 
 sim_deps = [m_dep, thread_dep, microhttpd_dep, jansson_dep, yaml_dep]
+if liquid_dep.found() and not liquid_resampler_opt.disabled()
+  sim_deps += [liquid_dep]
+endif
+if volk_dep.found() and not volk_accel_opt.disabled()
+  sim_deps += [volk_dep]
+endif
 
-sim_lib = static_library('simcore', sim_sources, dependencies: sim_deps, include_directories: include_directories('src'))
+sim_includes = include_directories('src', '.')
+
+sim_lib = static_library('simcore', sim_sources, dependencies: sim_deps, include_directories: sim_includes)
 
 simulator = executable(
   'sdr-simulator',
   'src/main.c',
   link_with: sim_lib,
   dependencies: sim_deps,
-  include_directories: include_directories('src'),
+  include_directories: sim_includes,
   install: false
 )
 
@@ -68,7 +85,7 @@ unit_tests = executable(
   ),
   link_with: sim_lib,
   dependencies: sim_deps + [check_dep],
-  include_directories: include_directories('src')
+  include_directories: sim_includes
 )
 
 test('unit', unit_tests, workdir: meson.project_source_root(), suite: 'unit')
@@ -78,7 +95,7 @@ renderer_benchmark = executable(
   'tests/benchmarks/renderer_benchmark.c',
   link_with: sim_lib,
   dependencies: sim_deps,
-  include_directories: include_directories('src')
+  include_directories: sim_includes
 )
 
 benchmark('renderer_80mhz_scalar_1_receiver', renderer_benchmark, args: ['1000', '4096', '--receivers', '1'], workdir: meson.project_source_root(), timeout: 60)
