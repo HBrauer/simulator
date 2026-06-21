@@ -1,2 +1,4 @@
 option('liquid_resampler', type: 'feature', value: 'disabled', description: 'Use liquid-dsp dot-product backend for FIR resampling')
 option('volk_accel', type: 'feature', value: 'auto', description: 'Enable optional VOLK acceleration where implemented')
+option('native_optimizations', type: 'boolean', value: false, description: 'Build with native CPU tuning flags such as -march=native')
+option('fast_math', type: 'boolean', value: false, description: 'Build with fast floating-point math for maximum runtime throughput')

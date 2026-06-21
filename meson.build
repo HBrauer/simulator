@@ -22,6 +22,19 @@ config_data.set10('SIM_USE_LIQUID_RESAMPLER', liquid_dep.found() and not liquid_
 config_data.set10('SIM_HAVE_VOLK', volk_dep.found() and not volk_accel_opt.disabled())
 configure_file(output: 'sim_config.h', configuration: config_data)
 
+if get_option('native_optimizations')
+  if cc.has_argument('-march=native')
+    add_project_arguments('-march=native', language: 'c')
+    add_project_link_arguments('-march=native', language: 'c')
+  endif
+endif
+
+if get_option('fast_math')
+  if cc.has_argument('-ffast-math')
+    add_project_arguments('-ffast-math', language: 'c')
+  endif
+endif
+
 common_args = [
   '-D_GNU_SOURCE',
   '-Wall',

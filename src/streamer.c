@@ -15,6 +15,8 @@
 #include <unistd.h>
 
 #define STREAM_FRAME_HEADER_BYTES 24U
+#define RENDER_BACKPRESSURE_NS 1000000L
+#define RINGBUFFER_PACKET_CAPACITY 64U
 
 typedef enum {
     STREAM_KIND_80MHZ,
@@ -73,6 +75,27 @@ static void sleep_for_block(size_t block_samples, uint32_t sample_rate_hz)
     struct timespec ts = {
         .tv_sec = (time_t)(duration_ns / 1000000000ULL),
         .tv_nsec = (long)(duration_ns % 1000000000ULL),
+    };
+    nanosleep(&ts, NULL);
+}
+
+static uint64_t monotonic_now_ns(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
+static void sleep_until_monotonic_ns(uint64_t deadline_ns)
+{
+    const uint64_t now_ns = monotonic_now_ns();
+    if (deadline_ns <= now_ns) {
+        return;
+    }
+    const uint64_t sleep_ns = deadline_ns - now_ns;
+    struct timespec ts = {
+        .tv_sec = (time_t)(sleep_ns / 1000000000ULL),
+        .tv_nsec = (long)(sleep_ns % 1000000000ULL),
     };
     nanosleep(&ts, NULL);
 }
@@ -181,25 +204,41 @@ static void *stream_render_thread_main(void *arg)
     if (buffer == NULL) {
         return NULL;
     }
+    uint64_t render_time_ns = timebase_now_ns(worker->timebase);
 
     while (atomic_load(worker->running)) {
-        const uint64_t scenario_time_ns = timebase_now_ns(worker->timebase);
         pthread_mutex_lock(worker->receiver_lock);
         receiver_config_t receiver_snapshot = *worker->receiver;
         ddc_config_t ddc_snapshot = receiver_snapshot.ddc[worker->ddc_index];
         pthread_mutex_unlock(worker->receiver_lock);
+        const uint32_t sample_rate_hz = stream_sample_rate(worker, &receiver_snapshot, &ddc_snapshot);
+        const uint64_t block_duration_ns = streamer_block_duration_ns(worker->block_samples, sample_rate_hz);
 
         if (!stream_enabled(worker, &receiver_snapshot, &ddc_snapshot)) {
             stream_worker_set_active(worker, false);
             pthread_mutex_lock(&worker->ringbuffer_lock);
             ringbuffer_clear(&worker->ringbuffer);
             pthread_mutex_unlock(&worker->ringbuffer_lock);
-            sleep_for_block(worker->block_samples, stream_sample_rate(worker, &receiver_snapshot, &ddc_snapshot));
+            render_time_ns = timebase_now_ns(worker->timebase);
+            sleep_for_block(worker->block_samples, sample_rate_hz);
             continue;
         }
         stream_worker_set_active(worker, true);
 
-        render_one_block(worker, buffer, &receiver_snapshot, &ddc_snapshot, scenario_time_ns);
+        pthread_mutex_lock(&worker->ringbuffer_lock);
+        const bool has_space = ringbuffer_available(&worker->ringbuffer) >= worker->packet_bytes;
+        pthread_mutex_unlock(&worker->ringbuffer_lock);
+        if (!has_space) {
+            struct timespec ts = {.tv_sec = 0, .tv_nsec = RENDER_BACKPRESSURE_NS};
+            nanosleep(&ts, NULL);
+            continue;
+        }
+
+        const uint64_t now_ns = timebase_now_ns(worker->timebase);
+        if (render_time_ns < now_ns) {
+            render_time_ns = now_ns;
+        }
+        render_one_block(worker, buffer, &receiver_snapshot, &ddc_snapshot, render_time_ns);
 
         pthread_mutex_lock(&worker->ringbuffer_lock);
         if (ringbuffer_available(&worker->ringbuffer) >= worker->packet_bytes) {
@@ -209,7 +248,11 @@ static void *stream_render_thread_main(void *arg)
         }
         pthread_mutex_unlock(&worker->ringbuffer_lock);
 
-        sleep_for_block(worker->block_samples, stream_sample_rate(worker, &receiver_snapshot, &ddc_snapshot));
+        if (block_duration_ns > 0 && render_time_ns <= UINT64_MAX - block_duration_ns) {
+            render_time_ns += block_duration_ns;
+        } else {
+            render_time_ns = timebase_now_ns(worker->timebase);
+        }
     }
 
     free(buffer);
@@ -242,6 +285,7 @@ static void *stream_udp_thread_main(void *arg)
         return NULL;
     }
     uint8_t *payload = worker->framed_udp ? packet + STREAM_FRAME_HEADER_BYTES : packet;
+    uint64_t next_send_ns = monotonic_now_ns();
 
     while (atomic_load(worker->running)) {
         const uint64_t scenario_time_ns = timebase_now_ns(worker->timebase);
@@ -251,9 +295,11 @@ static void *stream_udp_thread_main(void *arg)
         pthread_mutex_unlock(worker->receiver_lock);
 
         if (!stream_enabled(worker, &receiver_snapshot, &ddc_snapshot)) {
+            next_send_ns = monotonic_now_ns();
             sleep_for_block(worker->block_samples, stream_sample_rate(worker, &receiver_snapshot, &ddc_snapshot));
             continue;
         }
+        const uint64_t block_duration_ns = streamer_block_duration_ns(worker->block_samples, stream_sample_rate(worker, &receiver_snapshot, &ddc_snapshot));
 
         bool got_packet = false;
         pthread_mutex_lock(&worker->ringbuffer_lock);
@@ -265,7 +311,12 @@ static void *stream_udp_thread_main(void *arg)
 
         if (!got_packet) {
             record_underrun(worker);
-            sleep_for_block(worker->block_samples, stream_sample_rate(worker, &receiver_snapshot, &ddc_snapshot));
+            if (block_duration_ns > 0 && next_send_ns <= UINT64_MAX - block_duration_ns) {
+                next_send_ns += block_duration_ns;
+                sleep_until_monotonic_ns(next_send_ns);
+            } else {
+                next_send_ns = monotonic_now_ns();
+            }
             continue;
         }
 
@@ -285,7 +336,17 @@ static void *stream_udp_thread_main(void *arg)
             atomic_fetch_add(&worker->metrics->udp_send_errors, 1);
             atomic_fetch_add(&worker->stream_metrics->udp_send_errors, 1);
         }
-        sleep_for_block(worker->block_samples, stream_sample_rate(worker, &receiver_snapshot, &ddc_snapshot));
+        if (block_duration_ns > 0 && next_send_ns <= UINT64_MAX - block_duration_ns) {
+            next_send_ns += block_duration_ns;
+            const uint64_t now_ns = monotonic_now_ns();
+            if (next_send_ns + block_duration_ns < now_ns) {
+                next_send_ns = now_ns;
+            } else {
+                sleep_until_monotonic_ns(next_send_ns);
+            }
+        } else {
+            next_send_ns = monotonic_now_ns();
+        }
     }
 
     free(packet);
@@ -296,7 +357,7 @@ static void *stream_udp_thread_main(void *arg)
 static bool stream_worker_start(stream_worker_t *worker)
 {
     worker->packet_bytes = worker->block_samples * sizeof(iq_ci16_t);
-    if (!ringbuffer_init(&worker->ringbuffer, worker->packet_bytes * 8U)) {
+    if (!ringbuffer_init(&worker->ringbuffer, worker->packet_bytes * RINGBUFFER_PACKET_CAPACITY)) {
         return false;
     }
     worker->ringbuffer_initialized = true;

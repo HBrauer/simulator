@@ -37,10 +37,15 @@ size_t ringbuffer_write(ringbuffer_t *rb, const uint8_t *data, size_t length)
 {
     const size_t writable = rb->capacity - rb->fill;
     const size_t n = length < writable ? length : writable;
-    for (size_t i = 0; i < n; i++) {
-        rb->data[rb->write_pos] = data[i];
-        rb->write_pos = (rb->write_pos + 1) % rb->capacity;
+    const size_t first = rb->capacity - rb->write_pos < n ? rb->capacity - rb->write_pos : n;
+    if (first > 0) {
+        memcpy(&rb->data[rb->write_pos], data, first);
     }
+    const size_t second = n - first;
+    if (second > 0) {
+        memcpy(rb->data, data + first, second);
+    }
+    rb->write_pos = (rb->write_pos + n) % rb->capacity;
     rb->fill += n;
     return n;
 }
@@ -48,10 +53,15 @@ size_t ringbuffer_write(ringbuffer_t *rb, const uint8_t *data, size_t length)
 size_t ringbuffer_read(ringbuffer_t *rb, uint8_t *data, size_t length)
 {
     const size_t n = length < rb->fill ? length : rb->fill;
-    for (size_t i = 0; i < n; i++) {
-        data[i] = rb->data[rb->read_pos];
-        rb->read_pos = (rb->read_pos + 1) % rb->capacity;
+    const size_t first = rb->capacity - rb->read_pos < n ? rb->capacity - rb->read_pos : n;
+    if (first > 0) {
+        memcpy(data, &rb->data[rb->read_pos], first);
     }
+    const size_t second = n - first;
+    if (second > 0) {
+        memcpy(data + first, rb->data, second);
+    }
+    rb->read_pos = (rb->read_pos + n) % rb->capacity;
     rb->fill -= n;
     return n;
 }

@@ -19,6 +19,9 @@
 #endif
 
 #define RESAMPLER_RADIUS 4
+#define RESAMPLER_TAPS 8U
+
+static void resample_ci16(const iq_ci16_t *samples, size_t sample_count, double source_position, double *out_i, double *out_q);
 
 static double sinc_value(double x)
 {
@@ -35,6 +38,90 @@ static double hann_window(double distance)
         return 0.0;
     }
     return 0.5 + 0.5 * cos(M_PI * normalized);
+}
+
+static void build_quarter_phase_weights(double weights[4][RESAMPLER_TAPS])
+{
+    for (size_t phase = 0; phase < 4; phase++) {
+        const double fraction = (double)phase * 0.25;
+        double weight_sum = 0.0;
+        for (size_t tap_index = 0; tap_index < RESAMPLER_TAPS; tap_index++) {
+            const int tap = (int)tap_index - RESAMPLER_RADIUS + 1;
+            const double distance = fraction - (double)tap;
+            const double weight = sinc_value(distance) * hann_window(distance);
+            weights[phase][tap_index] = weight;
+            weight_sum += weight;
+        }
+        if (fabs(weight_sum) >= 1e-12) {
+            for (size_t tap_index = 0; tap_index < RESAMPLER_TAPS; tap_index++) {
+                weights[phase][tap_index] /= weight_sum;
+            }
+        }
+    }
+}
+
+static void build_quarter_phase_weights_f(float weights[4][RESAMPLER_TAPS])
+{
+    double double_weights[4][RESAMPLER_TAPS];
+    build_quarter_phase_weights(double_weights);
+    for (size_t phase = 0; phase < 4; phase++) {
+        for (size_t tap_index = 0; tap_index < RESAMPLER_TAPS; tap_index++) {
+            weights[phase][tap_index] = (float)double_weights[phase][tap_index];
+        }
+    }
+}
+
+static int16_t clip_i16_f(float value)
+{
+    if (value > 32767.0f) {
+        return 32767;
+    }
+    if (value < -32768.0f) {
+        return -32768;
+    }
+    return (int16_t)lrintf(value);
+}
+
+static void resample_quarter_ci16(const iq_ci16_t *samples, size_t sample_count, size_t output_index, double weights[4][RESAMPLER_TAPS], double *out_i, double *out_q)
+{
+    const size_t center = output_index / 4U;
+    const size_t phase = output_index & 3U;
+    if (center < RESAMPLER_RADIUS - 1 || center + RESAMPLER_RADIUS >= sample_count) {
+        resample_ci16(samples, sample_count, (double)output_index * 0.25, out_i, out_q);
+        return;
+    }
+
+    double acc_i = 0.0;
+    double acc_q = 0.0;
+    for (size_t tap_index = 0; tap_index < RESAMPLER_TAPS; tap_index++) {
+        const size_t index = center + tap_index - RESAMPLER_RADIUS + 1U;
+        const double weight = weights[phase][tap_index];
+        acc_i += (double)samples[index].i * weight;
+        acc_q += (double)samples[index].q * weight;
+    }
+    *out_i = acc_i;
+    *out_q = acc_q;
+}
+
+static bool resample_quarter_ci16_f(const iq_ci16_t *samples, size_t sample_count, size_t output_index, float weights[4][RESAMPLER_TAPS], float *out_i, float *out_q)
+{
+    const size_t center = output_index / 4U;
+    const size_t phase = output_index & 3U;
+    if (center < RESAMPLER_RADIUS - 1 || center + RESAMPLER_RADIUS >= sample_count) {
+        return false;
+    }
+
+    float acc_i = 0.0f;
+    float acc_q = 0.0f;
+    for (size_t tap_index = 0; tap_index < RESAMPLER_TAPS; tap_index++) {
+        const size_t index = center + tap_index - RESAMPLER_RADIUS + 1U;
+        const float weight = weights[phase][tap_index];
+        acc_i += (float)samples[index].i * weight;
+        acc_q += (float)samples[index].q * weight;
+    }
+    *out_i = acc_i;
+    *out_q = acc_q;
+    return true;
 }
 
 #if !SIM_USE_LIQUID_RESAMPLER
@@ -197,6 +284,11 @@ static void render_direct_nco(const iq_ci16_t *source_samples, size_t read_count
 
 static void render_resampled_baseband(const iq_ci16_t *source_samples, size_t read_count, iq_ci16_t *out, size_t count, double source_gain, double source_per_output)
 {
+    const bool quarter_rate = fabs(source_per_output - 0.25) < 1e-12;
+    double quarter_weights[4][RESAMPLER_TAPS];
+    if (quarter_rate) {
+        build_quarter_phase_weights(quarter_weights);
+    }
     for (size_t i = 0; i < count; i++) {
         const double source_position = (double)i * source_per_output;
         if ((size_t)floor(source_position) >= read_count) {
@@ -204,7 +296,11 @@ static void render_resampled_baseband(const iq_ci16_t *source_samples, size_t re
         }
         double resampled_i = 0.0;
         double resampled_q = 0.0;
-        resample_ci16(source_samples, read_count, source_position, &resampled_i, &resampled_q);
+        if (quarter_rate) {
+            resample_quarter_ci16(source_samples, read_count, i, quarter_weights, &resampled_i, &resampled_q);
+        } else {
+            resample_ci16(source_samples, read_count, source_position, &resampled_i, &resampled_q);
+        }
         out[i].i = sim_clip_i16((double)out[i].i + source_gain * resampled_i);
         out[i].q = sim_clip_i16((double)out[i].q + source_gain * resampled_q);
     }
@@ -212,6 +308,44 @@ static void render_resampled_baseband(const iq_ci16_t *source_samples, size_t re
 
 static void render_resampled_nco(const iq_ci16_t *source_samples, size_t read_count, iq_ci16_t *out, size_t count, double source_gain, double source_per_output, double step_c, double step_s)
 {
+    const bool quarter_rate = fabs(source_per_output - 0.25) < 1e-12;
+    if (quarter_rate && count >= 64) {
+        float quarter_weights_f[4][RESAMPLER_TAPS];
+        build_quarter_phase_weights_f(quarter_weights_f);
+        const float gain_f = (float)source_gain;
+        const float step_c_f = (float)step_c;
+        const float step_s_f = (float)step_s;
+        float osc_c = 1.0f;
+        float osc_s = 0.0f;
+        for (size_t i = 0; i < count; i++) {
+            const size_t center = i / 4U;
+            if (center >= read_count) {
+                break;
+            }
+            float resampled_i = 0.0f;
+            float resampled_q = 0.0f;
+            if (!resample_quarter_ci16_f(source_samples, read_count, i, quarter_weights_f, &resampled_i, &resampled_q)) {
+                double fallback_i = 0.0;
+                double fallback_q = 0.0;
+                resample_ci16(source_samples, read_count, (double)i * 0.25, &fallback_i, &fallback_q);
+                resampled_i = (float)fallback_i;
+                resampled_q = (float)fallback_q;
+            }
+            const float ii = gain_f * resampled_i;
+            const float qq = gain_f * resampled_q;
+            out[i].i = clip_i16_f((float)out[i].i + (ii * osc_c - qq * osc_s));
+            out[i].q = clip_i16_f((float)out[i].q + (ii * osc_s + qq * osc_c));
+            const float next_c = osc_c * step_c_f - osc_s * step_s_f;
+            const float next_s = osc_s * step_c_f + osc_c * step_s_f;
+            osc_c = next_c;
+            osc_s = next_s;
+        }
+        return;
+    }
+    double quarter_weights[4][RESAMPLER_TAPS];
+    if (quarter_rate) {
+        build_quarter_phase_weights(quarter_weights);
+    }
     double osc_c = 1.0;
     double osc_s = 0.0;
     for (size_t i = 0; i < count; i++) {
@@ -221,7 +355,11 @@ static void render_resampled_nco(const iq_ci16_t *source_samples, size_t read_co
         }
         double resampled_i = 0.0;
         double resampled_q = 0.0;
-        resample_ci16(source_samples, read_count, source_position, &resampled_i, &resampled_q);
+        if (quarter_rate) {
+            resample_quarter_ci16(source_samples, read_count, i, quarter_weights, &resampled_i, &resampled_q);
+        } else {
+            resample_ci16(source_samples, read_count, source_position, &resampled_i, &resampled_q);
+        }
         mix_accumulate_sample(out, i, resampled_i, resampled_q, source_gain, osc_c, osc_s);
         const double next_c = osc_c * step_c - osc_s * step_s;
         const double next_s = osc_s * step_c + osc_c * step_s;

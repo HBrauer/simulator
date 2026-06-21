@@ -60,7 +60,7 @@ build/sdr-simulator \
 Expected hash at the current implementation state:
 
 ```text
-3ba633e9e4e83cd97f0fad2e69b2c5e39d7654f3f6e8f6e3f8673c63adea09fa
+9a095096b608ffffb1c17b57c276a6eb3c88f292af80df0038a7f93064389c62
 ```
 
 ## Tests
@@ -107,6 +107,24 @@ meson test --benchmark -C build -j 1
 ```
 
 The benchmark reports scalar 80-MHz renderer throughput in samples per second. The optional JSON report records `benchmark`, `blocks`, `samples_per_block`, `receivers`, `total_samples`, `seconds`, and `samples_per_second`. Meson registers 1, 4, and 12 receiver benchmark cases. It is intended for comparing renderer changes on the same machine, not as a final full-system throughput claim.
+
+## Full Receiver Performance Build
+
+For one real-time receiver with one 80-MHz stream plus four 20-MHz DDC streams, use a release build with fast math, and run with larger UDP blocks:
+
+```sh
+meson setup build-perf --buildtype=release -Dfast_math=true
+meson compile -C build-perf
+
+build-perf/sdr-simulator \
+  --config configs/instance_001.yaml \
+  --scenario scenarios/gnuradio_demo.json \
+  --stream-block-samples 4096
+```
+
+On a Ryzen 7 5800XT test run, this delivered about `196.6 MSamples/s` total (`98.3 MSamples/s` on the 80-MHz stream and `24.58 MSamples/s` on each DDC) with no UDP errors, overruns, or underruns over a short local-loopback metrics sample. This path trades strict IEEE floating-point behavior for throughput; keep the default build for deterministic correctness checks. `-Dnative_optimizations=true` is available for local experiments, but was slightly slower than fast-math-only on this test host.
+
+When receiving this performance-mode stream in GNU Radio, set the UDP Source `UDP Packet Data Size` to `16384` bytes (`4096` complex int16 samples times 4 bytes per sample).
 
 ## Documentation
 
