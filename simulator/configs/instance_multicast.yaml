@@ -1,0 +1,45 @@
+schema_version: 1
+instance_id: "sim_instance_multicast"
+scenario_file: "simulator/scenarios/burst_1s_every_5s.json"
+log_path: "logs/instance_multicast.log"
+stream_block_samples: 4096
+stream_cpu: -1
+asset_cache_max_bytes: 0
+receivers:
+  - receiver_id: 0
+    rest_bind_host: "127.0.0.1"
+    rest_port: 8100
+    udp_output_host: "239.10.10.10"
+    frequency_start_hz: 9960000000
+    frequency_stop_hz: 10040000000
+    bandwidth_hz: 80000000
+    sample_rate_hz: 98304000
+    scan_rate_hz_per_s: 100000000000
+    rf_reference_power_dbm: -55.0
+    stream_enabled: true
+    udp_80mhz_output_port: 50000
+    ddc:
+      - ddc_id: 0
+        center_frequency_hz: 10005000000
+        bandwidth_hz: 20000000
+        sample_rate_hz: 24576000
+        stream_enabled: true
+        udp_output_port: 50001
+      - ddc_id: 1
+        center_frequency_hz: 10010000000
+        bandwidth_hz: 20000000
+        sample_rate_hz: 24576000
+        stream_enabled: false
+        udp_output_port: 50002
+      - ddc_id: 2
+        center_frequency_hz: 9995000000
+        bandwidth_hz: 20000000
+        sample_rate_hz: 24576000
+        stream_enabled: false
+        udp_output_port: 50003
+      - ddc_id: 3
+        center_frequency_hz: 10030000000
+        bandwidth_hz: 20000000
+        sample_rate_hz: 24576000
+        stream_enabled: false
+        udp_output_port: 50004

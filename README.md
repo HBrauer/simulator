@@ -1,6 +1,9 @@
-# SDR Receiver Simulator
+# SDR Simulator And Waterfall Receiver
 
-Software receiver simulator in C based on `Anforderungen.md`.
+This repository contains two applications:
+
+- `simulator/`: C SDR receiver simulator based on `Anforderungen.md`.
+- `receiver/`: C/SDL2 VITA 49.2 UDP receiver with decimated FFTW spectrum/waterfall display.
 
 Current implementation includes:
 
@@ -8,7 +11,7 @@ Current implementation includes:
 - JSON RF scenario loading.
 - deterministic scenario-time override.
 - per-receiver REST API.
-- raw CI16 UDP output for 80-MHz and DDC streams.
+- VITA 49.2 UDP output for receiver-bandwidth and DDC streams.
 - cached IQ assets.
 - scalar sample-rate-aware renderer.
 - DDC out-of-window empty stream behavior.
@@ -22,15 +25,49 @@ meson setup build
 meson compile -C build
 ```
 
+## Quick Start Example
+
+Terminal 1, start the waterfall receiver on DDC 0. This stream is centered on the demo signal, so the SDL window should show colored waterfall lines immediately:
+
+```sh
+build/sdr-waterfall-receiver \
+  --host 127.0.0.1 \
+  --port 50001 \
+  --fft-size 1024 \
+  --sample-rate-hz 24576000
+```
+
+Terminal 2, start the simulator:
+
+```sh
+build/sdr-simulator \
+  --config simulator/configs/instance_001.yaml \
+  --scenario simulator/scenarios/gnuradio_demo.json \
+  --stream-block-samples 4096
+```
+
+The receiver opens an SDL2 window, parses VITA 49.2 packets at UDP line rate, and displays the selected history duration across automatically computed waterfall rows. The 80-MHz scanner stream is still available on port `50000`, but the quick start uses DDC port `50001` because it is centered on the demo signal and is easier to verify visually.
+
+For a non-continuous signal, use `simulator/scenarios/burst_1s_every_5s.json`. It emits a one-second burst every five seconds on DDC 0, with silence in between:
+
+```sh
+build/sdr-simulator \
+  --config simulator/configs/instance_001.yaml \
+  --scenario simulator/scenarios/burst_1s_every_5s.json \
+  --stream-block-samples 4096
+```
+
 ## Run
 
 ```sh
 build/sdr-simulator \
-  --config configs/instance_001.yaml \
-  --scenario scenarios/test_scenario_001.json
+  --config simulator/configs/instance_001.yaml \
+  --scenario simulator/scenarios/test_scenario_001.json
 ```
 
-`stream_block_samples` in the instance YAML controls the raw UDP datagram payload size in IQ samples. The default is 1024 samples, and the allowed range is 1 to 4096 samples. `--stream-block-samples` overrides the YAML value for ad hoc runs.
+`stream_block_samples` in the instance YAML controls the CI16 IQ payload size in samples inside each VITA 49.2 UDP packet. The default is 1024 samples, and the allowed range is 1 to 4096 samples. `--stream-block-samples` overrides the YAML value for ad hoc runs.
+
+Receiver and DDC `sample_rate_hz` and `bandwidth_hz` are configurable in YAML. Existing defaults remain `98304000`/`80000000` for the receiver stream and `24576000`/`20000000` for DDC streams.
 
 Useful REST endpoints for receiver 0 in the sample config:
 
@@ -47,12 +84,42 @@ POST http://127.0.0.1:8100/api/v1/ddc/0/configure
 POST http://127.0.0.1:8100/api/v1/ddc/0/stream
 ```
 
+To check whether the simulator is actually sending the configured sample rate, inspect `/api/v1/metrics`. For the full-bandwidth stream, look at the `iq_80mhz` entry:
+
+```sh
+curl -s http://127.0.0.1:8100/api/v1/metrics
+```
+
+Compare `sample_rate_hz` to `actual_sample_rate_sps`. `samples_sent` is the number of CI16 samples successfully handed to UDP. `samples_dropped` means rendered samples were discarded because the sender side was backed up. `samples_missed` means the sender wanted to send a block but rendering had not produced one in time.
+
+## Multicast UDP
+
+Set `udp_output_host` to an IPv4 multicast group such as `239.10.10.10`. The simulator sends the same VITA 49.2 UDP packets to the multicast group, and receivers join the group explicitly.
+
+Terminal 1, join DDC0 on multicast:
+
+```sh
+build/sdr-waterfall-receiver \
+  --host 239.10.10.10 \
+  --port 50001 \
+  --fft-size 1024 \
+  --sample-rate-hz 24576000
+```
+
+Terminal 2, start the multicast simulator:
+
+```sh
+build/sdr-simulator \
+  --config simulator/configs/instance_multicast.yaml \
+  --scenario simulator/scenarios/burst_1s_every_5s.json
+```
+
 ## Deterministic Render Check
 
 ```sh
 build/sdr-simulator \
-  --config configs/instance_001.yaml \
-  --scenario scenarios/test_scenario_001.json \
+  --config simulator/configs/instance_001.yaml \
+  --scenario simulator/scenarios/test_scenario_001.json \
   --scenario-time-ns 450000 \
   --render-once-samples 256 | sha256sum
 ```
@@ -78,14 +145,14 @@ cppcheck --enable=warning,style,performance,portability \
   --std=c11 \
   --inline-suppr \
   --suppress=missingIncludeSystem \
-  src tests/unit tests/benchmarks
+  simulator/src simulator/tests/unit simulator/tests/benchmarks
 meson compile -C build clang-tidy
 ```
 
 Coverage report:
 
 ```sh
-scripts/run_coverage.sh
+simulator/scripts/run_coverage.sh
 ```
 
 The script configures `build-coverage` with Meson coverage instrumentation, runs the normal test suite, and writes reports under `build-coverage/meson-logs/coveragereport/`.
@@ -117,20 +184,29 @@ meson setup build-perf --buildtype=release -Dfast_math=true
 meson compile -C build-perf
 
 build-perf/sdr-simulator \
-  --config configs/instance_001.yaml \
-  --scenario scenarios/gnuradio_demo.json \
+  --config simulator/configs/instance_001.yaml \
+  --scenario simulator/scenarios/gnuradio_demo.json \
   --stream-block-samples 4096
 ```
 
 On a Ryzen 7 5800XT test run, this delivered about `196.6 MSamples/s` total (`98.3 MSamples/s` on the 80-MHz stream and `24.58 MSamples/s` on each DDC) with no UDP errors, overruns, or underruns over a short local-loopback metrics sample. This path trades strict IEEE floating-point behavior for throughput; keep the default build for deterministic correctness checks. `-Dnative_optimizations=true` is available for local experiments, but was slightly slower than fast-math-only on this test host.
 
-When receiving this performance-mode stream in GNU Radio, set the UDP Source `UDP Packet Data Size` to `16384` bytes (`4096` complex int16 samples times 4 bytes per sample).
+For `stream_block_samples: 4096`, each VITA 49.2 UDP datagram is `20 + 4096 * 4 = 16404` bytes.
+
+## Waterfall Receiver
+
+The receiver is implemented in C with SDL2 and FFTW3f. The default waterfall history is 30 seconds and can be changed from 1 to 60 seconds with the `-` and `+` buttons in the top toolbar. By default, the receiver computes as many waterfall rows as fit in the current window height; `--rows N` is only a manual override.
+
+```sh
+build/sdr-waterfall-receiver --host 127.0.0.1 --port 50000
+```
 
 ## Documentation
 
 - [Architecture](docs/architecture.md)
 - [Config and scenario schemas](docs/schemas.md)
-- [GNU Radio UDP compatibility](docs/gnuradio.md)
+- [VITA 49.2 UDP output](docs/vita49_udp.md)
+- [Waterfall receiver](receiver/README.md)
 - [Release checklist](docs/release_checklist.md)
 
 ## Current Limits

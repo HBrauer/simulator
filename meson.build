@@ -12,6 +12,8 @@ microhttpd_dep = dependency('libmicrohttpd', required: true)
 jansson_dep = dependency('jansson', required: true)
 yaml_dep = dependency('yaml-0.1', required: true)
 check_dep = dependency('check', required: true)
+sdl2_dep = dependency('sdl2', required: true)
+fftw3f_dep = dependency('fftw3f', required: true)
 liquid_resampler_opt = get_option('liquid_resampler')
 volk_accel_opt = get_option('volk_accel')
 liquid_dep = cc.find_library('liquid', required: liquid_resampler_opt)
@@ -48,18 +50,19 @@ common_args = [
 add_project_arguments(common_args, language: 'c')
 
 sim_sources = files(
-  'src/asset_cache.c',
-  'src/config.c',
-  'src/iq_file_reader.c',
-  'src/nco.c',
-  'src/receiver.c',
-  'src/renderer.c',
-  'src/rest_server.c',
-  'src/ringbuffer.c',
-  'src/scenario.c',
-  'src/streamer.c',
-  'src/timebase.c',
-  'src/udp_output.c'
+  'simulator/src/asset_cache.c',
+  'simulator/src/config.c',
+  'simulator/src/iq_file_reader.c',
+  'simulator/src/nco.c',
+  'simulator/src/receiver.c',
+  'simulator/src/renderer.c',
+  'simulator/src/rest_server.c',
+  'simulator/src/ringbuffer.c',
+  'simulator/src/scenario.c',
+  'simulator/src/streamer.c',
+  'simulator/src/timebase.c',
+  'simulator/src/udp_output.c',
+  'simulator/src/vita49_packet.c'
 )
 
 sim_deps = [m_dep, thread_dep, microhttpd_dep, jansson_dep, yaml_dep]
@@ -70,42 +73,64 @@ if volk_dep.found() and not volk_accel_opt.disabled()
   sim_deps += [volk_dep]
 endif
 
-sim_includes = include_directories('src', '.')
+sim_includes = include_directories('simulator/src', '.')
+test_includes = include_directories('simulator/tests/unit')
 
 sim_lib = static_library('simcore', sim_sources, dependencies: sim_deps, include_directories: sim_includes)
 
+receiver_sources = files(
+  'receiver/src/history.c',
+  'receiver/src/vita49_rx.c',
+  'receiver/src/waterfall.c'
+)
+
+receiver_includes = include_directories('receiver/src')
+receiver_deps = [m_dep, fftw3f_dep]
+receiver_lib = static_library('receivercore', receiver_sources, dependencies: receiver_deps, include_directories: receiver_includes)
+
 simulator = executable(
   'sdr-simulator',
-  'src/main.c',
+  'simulator/src/main.c',
   link_with: sim_lib,
   dependencies: sim_deps,
   include_directories: sim_includes,
   install: false
 )
 
+waterfall_receiver = executable(
+  'sdr-waterfall-receiver',
+  'receiver/src/main.c',
+  link_with: receiver_lib,
+  dependencies: receiver_deps + [sdl2_dep],
+  include_directories: receiver_includes,
+  install: false
+)
+
 unit_tests = executable(
   'unit_tests',
   files(
-    'tests/unit/test_config.c',
-    'tests/unit/test_asset_cache.c',
-    'tests/unit/test_iq_file_reader.c',
-    'tests/unit/test_renderer.c',
-    'tests/unit/test_ringbuffer.c',
-    'tests/unit/test_scenario.c',
-    'tests/unit/test_streamer.c',
-    'tests/unit/test_timebase.c',
-    'tests/unit/test_main.c'
+    'simulator/tests/unit/test_config.c',
+    'simulator/tests/unit/test_asset_cache.c',
+    'simulator/tests/unit/test_iq_file_reader.c',
+    'simulator/tests/unit/test_renderer.c',
+    'simulator/tests/unit/test_ringbuffer.c',
+    'simulator/tests/unit/test_scenario.c',
+    'simulator/tests/unit/test_streamer.c',
+    'simulator/tests/unit/test_timebase.c',
+    'simulator/tests/unit/test_vita49_packet.c',
+    'receiver/tests/test_receiver_c.c',
+    'simulator/tests/unit/test_main.c'
   ),
-  link_with: sim_lib,
-  dependencies: sim_deps + [check_dep],
-  include_directories: sim_includes
+  link_with: [sim_lib, receiver_lib],
+  dependencies: sim_deps + receiver_deps + [check_dep],
+  include_directories: [sim_includes, receiver_includes, test_includes]
 )
 
 test('unit', unit_tests, workdir: meson.project_source_root(), suite: 'unit')
 
 renderer_benchmark = executable(
   'renderer_benchmark',
-  'tests/benchmarks/renderer_benchmark.c',
+  'simulator/tests/benchmarks/renderer_benchmark.c',
   link_with: sim_lib,
   dependencies: sim_deps,
   include_directories: sim_includes
@@ -117,10 +142,10 @@ benchmark('renderer_80mhz_scalar_12_receivers', renderer_benchmark, args: ['1000
 
 pytest = find_program('pytest', required: false)
 if pytest.found()
-  test('integration', pytest, args: ['-q', 'tests/integration'], workdir: meson.project_source_root(), suite: 'integration', timeout: 30)
+  test('integration', pytest, args: ['-q', 'simulator/tests/integration'], workdir: meson.project_source_root(), suite: 'integration', timeout: 30)
 endif
 
-clang_tidy_runner = find_program('scripts/run_clang_tidy.sh', required: false)
+clang_tidy_runner = find_program('simulator/scripts/run_clang_tidy.sh', required: false)
 if clang_tidy_runner.found()
   run_target('clang-tidy', command: [clang_tidy_runner, meson.current_build_dir()])
 endif

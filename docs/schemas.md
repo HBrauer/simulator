@@ -1,6 +1,6 @@
 # Config And Scenario Schemas
 
-This document describes the schema implemented by `src/config.c` and `src/scenario.c`.
+This document describes the schema implemented by `simulator/src/config.c` and `simulator/src/scenario.c`.
 
 ## Instance YAML
 
@@ -12,9 +12,8 @@ Top-level fields:
 | `instance_id` | string | yes | Instance identifier for operators/logs. |
 | `scenario_file` | string | yes | Default scenario path used when `--scenario` is omitted. |
 | `log_path` | string | no | Reserved for runtime logging. |
-| `stream_block_samples` | integer | no | UDP payload size in IQ samples. Defaults to `1024`; valid range is `1..4096`. |
+| `stream_block_samples` | integer | no | CI16 IQ samples per VITA 49.2 IF-data packet. Defaults to `1024`; valid range is `1..4096`. |
 | `stream_cpu` | integer | no | Linux CPU index used for stream render/UDP threads. `-1` disables pinning. Defaults to `-1`. |
-| `framed_udp` | boolean | no | Prepends a timestamped `SDR1` UDP frame header when `true`. Defaults to raw UDP payloads (`false`). |
 | `asset_cache_max_bytes` | integer | no | Maximum total in-memory IQ asset bytes. `0` means unlimited. Defaults to `0`. |
 | `receivers` | array | yes | At least one receiver, up to `SIM_MAX_RECEIVERS` (`12`). |
 
@@ -25,10 +24,12 @@ Receiver fields:
 | `receiver_id` | integer | yes | Unique per instance. |
 | `rest_bind_host` | string | yes | REST bind address, for example `127.0.0.1`. |
 | `rest_port` | integer | yes | Unique per instance. |
-| `udp_output_host` | string | yes | UDP destination host. |
+| `udp_output_host` | string | yes | UDP destination host. May be unicast, for example `127.0.0.1`, or IPv4 multicast, for example `239.10.10.10`. |
 | `frequency_start_hz` | integer | yes | Inclusive RF range start, `0..40000000000`. |
 | `frequency_stop_hz` | integer | yes | RF range stop, greater than start and `<= 40000000000`. |
-| `scan_rate_hz_per_s` | number | yes | Used when range is wider than 80 MHz. |
+| `bandwidth_hz` | integer | no | Receiver RF window bandwidth. Defaults to `80000000`; must be non-zero. |
+| `sample_rate_hz` | integer | no | Receiver IQ output sample rate. Defaults to `98304000`; must be non-zero. |
+| `scan_rate_hz_per_s` | number | yes | Used when range is wider than the receiver bandwidth. |
 | `output_scale` | number | no | Receiver output multiplier. Defaults to `1.0`; must be positive when set. |
 | `rf_reference_power_dbm` | number | no | RF power that preserves the source's `nominal_level_dbfs`. Defaults to `-55.0`. |
 | `stream_enabled` | boolean | no | Enables the 80-MHz UDP stream. Defaults to `true`. |
@@ -41,6 +42,8 @@ DDC fields:
 | --- | --- | --- | --- |
 | `ddc_id` | integer | yes | `0..3`. |
 | `center_frequency_hz` | integer | yes | Absolute RF center frequency. |
+| `bandwidth_hz` | integer | no | DDC RF bandwidth. Defaults to `20000000`; must be non-zero. |
+| `sample_rate_hz` | integer | no | DDC IQ output sample rate. Defaults to `24576000`; must be non-zero. |
 | `output_scale` | number | no | DDC output multiplier. Defaults to receiver `output_scale`. |
 | `stream_enabled` | boolean | no | Enables this DDC UDP stream. Defaults to `true`. |
 | `udp_output_port` | integer | yes | Unique across all receiver/DDC UDP outputs. |
@@ -55,6 +58,7 @@ Validation error codes include:
 - `duplicate_udp_port`
 - `invalid_receiver`
 - `invalid_ddc`
+- `invalid_sample_rate_or_bandwidth`
 - `invalid_output_scale`
 
 ## Scenario JSON
