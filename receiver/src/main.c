@@ -10,6 +10,7 @@
 #include <errno.h>
 #include <netinet/in.h>
 #include <fcntl.h>
+#include <math.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -27,6 +28,8 @@
 #define MIN_RECOMMENDED_RCVBUF_BYTES (16 * 1024 * 1024)
 #define DEFAULT_SAMPLE_RATE_HZ 98304000U
 #define UI_TOOLBAR_HEIGHT 44
+#define UI_SPECTRUM_HEIGHT 128
+#define UI_SPECTRUM_MIN_HEIGHT 56
 #define UI_BUTTON_SIZE 32
 #define UI_BUTTON_MARGIN 8
 #define AUTO_LEVEL_DYNAMIC_RANGE_DB 150.0f
@@ -118,9 +121,21 @@ static bool ipv4_is_multicast(struct in_addr addr)
     return IN_MULTICAST(ntohl(addr.s_addr));
 }
 
+static int spectrum_height_for_window(int height)
+{
+    const int available = height - UI_TOOLBAR_HEIGHT;
+    if (available <= 0) {
+        return 0;
+    }
+    if (available < UI_SPECTRUM_MIN_HEIGHT * 2) {
+        return available / 2;
+    }
+    return available < UI_SPECTRUM_HEIGHT ? available / 2 : UI_SPECTRUM_HEIGHT;
+}
+
 static size_t rows_for_window_height(int height)
 {
-    const int rows = height - UI_TOOLBAR_HEIGHT;
+    const int rows = height - UI_TOOLBAR_HEIGHT - spectrum_height_for_window(height);
     return rows > 0 ? (size_t)rows : 1U;
 }
 
@@ -769,13 +784,65 @@ static void ui_draw_toolbar(ui_t *ui, const app_config_t *config, int window_wid
                    true);
 }
 
+static int spectrum_y_for_db(SDL_Rect rect, float db, float min_db, float max_db)
+{
+    float x = (db - min_db) / (max_db - min_db);
+    if (x < 0.0f) {
+        x = 0.0f;
+    } else if (x > 1.0f) {
+        x = 1.0f;
+    }
+    return rect.y + (int)((1.0f - x) * (float)(rect.h - 1) + 0.5f);
+}
+
+static void ui_draw_spectrum(ui_t *ui, const waterfall_t *wf, SDL_Rect rect, float min_db, float max_db)
+{
+    if (rect.w <= 1 || rect.h <= 1) {
+        return;
+    }
+
+    SDL_SetRenderDrawColor(ui->renderer, 4, 6, 28, 255);
+    SDL_RenderFillRect(ui->renderer, &rect);
+
+    SDL_SetRenderDrawColor(ui->renderer, 13, 28, 58, 255);
+    for (int i = 1; i < 4; i++) {
+        const int y = rect.y + (rect.h * i) / 4;
+        SDL_RenderDrawLine(ui->renderer, rect.x, y, rect.x + rect.w - 1, y);
+    }
+    for (int i = 1; i < 8; i++) {
+        const int x = rect.x + (rect.w * i) / 8;
+        SDL_RenderDrawLine(ui->renderer, x, rect.y, x, rect.y + rect.h - 1);
+    }
+
+    SDL_SetRenderDrawColor(ui->renderer, 28, 55, 96, 255);
+    SDL_RenderDrawRect(ui->renderer, &rect);
+
+    int previous_x = rect.x;
+    int previous_y = spectrum_y_for_db(rect, wf->spectrum_db[0], min_db, max_db);
+    for (int x = 1; x < rect.w; x++) {
+        const size_t bin = ((size_t)x * wf->fft_size) / (size_t)rect.w;
+        const int screen_x = rect.x + x;
+        const int screen_y = spectrum_y_for_db(rect, wf->spectrum_db[bin], min_db, max_db);
+        SDL_SetRenderDrawColor(ui->renderer, 43, 178, 224, 255);
+        SDL_RenderDrawLine(ui->renderer, previous_x, previous_y, screen_x, screen_y);
+        SDL_SetRenderDrawColor(ui->renderer, 10, 54, 91, 100);
+        SDL_RenderDrawLine(ui->renderer, screen_x, screen_y + 1, screen_x, rect.y + rect.h - 2);
+        previous_x = screen_x;
+        previous_y = screen_y;
+    }
+
+    const int zero_x = rect.x + rect.w / 2;
+    SDL_SetRenderDrawColor(ui->renderer, 94, 206, 172, 255);
+    SDL_RenderDrawLine(ui->renderer, zero_x, rect.y, zero_x, rect.y + rect.h - 1);
+}
+
 static void ui_update(ui_t *ui, const waterfall_t *wf, const app_config_t *config, const rx_stats_t *stats, struct timespec start)
 {
     float min_db = config->min_db;
     float max_db = config->max_db;
     compute_display_range(ui, wf, config, &min_db, &max_db);
     for (size_t row = 0; row < wf->rows; row++) {
-        const size_t source_row = (wf->next_row + row) % wf->rows;
+        const size_t source_row = (wf->next_row + wf->rows - 1U - row) % wf->rows;
         const float *history_row = wf->history + source_row * wf->fft_size;
         uint32_t *pixel_row = ui->pixels + row * wf->fft_size;
         for (size_t bin = 0; bin < wf->fft_size; bin++) {
@@ -788,13 +855,22 @@ static void ui_update(ui_t *ui, const waterfall_t *wf, const app_config_t *confi
     SDL_UpdateTexture(ui->texture, 0, ui->pixels, (int)(wf->fft_size * sizeof(uint32_t)));
     SDL_SetRenderDrawColor(ui->renderer, 3, 4, 32, 255);
     SDL_RenderClear(ui->renderer);
-    SDL_Rect waterfall_rect = {
+    const int spectrum_height = spectrum_height_for_window(window_height);
+    SDL_Rect spectrum_rect = {
         .x = 0,
         .y = UI_TOOLBAR_HEIGHT,
         .w = window_width,
-        .h = window_height > UI_TOOLBAR_HEIGHT ? window_height - UI_TOOLBAR_HEIGHT : window_height,
+        .h = spectrum_height,
+    };
+    const int waterfall_y = UI_TOOLBAR_HEIGHT + spectrum_height;
+    SDL_Rect waterfall_rect = {
+        .x = 0,
+        .y = waterfall_y,
+        .w = window_width,
+        .h = window_height > waterfall_y ? window_height - waterfall_y : 1,
     };
     SDL_RenderCopy(ui->renderer, ui->texture, 0, &waterfall_rect);
+    ui_draw_spectrum(ui, wf, spectrum_rect, min_db, max_db);
     ui_draw_toolbar(ui, config, window_width);
     SDL_RenderPresent(ui->renderer);
 

@@ -41,6 +41,9 @@ bool waterfall_init(waterfall_t *wf, size_t fft_size, size_t rows)
     for (size_t i = 0; i < rows * fft_size; i++) {
         wf->history[i] = -120.0f;
     }
+    for (size_t i = 0; i < fft_size; i++) {
+        wf->spectrum_db[i] = -120.0f;
+    }
     wf->last_min_db = -120.0f;
     wf->last_max_db = -120.0f;
     return true;
