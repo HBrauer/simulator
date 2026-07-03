@@ -29,6 +29,11 @@
 #define UI_TOOLBAR_HEIGHT 44
 #define UI_BUTTON_SIZE 32
 #define UI_BUTTON_MARGIN 8
+#define AUTO_LEVEL_DYNAMIC_RANGE_DB 90.0f
+#define AUTO_LEVEL_HEADROOM_DB 4.0f
+#define AUTO_LEVEL_ATTACK 0.35f
+#define AUTO_LEVEL_RELEASE 0.03f
+#define WATERFALL_EMPTY_DB (-230.0f)
 
 static volatile sig_atomic_t keep_running = 1;
 
@@ -452,6 +457,9 @@ typedef struct {
     SDL_Texture *texture;
     uint32_t *pixels;
     size_t pixel_count;
+    bool level_initialized;
+    float display_min_db;
+    float display_max_db;
     SDL_Rect history_minus_button;
     SDL_Rect history_plus_button;
 } ui_t;
@@ -482,32 +490,55 @@ static uint32_t color_map(float db, float min_db, float max_db)
     return 0xff000000U | ((uint32_t)rr << 16U) | ((uint32_t)gg << 8U) | (uint32_t)bb;
 }
 
-static void compute_display_range(const waterfall_t *wf, const app_config_t *config, float *min_db, float *max_db)
+static float approach_float(float current, float target)
+{
+    const float alpha = target > current ? AUTO_LEVEL_ATTACK : AUTO_LEVEL_RELEASE;
+    return current + alpha * (target - current);
+}
+
+static float waterfall_visible_peak_db(const waterfall_t *wf)
+{
+    float peak = WATERFALL_EMPTY_DB;
+    const size_t count = wf->rows * wf->fft_size;
+    for (size_t i = 0; i < count; i++) {
+        if (wf->history[i] > peak) {
+            peak = wf->history[i];
+        }
+    }
+    return peak;
+}
+
+static void compute_display_range(ui_t *ui, const waterfall_t *wf, const app_config_t *config, float *min_db, float *max_db)
 {
     if (!config->auto_level) {
+        ui->level_initialized = false;
         *min_db = config->min_db;
         *max_db = config->max_db;
         return;
     }
 
-    float lo = wf->last_min_db;
-    float hi = wf->last_max_db;
-    if (hi <= lo) {
-        *min_db = config->min_db;
-        *max_db = config->max_db;
-        return;
+    const float peak = waterfall_visible_peak_db(wf);
+    float target_hi = config->max_db;
+    if (peak > WATERFALL_EMPTY_DB) {
+        target_hi = fmaxf(config->max_db, peak + AUTO_LEVEL_HEADROOM_DB);
     }
-    const float span = hi - lo;
-    if (span < 20.0f) {
-        const float center = 0.5f * (hi + lo);
-        lo = center - 10.0f;
-        hi = center + 10.0f;
+    float target_lo = target_hi - AUTO_LEVEL_DYNAMIC_RANGE_DB;
+    target_lo = fmaxf(config->min_db, target_lo);
+
+    if (!ui->level_initialized) {
+        ui->display_min_db = target_lo;
+        ui->display_max_db = target_hi;
+        ui->level_initialized = true;
     } else {
-        lo -= 3.0f;
-        hi += 3.0f;
+        ui->display_min_db = approach_float(ui->display_min_db, target_lo);
+        ui->display_max_db = approach_float(ui->display_max_db, target_hi);
     }
-    *min_db = lo;
-    *max_db = hi;
+    if (ui->display_max_db <= ui->display_min_db + 1.0f) {
+        ui->display_max_db = ui->display_min_db + 1.0f;
+    }
+
+    *min_db = ui->display_min_db;
+    *max_db = ui->display_max_db;
 }
 
 #ifdef __linux__
@@ -557,6 +588,7 @@ static bool ui_recreate_texture(ui_t *ui, const app_config_t *config)
     ui->texture = texture;
     ui->pixels = pixels;
     ui->pixel_count = pixel_count;
+    ui->level_initialized = false;
     return true;
 }
 
@@ -741,7 +773,7 @@ static void ui_update(ui_t *ui, const waterfall_t *wf, const app_config_t *confi
 {
     float min_db = config->min_db;
     float max_db = config->max_db;
-    compute_display_range(wf, config, &min_db, &max_db);
+    compute_display_range(ui, wf, config, &min_db, &max_db);
     for (size_t row = 0; row < wf->rows; row++) {
         const size_t source_row = (wf->next_row + row) % wf->rows;
         const float *history_row = wf->history + source_row * wf->fft_size;
