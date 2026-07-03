@@ -219,6 +219,65 @@ START_TEST(renderer_80mhz_sinc_resamples_24576_source_to_98304_output)
 }
 END_TEST
 
+START_TEST(renderer_low_rate_upsample_uses_linear_path)
+{
+    scenario_t scenario;
+    asset_cache_t cache;
+    iq_ci16_t asset_samples[4] = {
+        {.i = 0, .q = 1600},
+        {.i = 1600, .q = 0},
+        {.i = 3200, .q = -1600},
+        {.i = 4800, .q = -3200},
+    };
+    memset(&scenario, 0, sizeof(scenario));
+    memset(&cache, 0, sizeof(cache));
+
+    scenario.schema_version = 1;
+    snprintf(scenario.scenario_id, sizeof(scenario.scenario_id), "%s", "unit_low_rate_linear");
+    scenario.source_count = 1;
+    scenario.signal_count = 1;
+    snprintf(scenario.sources[0].id, sizeof(scenario.sources[0].id), "%s", "low_src");
+    snprintf(scenario.sources[0].source_type, sizeof(scenario.sources[0].source_type), "%s", "iq_file");
+    snprintf(scenario.sources[0].format, sizeof(scenario.sources[0].format), "%s", "ci16");
+    snprintf(scenario.sources[0].byte_order, sizeof(scenario.sources[0].byte_order), "%s", "little_endian");
+    snprintf(scenario.sources[0].iq_layout, sizeof(scenario.sources[0].iq_layout), "%s", "interleaved_iq");
+    scenario.sources[0].sample_rate_hz = 1000;
+    scenario.sources[0].bandwidth_hz = 1000;
+    scenario.sources[0].sample_count = 4;
+    snprintf(scenario.signals[0].signal_id, sizeof(scenario.signals[0].signal_id), "%s", "low_sig");
+    snprintf(scenario.signals[0].source_reference, sizeof(scenario.signals[0].source_reference), "%s", "low_src");
+    scenario.signals[0].center_frequency_hz = 10000000000ULL;
+    scenario.signals[0].bandwidth_hz = 1000;
+    scenario.signals[0].power_dbm = -40.0;
+    scenario.signals[0].start_time_s = 0.0;
+    scenario.signals[0].repeat_interval_s = 1.0;
+
+    cache.asset_count = 1;
+    snprintf(cache.assets[0].source_id, sizeof(cache.assets[0].source_id), "%s", "low_src");
+    cache.assets[0].sample_count = 4;
+    cache.assets[0].samples = asset_samples;
+
+    const receiver_config_t receiver = {
+        .id = 0,
+        .frequency_start_hz = 9999999500ULL,
+        .frequency_stop_hz = 10000000500ULL,
+        .bandwidth_hz = 1000,
+        .sample_rate_hz = 16000,
+        .output_scale = 1.0,
+        .rf_reference_power_dbm = -40.0,
+    };
+    iq_ci16_t out[16];
+    render_stats_t stats;
+    ck_assert(renderer_render_80mhz_block(&scenario, &cache, &receiver, 0, out, 16, &stats));
+    ck_assert_uint_eq(stats.active_signals, 1);
+    for (size_t i = 0; i < 16; i++) {
+        const double fraction = (double)i / 16.0;
+        ck_assert_int_eq(out[i].i, interpolate_scaled_i16(asset_samples[0].i, asset_samples[1].i, fraction, 1.0));
+        ck_assert_int_eq(out[i].q, interpolate_scaled_i16(asset_samples[0].q, asset_samples[1].q, fraction, 1.0));
+    }
+}
+END_TEST
+
 START_TEST(renderer_applies_rf_power_relative_to_reference)
 {
     simulator_config_t config;
@@ -484,6 +543,7 @@ Suite *renderer_suite(void)
     TCase *tc = tcase_create("core");
     tcase_add_test(tc, renders_nonzero_visible_signal);
     tcase_add_test(tc, renderer_80mhz_sinc_resamples_24576_source_to_98304_output);
+    tcase_add_test(tc, renderer_low_rate_upsample_uses_linear_path);
     tcase_add_test(tc, renderer_applies_rf_power_relative_to_reference);
     tcase_add_test(tc, renderer_mixes_two_signals_without_clipping);
     tcase_add_test(tc, renderer_clips_after_mixing_two_signals);

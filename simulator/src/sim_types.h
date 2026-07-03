@@ -52,6 +52,7 @@ typedef struct {
     double rf_reference_power_dbm;
     bool stream_enabled;
     char udp_output_host[64];
+    char udp_multicast_interface[64];
     udp_output_config_t udp_80mhz_output;
     ddc_config_t ddc[SIM_DDC_COUNT];
 } receiver_config_t;

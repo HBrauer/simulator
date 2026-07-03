@@ -44,7 +44,7 @@ Each stream worker owns:
 - one UDP thread that drains complete packets from the ringbuffer and sends them to the configured UDP destination.
 - per-stream metrics for packets, bytes, sent samples, average sent sample rate, underruns, overruns, dropped samples, missed samples, and active state.
 
-`samples_sent` counts CI16 samples successfully handed to UDP. `samples_dropped` counts rendered samples discarded because the ringbuffer was full. `samples_missed` counts samples the paced UDP sender wanted to send but could not because no rendered packet was ready. The `/api/v1/metrics` response exposes these counters globally and per stream, with each stream's configured `sample_rate_hz` and measured `actual_sample_rate_sps`.
+`samples_sent` counts CI16 samples successfully handed to UDP. `samples_dropped` counts samples discarded before a successful UDP send. `samples_send_dropped` is the subset dropped because the nonblocking UDP socket could not queue the datagram. `udp_send_would_block`, `udp_send_no_buffer`, and `udp_send_other_errors` split those send failures by errno class. `samples_late` counts samples missed because the sender loop was already behind its configured pacing deadline. `samples_missed` includes underruns and late samples. The `/api/v1/metrics` response exposes these counters globally and per stream, with each stream's configured `sample_rate_hz` and measured `actual_sample_rate_sps`.
 
 Receiver configuration updates from REST are protected by `receiver_lock`. Stream workers copy a receiver snapshot while holding that lock, then render/send from the snapshot without keeping the lock held.
 

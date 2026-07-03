@@ -188,6 +188,7 @@ def _assert_receiver_status_shape(status):
             "stream_enabled",
             "bandwidth_hz",
             "udp_output_host",
+            "udp_multicast_interface",
             "udp_outputs",
             "streams_active",
         },
@@ -202,9 +203,14 @@ def _assert_metrics_shape(metrics):
             "samples_sent",
             "actual_sample_rate_sps",
             "samples_missed",
+            "samples_late",
+            "samples_send_dropped",
             "udp_packets_sent",
             "udp_bytes_sent",
             "udp_send_errors",
+            "udp_send_would_block",
+            "udp_send_no_buffer",
+            "udp_send_other_errors",
             "active_streams",
             "ringbuffer_overruns",
             "ringbuffer_underruns",
@@ -225,9 +231,14 @@ def _assert_metrics_shape(metrics):
                 "samples_sent",
                 "actual_sample_rate_sps",
                 "samples_missed",
+                "samples_late",
+                "samples_send_dropped",
                 "udp_packets_sent",
                 "udp_bytes_sent",
                 "udp_send_errors",
+                "udp_send_would_block",
+                "udp_send_no_buffer",
+                "udp_send_other_errors",
                 "ringbuffer_overruns",
                 "ringbuffer_underruns",
                 "samples_dropped",
@@ -251,7 +262,12 @@ def _assert_stream_status_shape(streams):
                 "samples_rendered",
                 "samples_sent",
                 "samples_missed",
+                "samples_late",
+                "samples_send_dropped",
                 "udp_packets_sent",
+                "udp_send_would_block",
+                "udp_send_no_buffer",
+                "udp_send_other_errors",
                 "ringbuffer_overruns",
                 "ringbuffer_underruns",
             },
@@ -349,9 +365,14 @@ def test_runtime_rest_and_udp_stream(tmp_path):
         assert metrics["samples_sent"] == metrics["samples_rendered"]
         assert metrics["actual_sample_rate_sps"] >= 0
         assert metrics["samples_missed"] >= 0
+        assert metrics["samples_late"] >= 0
+        assert metrics["samples_send_dropped"] >= 0
         assert metrics["udp_packets_sent"] >= 1
         assert metrics["udp_bytes_sent"] >= 20 + 256 * 4
         assert metrics["udp_send_errors"] == 0
+        assert metrics["udp_send_would_block"] >= 0
+        assert metrics["udp_send_no_buffer"] >= 0
+        assert metrics["udp_send_other_errors"] >= 0
         assert "ringbuffer_overruns" in metrics
         assert "ringbuffer_underruns" in metrics
         assert "samples_dropped" in metrics
@@ -363,7 +384,12 @@ def test_runtime_rest_and_udp_stream(tmp_path):
         assert metrics["streams"][0]["samples_sent"] == metrics["streams"][0]["samples_rendered"]
         assert metrics["streams"][0]["actual_sample_rate_sps"] >= 0
         assert metrics["streams"][0]["samples_missed"] >= 0
+        assert metrics["streams"][0]["samples_late"] >= 0
+        assert metrics["streams"][0]["samples_send_dropped"] >= 0
         assert metrics["streams"][0]["udp_packets_sent"] >= 1
+        assert metrics["streams"][0]["udp_send_would_block"] >= 0
+        assert metrics["streams"][0]["udp_send_no_buffer"] >= 0
+        assert metrics["streams"][0]["udp_send_other_errors"] >= 0
         assert "ringbuffer_overruns" in metrics["streams"][0]
         assert "ringbuffer_underruns" in metrics["streams"][0]
         assert "samples_dropped" in metrics["streams"][0]

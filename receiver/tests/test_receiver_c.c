@@ -72,10 +72,8 @@ START_TEST(pushes_ci16_into_waterfall)
     ck_assert(waterfall_push_ci16(&wf, iq, 16));
     ck_assert(wf.last_max_db > wf.last_min_db);
     bool any = false;
-    for (size_t i = 0; i < 16; i++) {
-        if (wf.history[3U * 16U + i] > -120.0f) {
-            any = true;
-        }
+    for (size_t i = 0; i < 4U * 16U; i++) {
+        any = any || wf.history[i] > -120.0f;
     }
     ck_assert(any);
     waterfall_free(&wf);

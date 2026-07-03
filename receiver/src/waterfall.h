@@ -17,6 +17,7 @@ typedef struct {
     float *history;
     float last_min_db;
     float last_max_db;
+    size_t next_row;
 } waterfall_t;
 
 bool waterfall_init(waterfall_t *wf, size_t fft_size, size_t rows);

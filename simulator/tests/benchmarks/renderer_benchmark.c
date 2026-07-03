@@ -48,6 +48,8 @@ int main(int argc, char **argv)
     size_t blocks = 1000;
     size_t samples_per_block = 4096;
     size_t receivers = 1;
+    const char *config_path = "simulator/configs/instance_001.yaml";
+    const char *scenario_path = "simulator/scenarios/test_scenario_001.json";
     const char *json_path = NULL;
     if (argc > 1) {
         blocks = (size_t)strtoull(argv[1], NULL, 10);
@@ -62,6 +64,12 @@ int main(int argc, char **argv)
         } else if (strcmp(argv[i], "--receivers") == 0) {
             receivers = (size_t)strtoull(argv[i + 1], NULL, 10);
             i++;
+        } else if (strcmp(argv[i], "--config") == 0) {
+            config_path = argv[i + 1];
+            i++;
+        } else if (strcmp(argv[i], "--scenario") == 0) {
+            scenario_path = argv[i + 1];
+            i++;
         }
     }
     if (receivers == 0 || receivers > SIM_MAX_RECEIVERS) {
@@ -73,8 +81,8 @@ int main(int argc, char **argv)
     simulator_config_t config;
     scenario_t scenario;
     asset_cache_t cache;
-    if (!config_load_yaml("simulator/configs/instance_001.yaml", &config, error, sizeof(error)) ||
-        !scenario_load_json("simulator/scenarios/test_scenario_001.json", &scenario, error, sizeof(error)) ||
+    if (!config_load_yaml(config_path, &config, error, sizeof(error)) ||
+        !scenario_load_json(scenario_path, &scenario, error, sizeof(error)) ||
         !scenario_validate(&scenario, ".", error, sizeof(error)) ||
         !asset_cache_load(&cache, &scenario, error, sizeof(error))) {
         fprintf(stderr, "setup failed: %s\n", error);

@@ -25,15 +25,25 @@ For multicast, pass the multicast group as `--host`; the receiver joins the grou
 ```sh
 build/sdr-waterfall-receiver \
   --host 239.10.10.10 \
+  --interface 127.0.0.1 \
   --port 50001 \
   --fft-size 1024 \
   --sample-rate-hz 24576000
 ```
 
+For the full 98.304 MS/s stream, the receiver needs a large kernel UDP receive buffer. At startup it prints the actual `rcvbuf` value. If it warns that the buffer is small, raise the Linux socket receive limits before starting the receiver:
+
+```sh
+sudo sysctl -w net.core.rmem_max=134217728 net.core.rmem_default=134217728
+```
+
+For a two-machine setup, configure the link for MTU 9000 and use `stream_block_samples: 1536` on the simulator. That keeps each VITA/UDP datagram below jumbo MTU and avoids IP fragmentation.
+
 Useful options:
 
 ```text
 --fft-size N                Power-of-two FFT size, default 1024
+--interface HOST            Multicast receive interface, default 0.0.0.0
 --rows N                    Override automatic one-row-per-screen-pixel layout
 --sample-rate-hz N          Stream sample rate, default 98304000
 --max-packets N             Exit after N UDP packets

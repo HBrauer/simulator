@@ -1,5 +1,6 @@
 #include "vita49_packet.h"
 
+#include <limits.h>
 #include <string.h>
 
 #define VITA49_PSI_VITA49_2 (1U << 25U)
@@ -40,7 +41,8 @@ bool vita49_write_if_data_packet(const vita49_if_data_packet_t *packet, uint8_t 
     }
     const size_t payload_bytes = packet->payload_samples * sizeof(iq_ci16_t);
     const size_t total_bytes = VITA49_IF_DATA_HEADER_BYTES + payload_bytes;
-    if (packet == NULL || out == NULL || packet->payload == NULL || out_size < total_bytes || total_bytes % 4U != 0U) {
+    if (packet == NULL || out == NULL || packet->payload == NULL || out_size < total_bytes || total_bytes % 4U != 0U ||
+        total_bytes / 4U > UINT16_MAX) {
         return false;
     }
     const uint16_t packet_words = (uint16_t)(total_bytes / 4U);

@@ -43,7 +43,7 @@ Terminal 2, start the simulator:
 build/sdr-simulator \
   --config simulator/configs/instance_001.yaml \
   --scenario simulator/scenarios/gnuradio_demo.json \
-  --stream-block-samples 4096
+  --stream-block-samples 1536
 ```
 
 The receiver opens an SDL2 window, parses VITA 49.2 packets at UDP line rate, and displays the selected history duration across automatically computed waterfall rows. The 80-MHz scanner stream is still available on port `50000`, but the quick start uses DDC port `50001` because it is centered on the demo signal and is easier to verify visually.
@@ -54,7 +54,7 @@ For a non-continuous signal, use `simulator/scenarios/burst_1s_every_5s.json`. I
 build/sdr-simulator \
   --config simulator/configs/instance_001.yaml \
   --scenario simulator/scenarios/burst_1s_every_5s.json \
-  --stream-block-samples 4096
+  --stream-block-samples 1536
 ```
 
 ## Run
@@ -65,7 +65,7 @@ build/sdr-simulator \
   --scenario simulator/scenarios/test_scenario_001.json
 ```
 
-`stream_block_samples` in the instance YAML controls the CI16 IQ payload size in samples inside each VITA 49.2 UDP packet. The default is 1024 samples, and the allowed range is 1 to 4096 samples. `--stream-block-samples` overrides the YAML value for ad hoc runs.
+`stream_block_samples` in the instance YAML controls the CI16 IQ payload size in samples inside each VITA 49.2 UDP packet. The default is 1024 samples, and the allowed range is 1 to 4096 samples. `--stream-block-samples` overrides the YAML value for ad hoc runs. For high-rate receiver tests over jumbo-frame Ethernet, use `1536` samples; that produces a `6164` byte VITA/UDP payload and avoids IP fragmentation with MTU 9000.
 
 Receiver and DDC `sample_rate_hz` and `bandwidth_hz` are configurable in YAML. Existing defaults remain `98304000`/`80000000` for the receiver stream and `24576000`/`20000000` for DDC streams.
 
@@ -90,17 +90,20 @@ To check whether the simulator is actually sending the configured sample rate, i
 curl -s http://127.0.0.1:8100/api/v1/metrics
 ```
 
-Compare `sample_rate_hz` to `actual_sample_rate_sps`. `samples_sent` is the number of CI16 samples successfully handed to UDP. `samples_dropped` means rendered samples were discarded because the sender side was backed up. `samples_missed` means the sender wanted to send a block but rendering had not produced one in time.
+Compare `sample_rate_hz` to `actual_sample_rate_sps`. `samples_sent` is the number of CI16 samples successfully handed to UDP. `samples_late` means the sender loop missed configured pacing slots. `samples_send_dropped` means the nonblocking UDP socket could not queue a datagram. `samples_dropped` is the total discarded before successful send, and `samples_missed` includes underruns plus pacing misses.
 
 ## Multicast UDP
 
 Set `udp_output_host` to an IPv4 multicast group such as `239.10.10.10`. The simulator sends the same VITA 49.2 UDP packets to the multicast group, and receivers join the group explicitly.
+
+For local-machine testing, set `udp_multicast_interface: "127.0.0.1"` in the simulator config and pass `--interface 127.0.0.1` to the receiver. Otherwise the kernel may route multicast over the default physical NIC, which cannot carry a 98 MS/s CI16 stream.
 
 Terminal 1, join DDC0 on multicast:
 
 ```sh
 build/sdr-waterfall-receiver \
   --host 239.10.10.10 \
+  --interface 127.0.0.1 \
   --port 50001 \
   --fft-size 1024 \
   --sample-rate-hz 24576000
@@ -170,10 +173,13 @@ meson test -C build-sanitize
 ```sh
 build/renderer_benchmark 1000 4096
 build/renderer_benchmark 1000 4096 --receivers 4 --json build/renderer_benchmark.json
+build-perf/renderer_benchmark 2000 4096 \
+  --config simulator/configs/instance_multicast.yaml \
+  --scenario simulator/scenarios/burst_1s_every_5s.json
 meson test --benchmark -C build -j 1
 ```
 
-The benchmark reports scalar 80-MHz renderer throughput in samples per second. The optional JSON report records `benchmark`, `blocks`, `samples_per_block`, `receivers`, `total_samples`, `seconds`, and `samples_per_second`. Meson registers 1, 4, and 12 receiver benchmark cases. It is intended for comparing renderer changes on the same machine, not as a final full-system throughput claim.
+The benchmark reports scalar 80-MHz renderer throughput in samples per second. Use `--config` and `--scenario` to test a specific runtime setup. The optional JSON report records `benchmark`, `blocks`, `samples_per_block`, `receivers`, `total_samples`, `seconds`, and `samples_per_second`. Meson registers 1, 4, and 12 receiver benchmark cases. It is intended for comparing renderer changes on the same machine, not as a final full-system throughput claim.
 
 ## Full Receiver Performance Build
 
@@ -186,12 +192,12 @@ meson compile -C build-perf
 build-perf/sdr-simulator \
   --config simulator/configs/instance_001.yaml \
   --scenario simulator/scenarios/gnuradio_demo.json \
-  --stream-block-samples 4096
+  --stream-block-samples 1536
 ```
 
 On a Ryzen 7 5800XT test run, this delivered about `196.6 MSamples/s` total (`98.3 MSamples/s` on the 80-MHz stream and `24.58 MSamples/s` on each DDC) with no UDP errors, overruns, or underruns over a short local-loopback metrics sample. This path trades strict IEEE floating-point behavior for throughput; keep the default build for deterministic correctness checks. `-Dnative_optimizations=true` is available for local experiments, but was slightly slower than fast-math-only on this test host.
 
-For `stream_block_samples: 4096`, each VITA 49.2 UDP datagram is `20 + 4096 * 4 = 16404` bytes.
+For `stream_block_samples: 1536`, each VITA 49.2 UDP datagram is `20 + 1536 * 4 = 6164` bytes before UDP/IP headers. This profile is intended for MTU 9000 jumbo-frame links between simulator and receiver.
 
 ## Waterfall Receiver
 

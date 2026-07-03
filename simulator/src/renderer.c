@@ -20,6 +20,7 @@
 
 #define RESAMPLER_RADIUS 4
 #define RESAMPLER_TAPS 8U
+#define LOW_RATE_LINEAR_MAX_SOURCE_PER_OUTPUT 0.125
 
 static void resample_ci16(const iq_ci16_t *samples, size_t sample_count, double source_position, double *out_i, double *out_q);
 
@@ -196,6 +197,31 @@ static void resample_ci16(const iq_ci16_t *samples, size_t sample_count, double 
 #endif
 }
 
+static void resample_linear_ci16_f(const iq_ci16_t *samples, size_t sample_count, float source_position, float *out_i, float *out_q)
+{
+    if (sample_count == 0) {
+        *out_i = 0.0f;
+        *out_q = 0.0f;
+        return;
+    }
+
+    size_t index = (size_t)source_position;
+    if (index + 1U >= sample_count) {
+        if (index >= sample_count) {
+            index = sample_count - 1U;
+        }
+        *out_i = (float)samples[index].i;
+        *out_q = (float)samples[index].q;
+        return;
+    }
+
+    const float fraction = source_position - (float)index;
+    const float i0 = (float)samples[index].i;
+    const float q0 = (float)samples[index].q;
+    *out_i = i0 + ((float)samples[index + 1U].i - i0) * fraction;
+    *out_q = q0 + ((float)samples[index + 1U].q - q0) * fraction;
+}
+
 static double signal_passband_gain(uint64_t signal_center, uint32_t signal_bw, uint64_t window_center, uint64_t window_bw)
 {
     const int64_t sig_lo = (int64_t)signal_center - (int64_t)(signal_bw / 2U);
@@ -285,6 +311,24 @@ static void render_direct_nco(const iq_ci16_t *source_samples, size_t read_count
 static void render_resampled_baseband(const iq_ci16_t *source_samples, size_t read_count, iq_ci16_t *out, size_t count, double source_gain, double source_per_output)
 {
     const bool quarter_rate = fabs(source_per_output - 0.25) < 1e-12;
+    const bool low_rate_linear = source_per_output > 0.0 && source_per_output <= LOW_RATE_LINEAR_MAX_SOURCE_PER_OUTPUT;
+    if (low_rate_linear) {
+        const float gain_f = (float)source_gain;
+        const float source_step = (float)source_per_output;
+        float source_position = 0.0f;
+        for (size_t i = 0; i < count; i++) {
+            if ((size_t)source_position >= read_count) {
+                break;
+            }
+            float resampled_i = 0.0f;
+            float resampled_q = 0.0f;
+            resample_linear_ci16_f(source_samples, read_count, source_position, &resampled_i, &resampled_q);
+            out[i].i = clip_i16_f((float)out[i].i + gain_f * resampled_i);
+            out[i].q = clip_i16_f((float)out[i].q + gain_f * resampled_q);
+            source_position += source_step;
+        }
+        return;
+    }
     double quarter_weights[4][RESAMPLER_TAPS];
     if (quarter_rate) {
         build_quarter_phase_weights(quarter_weights);
@@ -309,6 +353,34 @@ static void render_resampled_baseband(const iq_ci16_t *source_samples, size_t re
 static void render_resampled_nco(const iq_ci16_t *source_samples, size_t read_count, iq_ci16_t *out, size_t count, double source_gain, double source_per_output, double step_c, double step_s)
 {
     const bool quarter_rate = fabs(source_per_output - 0.25) < 1e-12;
+    const bool low_rate_linear = source_per_output > 0.0 && source_per_output <= LOW_RATE_LINEAR_MAX_SOURCE_PER_OUTPUT;
+    if (low_rate_linear) {
+        const float gain_f = (float)source_gain;
+        const float source_step = (float)source_per_output;
+        const float step_c_f = (float)step_c;
+        const float step_s_f = (float)step_s;
+        float source_position = 0.0f;
+        float osc_c = 1.0f;
+        float osc_s = 0.0f;
+        for (size_t i = 0; i < count; i++) {
+            if ((size_t)source_position >= read_count) {
+                break;
+            }
+            float resampled_i = 0.0f;
+            float resampled_q = 0.0f;
+            resample_linear_ci16_f(source_samples, read_count, source_position, &resampled_i, &resampled_q);
+            const float ii = gain_f * resampled_i;
+            const float qq = gain_f * resampled_q;
+            out[i].i = clip_i16_f((float)out[i].i + (ii * osc_c - qq * osc_s));
+            out[i].q = clip_i16_f((float)out[i].q + (ii * osc_s + qq * osc_c));
+            const float next_c = osc_c * step_c_f - osc_s * step_s_f;
+            const float next_s = osc_s * step_c_f + osc_c * step_s_f;
+            osc_c = next_c;
+            osc_s = next_s;
+            source_position += source_step;
+        }
+        return;
+    }
     if (quarter_rate && count >= 64) {
         float quarter_weights_f[4][RESAMPLER_TAPS];
         build_quarter_phase_weights_f(quarter_weights_f);

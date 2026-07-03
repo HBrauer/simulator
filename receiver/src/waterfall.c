@@ -73,8 +73,7 @@ bool waterfall_push_ci16(waterfall_t *wf, const int16_t *iq, size_t sample_count
     }
     fftwf_execute(wf->fft_plan);
 
-    memmove(wf->history, wf->history + wf->fft_size, (wf->rows - 1U) * wf->fft_size * sizeof(*wf->history));
-    float *row = wf->history + (wf->rows - 1U) * wf->fft_size;
+    float *row = wf->history + wf->next_row * wf->fft_size;
     const size_t half = wf->fft_size / 2U;
     float row_min_db = 1000000.0f;
     float row_max_db = -1000000.0f;
@@ -94,5 +93,6 @@ bool waterfall_push_ci16(waterfall_t *wf, const int16_t *iq, size_t sample_count
     }
     wf->last_min_db = row_min_db;
     wf->last_max_db = row_max_db;
+    wf->next_row = (wf->next_row + 1U) % wf->rows;
     return true;
 }

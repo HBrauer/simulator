@@ -8,6 +8,7 @@
 #ifdef __linux__
 #include <sched.h>
 #endif
+#include <errno.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdlib.h>
@@ -15,8 +16,9 @@
 #include <time.h>
 #include <unistd.h>
 
-#define RENDER_BACKPRESSURE_NS 1000000L
-#define RINGBUFFER_PACKET_CAPACITY 64U
+#define RENDER_BACKPRESSURE_NS 50000L
+#define RINGBUFFER_PACKET_CAPACITY 256U
+#define STREAM_SEND_BATCH_SIZE 16U
 
 typedef enum {
     STREAM_KIND_80MHZ,
@@ -165,6 +167,54 @@ static void record_underrun(stream_worker_t *worker)
     atomic_fetch_add(&worker->stream_metrics->samples_missed, worker->block_samples);
 }
 
+static void record_send_drop(stream_worker_t *worker, int error_code)
+{
+    atomic_fetch_add(&worker->metrics->udp_send_errors, 1);
+    atomic_fetch_add(&worker->metrics->samples_dropped, worker->block_samples);
+    atomic_fetch_add(&worker->metrics->samples_send_dropped, worker->block_samples);
+    atomic_fetch_add(&worker->stream_metrics->udp_send_errors, 1);
+    atomic_fetch_add(&worker->stream_metrics->samples_dropped, worker->block_samples);
+    atomic_fetch_add(&worker->stream_metrics->samples_send_dropped, worker->block_samples);
+    if (error_code == EAGAIN || error_code == EWOULDBLOCK) {
+        atomic_fetch_add(&worker->metrics->udp_send_would_block, 1);
+        atomic_fetch_add(&worker->stream_metrics->udp_send_would_block, 1);
+    } else if (error_code == ENOBUFS) {
+        atomic_fetch_add(&worker->metrics->udp_send_no_buffer, 1);
+        atomic_fetch_add(&worker->stream_metrics->udp_send_no_buffer, 1);
+    } else {
+        atomic_fetch_add(&worker->metrics->udp_send_other_errors, 1);
+        atomic_fetch_add(&worker->stream_metrics->udp_send_other_errors, 1);
+    }
+}
+
+static void record_late_sample_count(stream_worker_t *worker, uint64_t samples)
+{
+    if (samples == 0U) {
+        return;
+    }
+    atomic_fetch_add(&worker->metrics->samples_late, samples);
+    atomic_fetch_add(&worker->metrics->samples_missed, samples);
+    atomic_fetch_add(&worker->stream_metrics->samples_late, samples);
+    atomic_fetch_add(&worker->stream_metrics->samples_missed, samples);
+}
+
+static void pace_or_record_late(stream_worker_t *worker, uint64_t *next_send_ns, uint64_t period_duration_ns, uint64_t period_samples)
+{
+    if (period_duration_ns == 0U || period_samples == 0U || *next_send_ns > UINT64_MAX - period_duration_ns) {
+        *next_send_ns = monotonic_now_ns();
+        return;
+    }
+    *next_send_ns += period_duration_ns;
+    const uint64_t now_ns = monotonic_now_ns();
+    if (*next_send_ns + period_duration_ns < now_ns) {
+        const uint64_t late_ns = now_ns - *next_send_ns;
+        record_late_sample_count(worker, (late_ns / period_duration_ns) * period_samples);
+        *next_send_ns = now_ns;
+    } else {
+        sleep_until_monotonic_ns(*next_send_ns);
+    }
+}
+
 static void *stream_render_thread_main(void *arg)
 {
     stream_worker_t *worker = arg;
@@ -243,19 +293,19 @@ static void *stream_udp_thread_main(void *arg)
         : ddc_snapshot.udp_output.port;
 
     udp_output_t udp = {.fd = -1};
-    if (!udp_output_open(&udp, host, port)) {
+    if (!udp_output_open(&udp, host, port, receiver_snapshot.udp_multicast_interface)) {
         return NULL;
     }
 
     const size_t send_capacity = vita49_if_data_packet_size(worker->block_samples);
-    uint8_t *packet = calloc(1, send_capacity);
-    if (packet == NULL) {
+    uint8_t *packets = calloc(STREAM_SEND_BATCH_SIZE, send_capacity);
+    if (packets == NULL) {
         udp_output_close(&udp);
         return NULL;
     }
-    uint8_t *payload = calloc(1, worker->packet_bytes);
-    if (payload == NULL) {
-        free(packet);
+    uint8_t *payloads = calloc(STREAM_SEND_BATCH_SIZE, worker->packet_bytes);
+    if (payloads == NULL) {
+        free(packets);
         udp_output_close(&udp);
         return NULL;
     }
@@ -275,68 +325,88 @@ static void *stream_udp_thread_main(void *arg)
         }
         const uint64_t block_duration_ns = streamer_block_duration_ns(worker->block_samples, stream_sample_rate(worker, &receiver_snapshot, &ddc_snapshot));
 
-        bool got_packet = false;
+        size_t batch_count = 0;
         pthread_mutex_lock(&worker->ringbuffer_lock);
-        if (ringbuffer_fill(&worker->ringbuffer) >= worker->packet_bytes) {
+        while (batch_count < STREAM_SEND_BATCH_SIZE && ringbuffer_fill(&worker->ringbuffer) >= worker->packet_bytes) {
+            uint8_t *payload = payloads + batch_count * worker->packet_bytes;
             (void)ringbuffer_read(&worker->ringbuffer, payload, worker->packet_bytes);
-            got_packet = true;
+            batch_count++;
         }
         pthread_mutex_unlock(&worker->ringbuffer_lock);
 
-        if (!got_packet) {
+        if (batch_count == 0U) {
             record_underrun(worker);
-            if (block_duration_ns > 0 && next_send_ns <= UINT64_MAX - block_duration_ns) {
-                next_send_ns += block_duration_ns;
-                sleep_until_monotonic_ns(next_send_ns);
-            } else {
-                next_send_ns = monotonic_now_ns();
-            }
+            pace_or_record_late(worker, &next_send_ns, block_duration_ns, worker->block_samples);
             continue;
         }
 
-        size_t sent = 0;
-        size_t send_bytes = 0;
-        const vita49_if_data_packet_t vita_packet = {
-            .stream_id = vita49_stream_id(receiver_snapshot.id, worker->kind == STREAM_KIND_DDC, (uint32_t)worker->ddc_index),
-            .sequence = worker->vita_sequence,
-            .timestamp_ns = scenario_time_ns,
-            .payload = (const iq_ci16_t *)payload,
-            .payload_samples = worker->block_samples,
-        };
-        if (!vita49_write_if_data_packet(&vita_packet, packet, send_capacity, &send_bytes)) {
-            atomic_fetch_add(&worker->metrics->udp_send_errors, 1);
-            atomic_fetch_add(&worker->stream_metrics->udp_send_errors, 1);
-            continue;
-        }
-        if (udp_output_send(&udp, packet, send_bytes, &sent)) {
-            worker->vita_sequence = (uint8_t)((worker->vita_sequence + 1U) & 0x0fU);
-            atomic_fetch_add(&worker->metrics->udp_packets_sent, 1);
-            atomic_fetch_add(&worker->metrics->udp_bytes_sent, sent);
-            atomic_fetch_add(&worker->metrics->samples_rendered, worker->block_samples);
-            atomic_fetch_add(&worker->metrics->samples_sent, worker->block_samples);
-            atomic_fetch_add(&worker->stream_metrics->udp_packets_sent, 1);
-            atomic_fetch_add(&worker->stream_metrics->udp_bytes_sent, sent);
-            atomic_fetch_add(&worker->stream_metrics->samples_rendered, worker->block_samples);
-            atomic_fetch_add(&worker->stream_metrics->samples_sent, worker->block_samples);
-        } else {
-            atomic_fetch_add(&worker->metrics->udp_send_errors, 1);
-            atomic_fetch_add(&worker->stream_metrics->udp_send_errors, 1);
-        }
-        if (block_duration_ns > 0 && next_send_ns <= UINT64_MAX - block_duration_ns) {
-            next_send_ns += block_duration_ns;
-            const uint64_t now_ns = monotonic_now_ns();
-            if (next_send_ns + block_duration_ns < now_ns) {
-                next_send_ns = now_ns;
-            } else {
-                sleep_until_monotonic_ns(next_send_ns);
+        const void *send_data[STREAM_SEND_BATCH_SIZE];
+        size_t send_lengths[STREAM_SEND_BATCH_SIZE];
+        size_t sent_messages = 0;
+        size_t sent_bytes = 0;
+        int send_error = 0;
+        size_t prepared_count = 0;
+        const uint32_t stream_id = vita49_stream_id(receiver_snapshot.id, worker->kind == STREAM_KIND_DDC, (uint32_t)worker->ddc_index);
+        for (size_t i = 0; i < batch_count; i++) {
+            uint8_t *packet = packets + i * send_capacity;
+            const uint8_t *payload = payloads + i * worker->packet_bytes;
+            uint64_t timestamp_ns = scenario_time_ns;
+            if (block_duration_ns > 0U && i <= (UINT64_MAX - scenario_time_ns) / block_duration_ns) {
+                timestamp_ns = scenario_time_ns + (uint64_t)i * block_duration_ns;
             }
-        } else {
-            next_send_ns = monotonic_now_ns();
+            const vita49_if_data_packet_t vita_packet = {
+                .stream_id = stream_id,
+                .sequence = (uint8_t)((worker->vita_sequence + (uint8_t)i) & 0x0fU),
+                .timestamp_ns = timestamp_ns,
+                .payload = (const iq_ci16_t *)payload,
+                .payload_samples = worker->block_samples,
+            };
+            size_t send_bytes = 0;
+            if (!vita49_write_if_data_packet(&vita_packet, packet, send_capacity, &send_bytes)) {
+                record_send_drop(worker, EINVAL);
+                continue;
+            }
+            send_data[prepared_count] = packet;
+            send_lengths[prepared_count] = send_bytes;
+            prepared_count++;
         }
+
+        if (prepared_count > 0U && udp_output_send_batch(&udp, send_data, send_lengths, prepared_count, &sent_messages, &sent_bytes, &send_error)) {
+            const uint64_t sent_samples = worker->block_samples * (uint64_t)sent_messages;
+            worker->vita_sequence = (uint8_t)((worker->vita_sequence + sent_messages) & 0x0fU);
+            atomic_fetch_add(&worker->metrics->udp_packets_sent, sent_messages);
+            atomic_fetch_add(&worker->metrics->udp_bytes_sent, sent_bytes);
+            atomic_fetch_add(&worker->metrics->samples_rendered, sent_samples);
+            atomic_fetch_add(&worker->metrics->samples_sent, sent_samples);
+            atomic_fetch_add(&worker->stream_metrics->udp_packets_sent, sent_messages);
+            atomic_fetch_add(&worker->stream_metrics->udp_bytes_sent, sent_bytes);
+            atomic_fetch_add(&worker->stream_metrics->samples_rendered, sent_samples);
+            atomic_fetch_add(&worker->stream_metrics->samples_sent, sent_samples);
+        } else {
+            if (sent_messages > 0U) {
+                const uint64_t sent_samples = worker->block_samples * (uint64_t)sent_messages;
+                worker->vita_sequence = (uint8_t)((worker->vita_sequence + sent_messages) & 0x0fU);
+                atomic_fetch_add(&worker->metrics->udp_packets_sent, sent_messages);
+                atomic_fetch_add(&worker->metrics->udp_bytes_sent, sent_bytes);
+                atomic_fetch_add(&worker->metrics->samples_rendered, sent_samples);
+                atomic_fetch_add(&worker->metrics->samples_sent, sent_samples);
+                atomic_fetch_add(&worker->stream_metrics->udp_packets_sent, sent_messages);
+                atomic_fetch_add(&worker->stream_metrics->udp_bytes_sent, sent_bytes);
+                atomic_fetch_add(&worker->stream_metrics->samples_rendered, sent_samples);
+                atomic_fetch_add(&worker->stream_metrics->samples_sent, sent_samples);
+            }
+            const size_t dropped_messages = prepared_count - sent_messages;
+            for (size_t i = 0; i < dropped_messages; i++) {
+                record_send_drop(worker, send_error);
+            }
+        }
+        const uint64_t batch_duration_ns = block_duration_ns * (uint64_t)batch_count;
+        const uint64_t batch_samples = worker->block_samples * (uint64_t)batch_count;
+        pace_or_record_late(worker, &next_send_ns, batch_duration_ns, batch_samples);
     }
 
-    free(payload);
-    free(packet);
+    free(payloads);
+    free(packets);
     udp_output_close(&udp);
     return NULL;
 }

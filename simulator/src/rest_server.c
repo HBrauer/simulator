@@ -16,6 +16,7 @@ struct rest_server {
     rest_context_t context;
     struct sockaddr_in bind_addr;
     time_t started_at;
+    uint64_t started_at_ns;
 };
 
 typedef struct {
@@ -108,7 +109,7 @@ static json_t *receiver_json(const receiver_config_t *r, uint64_t scenario_time_
 {
     const char *mode = receiver_effective_mode(r) == RECEIVER_MODE_FIXED ? "fixed" : "scan";
     json_t *root = json_pack(
-        "{s:i,s:s,s:I,s:I,s:I,s:f,s:f,s:f,s:b,s:I,s:s,s:{s:{s:i}},s:b}",
+        "{s:i,s:s,s:I,s:I,s:I,s:f,s:f,s:f,s:b,s:I,s:s,s:s,s:{s:{s:i}},s:b}",
         "receiver_id", (int)r->id,
         "effective_mode", mode,
         "frequency_start_hz", (json_int_t)r->frequency_start_hz,
@@ -120,6 +121,7 @@ static json_t *receiver_json(const receiver_config_t *r, uint64_t scenario_time_
         "stream_enabled", r->stream_enabled,
         "bandwidth_hz", (json_int_t)r->bandwidth_hz,
         "udp_output_host", r->udp_output_host,
+        "udp_multicast_interface", r->udp_multicast_interface,
         "udp_outputs", "iq_80mhz", "port", (int)r->udp_80mhz_output.port,
         "streams_active", r->stream_enabled
     );
@@ -145,13 +147,24 @@ static json_t *receiver_json(const receiver_config_t *r, uint64_t scenario_time_
     return root;
 }
 
-static double average_rate(uint64_t samples, time_t started_at)
+static uint64_t monotonic_now_ns(void)
 {
-    const double elapsed = difftime(time(NULL), started_at);
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
+static double average_rate(uint64_t samples, uint64_t started_at_ns)
+{
+    const uint64_t now_ns = monotonic_now_ns();
+    if (now_ns <= started_at_ns) {
+        return 0.0;
+    }
+    const double elapsed = (double)(now_ns - started_at_ns) / 1000000000.0;
     return elapsed > 0.0 ? (double)samples / elapsed : 0.0;
 }
 
-static json_t *stream_metrics_json(const receiver_config_t *receiver, const receiver_metrics_t *metrics, time_t started_at)
+static json_t *stream_metrics_json(const receiver_config_t *receiver, const receiver_metrics_t *metrics, uint64_t started_at_ns)
 {
     json_t *streams = json_array();
     for (size_t i = 0; i < 1 + SIM_DDC_COUNT; i++) {
@@ -159,18 +172,23 @@ static json_t *stream_metrics_json(const receiver_config_t *receiver, const rece
         const uint64_t samples_sent = atomic_load(&stream->samples_sent);
         const uint32_t sample_rate_hz = i == 0 ? receiver->sample_rate_hz : receiver->ddc[i - 1U].sample_rate_hz;
         json_array_append_new(streams, json_pack(
-            "{s:s,s:i,s:i,s:b,s:I,s:I,s:f,s:I,s:I,s:I,s:I,s:I,s:I,s:I}",
+            "{s:s,s:i,s:i,s:b,s:I,s:I,s:f,s:I,s:I,s:I,s:I,s:I,s:I,s:I,s:I,s:I,s:I,s:I,s:I}",
             "stream_type", i == 0 ? "iq_80mhz" : "ddc",
             "stream_id", i == 0 ? -1 : (int)i - 1,
             "sample_rate_hz", (int)sample_rate_hz,
             "active", atomic_load(&stream->active),
             "samples_rendered", (json_int_t)atomic_load(&stream->samples_rendered),
             "samples_sent", (json_int_t)samples_sent,
-            "actual_sample_rate_sps", average_rate(samples_sent, started_at),
+            "actual_sample_rate_sps", average_rate(samples_sent, started_at_ns),
             "samples_missed", (json_int_t)atomic_load(&stream->samples_missed),
+            "samples_late", (json_int_t)atomic_load(&stream->samples_late),
+            "samples_send_dropped", (json_int_t)atomic_load(&stream->samples_send_dropped),
             "udp_packets_sent", (json_int_t)atomic_load(&stream->udp_packets_sent),
             "udp_bytes_sent", (json_int_t)atomic_load(&stream->udp_bytes_sent),
             "udp_send_errors", (json_int_t)atomic_load(&stream->udp_send_errors),
+            "udp_send_would_block", (json_int_t)atomic_load(&stream->udp_send_would_block),
+            "udp_send_no_buffer", (json_int_t)atomic_load(&stream->udp_send_no_buffer),
+            "udp_send_other_errors", (json_int_t)atomic_load(&stream->udp_send_other_errors),
             "ringbuffer_overruns", (json_int_t)atomic_load(&stream->ringbuffer_overruns),
             "ringbuffer_underruns", (json_int_t)atomic_load(&stream->ringbuffer_underruns),
             "samples_dropped", (json_int_t)atomic_load(&stream->samples_dropped)
@@ -183,7 +201,7 @@ static json_t *stream_status_json(const receiver_config_t *receiver, const recei
 {
     json_t *streams = json_array();
     json_array_append_new(streams, json_pack(
-        "{s:s,s:i,s:i,s:i,s:b,s:b,s:I,s:I,s:I,s:I,s:I,s:I}",
+        "{s:s,s:i,s:i,s:i,s:b,s:b,s:I,s:I,s:I,s:I,s:I,s:I,s:I,s:I,s:I,s:I,s:I}",
         "stream_type", "iq_80mhz",
         "stream_id", -1,
         "udp_port", (int)receiver->udp_80mhz_output.port,
@@ -193,7 +211,12 @@ static json_t *stream_status_json(const receiver_config_t *receiver, const recei
         "samples_rendered", (json_int_t)atomic_load(&metrics->streams[0].samples_rendered),
         "samples_sent", (json_int_t)atomic_load(&metrics->streams[0].samples_sent),
         "samples_missed", (json_int_t)atomic_load(&metrics->streams[0].samples_missed),
+        "samples_late", (json_int_t)atomic_load(&metrics->streams[0].samples_late),
+        "samples_send_dropped", (json_int_t)atomic_load(&metrics->streams[0].samples_send_dropped),
         "udp_packets_sent", (json_int_t)atomic_load(&metrics->streams[0].udp_packets_sent),
+        "udp_send_would_block", (json_int_t)atomic_load(&metrics->streams[0].udp_send_would_block),
+        "udp_send_no_buffer", (json_int_t)atomic_load(&metrics->streams[0].udp_send_no_buffer),
+        "udp_send_other_errors", (json_int_t)atomic_load(&metrics->streams[0].udp_send_other_errors),
         "ringbuffer_overruns", (json_int_t)atomic_load(&metrics->streams[0].ringbuffer_overruns),
         "ringbuffer_underruns", (json_int_t)atomic_load(&metrics->streams[0].ringbuffer_underruns)
     ));
@@ -201,7 +224,7 @@ static json_t *stream_status_json(const receiver_config_t *receiver, const recei
         const ddc_config_t *ddc = &receiver->ddc[i];
         const stream_metrics_t *stream = &metrics->streams[1 + i];
         json_array_append_new(streams, json_pack(
-            "{s:s,s:i,s:i,s:i,s:I,s:f,s:f,s:b,s:b,s:b,s:I,s:I,s:I,s:I,s:I,s:I}",
+            "{s:s,s:i,s:i,s:i,s:I,s:f,s:f,s:b,s:b,s:b,s:I,s:I,s:I,s:I,s:I,s:I,s:I,s:I,s:I,s:I,s:I}",
             "stream_type", "ddc",
             "stream_id", (int)i,
             "udp_port", (int)ddc->udp_output.port,
@@ -215,7 +238,12 @@ static json_t *stream_status_json(const receiver_config_t *receiver, const recei
             "samples_rendered", (json_int_t)atomic_load(&stream->samples_rendered),
             "samples_sent", (json_int_t)atomic_load(&stream->samples_sent),
             "samples_missed", (json_int_t)atomic_load(&stream->samples_missed),
+            "samples_late", (json_int_t)atomic_load(&stream->samples_late),
+            "samples_send_dropped", (json_int_t)atomic_load(&stream->samples_send_dropped),
             "udp_packets_sent", (json_int_t)atomic_load(&stream->udp_packets_sent),
+            "udp_send_would_block", (json_int_t)atomic_load(&stream->udp_send_would_block),
+            "udp_send_no_buffer", (json_int_t)atomic_load(&stream->udp_send_no_buffer),
+            "udp_send_other_errors", (json_int_t)atomic_load(&stream->udp_send_other_errors),
             "ringbuffer_overruns", (json_int_t)atomic_load(&stream->ringbuffer_overruns),
             "ringbuffer_underruns", (json_int_t)atomic_load(&stream->ringbuffer_underruns)
         ));
@@ -280,20 +308,25 @@ static enum MHD_Result answer(void *cls, struct MHD_Connection *connection, cons
     if (strcmp(method, "GET") == 0 && strcmp(url, "/api/v1/metrics") == 0) {
         const uint64_t samples_sent = atomic_load(&ctx->metrics->samples_sent);
         json_t *response = json_pack(
-            "{s:I,s:I,s:f,s:I,s:I,s:I,s:I,s:I,s:I,s:I,s:I}",
+            "{s:I,s:I,s:f,s:I,s:I,s:I,s:I,s:I,s:I,s:I,s:I,s:I,s:I,s:I,s:I,s:I}",
             "samples_rendered", (json_int_t)atomic_load(&ctx->metrics->samples_rendered),
             "samples_sent", (json_int_t)samples_sent,
-            "actual_sample_rate_sps", average_rate(samples_sent, server->started_at),
+            "actual_sample_rate_sps", average_rate(samples_sent, server->started_at_ns),
             "samples_missed", (json_int_t)atomic_load(&ctx->metrics->samples_missed),
+            "samples_late", (json_int_t)atomic_load(&ctx->metrics->samples_late),
+            "samples_send_dropped", (json_int_t)atomic_load(&ctx->metrics->samples_send_dropped),
             "udp_packets_sent", (json_int_t)atomic_load(&ctx->metrics->udp_packets_sent),
             "udp_bytes_sent", (json_int_t)atomic_load(&ctx->metrics->udp_bytes_sent),
             "udp_send_errors", (json_int_t)atomic_load(&ctx->metrics->udp_send_errors),
+            "udp_send_would_block", (json_int_t)atomic_load(&ctx->metrics->udp_send_would_block),
+            "udp_send_no_buffer", (json_int_t)atomic_load(&ctx->metrics->udp_send_no_buffer),
+            "udp_send_other_errors", (json_int_t)atomic_load(&ctx->metrics->udp_send_other_errors),
             "active_streams", (json_int_t)atomic_load(&ctx->metrics->active_streams),
             "ringbuffer_overruns", (json_int_t)atomic_load(&ctx->metrics->ringbuffer_overruns),
             "ringbuffer_underruns", (json_int_t)atomic_load(&ctx->metrics->ringbuffer_underruns),
             "samples_dropped", (json_int_t)atomic_load(&ctx->metrics->samples_dropped)
         );
-        json_object_set_new(response, "streams", stream_metrics_json(ctx->receiver, ctx->metrics, server->started_at));
+        json_object_set_new(response, "streams", stream_metrics_json(ctx->receiver, ctx->metrics, server->started_at_ns));
         SEND_JSON_AND_FREE(MHD_HTTP_OK, response);
     }
     if (strcmp(method, "GET") == 0 && strcmp(url, "/api/v1/streams") == 0) {
@@ -467,6 +500,7 @@ bool rest_server_start(rest_server_t **server, const rest_context_t *context)
     }
     s->context = *context;
     s->started_at = time(NULL);
+    s->started_at_ns = monotonic_now_ns();
     memset(&s->bind_addr, 0, sizeof(s->bind_addr));
     s->bind_addr.sin_family = AF_INET;
     s->bind_addr.sin_port = htons(context->receiver->rest_port);

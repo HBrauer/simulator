@@ -71,6 +71,8 @@ static void apply_scalar(simulator_config_t *config, parse_state_t *state, const
             r->rest_port = (uint16_t)parse_u64(value);
         } else if (strcmp(key, "udp_output_host") == 0) {
             sim_strlcpy(r->udp_output_host, value, sizeof(r->udp_output_host));
+        } else if (strcmp(key, "udp_multicast_interface") == 0) {
+            sim_strlcpy(r->udp_multicast_interface, value, sizeof(r->udp_multicast_interface));
         } else if (strcmp(key, "frequency_start_hz") == 0) {
             r->frequency_start_hz = parse_u64(value);
         } else if (strcmp(key, "frequency_stop_hz") == 0) {

@@ -12,7 +12,7 @@ Top-level fields:
 | `instance_id` | string | yes | Instance identifier for operators/logs. |
 | `scenario_file` | string | yes | Default scenario path used when `--scenario` is omitted. |
 | `log_path` | string | no | Reserved for runtime logging. |
-| `stream_block_samples` | integer | no | CI16 IQ samples per VITA 49.2 IF-data packet. Defaults to `1024`; valid range is `1..4096`. |
+| `stream_block_samples` | integer | no | CI16 IQ samples per VITA 49.2 IF-data packet. Defaults to `1024`; valid range is `1..4096`. Use `1536` for the MTU 9000 high-rate profile. |
 | `stream_cpu` | integer | no | Linux CPU index used for stream render/UDP threads. `-1` disables pinning. Defaults to `-1`. |
 | `asset_cache_max_bytes` | integer | no | Maximum total in-memory IQ asset bytes. `0` means unlimited. Defaults to `0`. |
 | `receivers` | array | yes | At least one receiver, up to `SIM_MAX_RECEIVERS` (`12`). |
@@ -25,6 +25,7 @@ Receiver fields:
 | `rest_bind_host` | string | yes | REST bind address, for example `127.0.0.1`. |
 | `rest_port` | integer | yes | Unique per instance. |
 | `udp_output_host` | string | yes | UDP destination host. May be unicast, for example `127.0.0.1`, or IPv4 multicast, for example `239.10.10.10`. |
+| `udp_multicast_interface` | string | no | Local IPv4 interface used for multicast sends, for example `127.0.0.1` for loopback-only testing. Empty/default lets the kernel choose. |
 | `frequency_start_hz` | integer | yes | Inclusive RF range start, `0..40000000000`. |
 | `frequency_stop_hz` | integer | yes | RF range stop, greater than start and `<= 40000000000`. |
 | `bandwidth_hz` | integer | no | Receiver RF window bandwidth. Defaults to `80000000`; must be non-zero. |

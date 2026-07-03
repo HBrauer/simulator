@@ -1,3 +1,7 @@
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
 #include "history.h"
 #include "vita49_rx.h"
 #include "waterfall.h"
@@ -12,11 +16,15 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/uio.h>
 #include <time.h>
 #include <unistd.h>
 #include <SDL2/SDL.h>
 
 #define MAX_PACKET_BYTES 65536U
+#define RX_BATCH_SIZE 64U
+#define REQUESTED_RCVBUF_BYTES (128 * 1024 * 1024)
+#define MIN_RECOMMENDED_RCVBUF_BYTES (16 * 1024 * 1024)
 #define DEFAULT_SAMPLE_RATE_HZ 98304000U
 #define UI_TOOLBAR_HEIGHT 44
 #define UI_BUTTON_SIZE 32
@@ -26,6 +34,7 @@ static volatile sig_atomic_t keep_running = 1;
 
 typedef struct {
     const char *host;
+    const char *interface_host;
     uint16_t port;
     size_t fft_size;
     size_t rows;
@@ -56,6 +65,12 @@ typedef struct {
     uint32_t last_stream_id;
     uint64_t last_timestamp_ns;
 } rx_stats_t;
+
+typedef struct {
+    int16_t *iq;
+    size_t collected_samples;
+    size_t samples_until_frame;
+} frame_sampler_t;
 
 static void on_signal(int signum)
 {
@@ -111,6 +126,7 @@ static void usage(const char *argv0)
             "\n"
             "Options:\n"
             "  --host HOST                 UDP bind host, default 0.0.0.0\n"
+            "  --interface HOST            Multicast receive interface, default 0.0.0.0\n"
             "  --fft-size N                Power-of-two FFT size, default 1024\n"
             "  --rows N                    Override automatic one-row-per-screen-pixel layout\n"
             "  --sample-rate-hz N          Stream sample rate, default 98304000\n"
@@ -130,6 +146,7 @@ static bool parse_args(int argc, char **argv, app_config_t *config)
 {
     *config = (app_config_t){
         .host = "0.0.0.0",
+        .interface_host = "0.0.0.0",
         .port = 0,
         .fft_size = 1024,
         .rows = 0,
@@ -150,6 +167,10 @@ static bool parse_args(int argc, char **argv, app_config_t *config)
     const char *host = arg_value(argc, argv, "--host");
     if (host != 0) {
         config->host = host;
+    }
+    const char *interface_host = arg_value(argc, argv, "--interface");
+    if (interface_host != 0) {
+        config->interface_host = interface_host;
     }
     config->port = (uint16_t)parse_u64_default(arg_value(argc, argv, "--port"), 0);
     config->fft_size = (size_t)parse_u64_default(arg_value(argc, argv, "--fft-size"), config->fft_size);
@@ -196,11 +217,20 @@ static int open_udp_socket(const app_config_t *config)
 #ifdef SO_REUSEPORT
     (void)setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &reuse, sizeof(reuse));
 #endif
-    int rcvbuf = 64 * 1024 * 1024;
+    int rcvbuf = REQUESTED_RCVBUF_BYTES;
     (void)setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
+#ifdef SO_RCVBUFFORCE
+    rcvbuf = REQUESTED_RCVBUF_BYTES;
+    (void)setsockopt(fd, SOL_SOCKET, SO_RCVBUFFORCE, &rcvbuf, sizeof(rcvbuf));
+#endif
 
     struct in_addr requested_addr;
     if (inet_pton(AF_INET, config->host, &requested_addr) != 1) {
+        close(fd);
+        return -1;
+    }
+    struct in_addr interface_addr;
+    if (inet_pton(AF_INET, config->interface_host, &interface_addr) != 1) {
         close(fd);
         return -1;
     }
@@ -219,7 +249,7 @@ static int open_udp_socket(const app_config_t *config)
         struct ip_mreq mreq;
         memset(&mreq, 0, sizeof(mreq));
         mreq.imr_multiaddr = requested_addr;
-        mreq.imr_interface.s_addr = htonl(INADDR_ANY);
+        mreq.imr_interface = interface_addr;
         if (setsockopt(fd, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) != 0) {
             close(fd);
             return -1;
@@ -230,6 +260,27 @@ static int open_udp_socket(const app_config_t *config)
         (void)fcntl(fd, F_SETFL, flags | O_NONBLOCK);
     }
     return fd;
+}
+
+static int socket_receive_buffer_bytes(int fd)
+{
+    int value = 0;
+    socklen_t value_size = sizeof(value);
+    if (getsockopt(fd, SOL_SOCKET, SO_RCVBUF, &value, &value_size) != 0) {
+        return 0;
+    }
+    return value;
+}
+
+static void print_receive_buffer_warning(int rcvbuf_bytes)
+{
+    if (rcvbuf_bytes >= MIN_RECOMMENDED_RCVBUF_BYTES) {
+        return;
+    }
+    fprintf(stderr,
+            "warning: kernel receive buffer is only %d bytes; for 98 MS/s UDP use e.g. "
+            "`sudo sysctl -w net.core.rmem_max=134217728 net.core.rmem_default=134217728`\n",
+            rcvbuf_bytes);
 }
 
 static double elapsed_seconds(struct timespec start, struct timespec stop)
@@ -251,25 +302,52 @@ static void update_sequence_stats(rx_stats_t *stats, const vita49_rx_packet_t *p
     stats->last_timestamp_ns = packet->timestamp_ns;
 }
 
-static bool maybe_push_frame(
+static void frame_sampler_reset(frame_sampler_t *sampler)
+{
+    sampler->collected_samples = 0U;
+    sampler->samples_until_frame = 0U;
+}
+
+static size_t maybe_push_frames(
     waterfall_t *wf,
     const vita49_rx_packet_t *packet,
-    size_t *samples_until_frame,
+    frame_sampler_t *sampler,
     size_t frame_stride_samples)
 {
     const size_t payload_samples = packet->payload_bytes / 4U;
-    if (*samples_until_frame >= payload_samples) {
-        *samples_until_frame -= payload_samples;
-        return false;
-    }
-    const size_t offset = *samples_until_frame;
-    if (payload_samples - offset < wf->fft_size) {
-        *samples_until_frame = frame_stride_samples;
-        return false;
-    }
     const int16_t *iq = (const int16_t *)(const void *)packet->payload;
-    const bool pushed = waterfall_push_ci16(wf, iq + 2U * offset, wf->fft_size);
-    *samples_until_frame = frame_stride_samples;
+    size_t pushed = 0U;
+    size_t pos = 0U;
+
+    while (pos < payload_samples) {
+        if (sampler->collected_samples > 0U || sampler->samples_until_frame == 0U) {
+            const size_t need = wf->fft_size - sampler->collected_samples;
+            const size_t available = payload_samples - pos;
+            const size_t take = need < available ? need : available;
+            memcpy(sampler->iq + 2U * sampler->collected_samples, iq + 2U * pos, take * 2U * sizeof(*sampler->iq));
+            sampler->collected_samples += take;
+            pos += take;
+
+            if (sampler->collected_samples < wf->fft_size) {
+                break;
+            }
+            if (waterfall_push_ci16(wf, sampler->iq, wf->fft_size)) {
+                pushed++;
+            }
+            sampler->collected_samples = 0U;
+            sampler->samples_until_frame = frame_stride_samples > wf->fft_size ? frame_stride_samples - wf->fft_size : 0U;
+            continue;
+        }
+
+        const size_t remaining = payload_samples - pos;
+        if (sampler->samples_until_frame >= remaining) {
+            sampler->samples_until_frame -= remaining;
+            break;
+        }
+        pos += sampler->samples_until_frame;
+        sampler->samples_until_frame = 0U;
+    }
+
     return pushed;
 }
 
@@ -290,7 +368,7 @@ static void print_status(const rx_stats_t *stats, const waterfall_t *wf, double 
             (double)wf->last_max_db);
 }
 
-static void set_history_seconds(app_config_t *config, double seconds, size_t *samples_until_frame)
+static void set_history_seconds(app_config_t *config, double seconds, frame_sampler_t *sampler)
 {
     const double clamped = waterfall_clamp_history_seconds(seconds);
     const size_t stride = waterfall_stride_for_history(config->rows, config->sample_rate_hz, clamped, config->fft_size);
@@ -299,7 +377,7 @@ static void set_history_seconds(app_config_t *config, double seconds, size_t *sa
     }
     config->frame_stride_samples = stride;
     config->history_seconds = waterfall_history_for_stride(config->rows, config->sample_rate_hz, stride);
-    *samples_until_frame = 0U;
+    frame_sampler_reset(sampler);
     fprintf(stderr, "waterfall history %.1fs stride=%zu samples\n", config->history_seconds, config->frame_stride_samples);
 }
 
@@ -339,6 +417,35 @@ static void maybe_log_iq_stats(const app_config_t *config, const rx_stats_t *sta
             component_count);
 }
 
+static bool handle_received_packet(
+    const app_config_t *config,
+    waterfall_t *waterfall,
+    rx_stats_t *stats,
+    frame_sampler_t *sampler,
+    const uint8_t *packet_data,
+    size_t packet_bytes,
+    bool *frame_ready)
+{
+    vita49_rx_packet_t packet;
+    if (!vita49_rx_parse_if_data(packet_data, packet_bytes, &packet)) {
+        stats->bad_packets++;
+        return false;
+    }
+    update_sequence_stats(stats, &packet);
+    stats->packets++;
+    stats->bytes += (uint64_t)packet_bytes;
+    stats->payload_samples += (uint64_t)(packet.payload_bytes / 4U);
+    maybe_log_iq_stats(config, stats, &packet);
+
+    const size_t frames = maybe_push_frames(waterfall, &packet, sampler, config->frame_stride_samples);
+    if (frames > 0U) {
+        stats->frames += (uint64_t)frames;
+        *frame_ready = true;
+    }
+    return (config->max_packets > 0 && stats->packets >= config->max_packets) ||
+           (config->max_frames > 0 && stats->frames >= config->max_frames);
+}
+
 typedef struct {
     SDL_Window *window;
     SDL_Renderer *renderer;
@@ -348,6 +455,14 @@ typedef struct {
     SDL_Rect history_minus_button;
     SDL_Rect history_plus_button;
 } ui_t;
+
+#ifdef __linux__
+typedef struct {
+    uint8_t *storage;
+    struct mmsghdr messages[RX_BATCH_SIZE];
+    struct iovec iovecs[RX_BATCH_SIZE];
+} rx_batch_t;
+#endif
 
 static uint32_t color_map(float db, float min_db, float max_db)
 {
@@ -394,6 +509,32 @@ static void compute_display_range(const waterfall_t *wf, const app_config_t *con
     *min_db = lo;
     *max_db = hi;
 }
+
+#ifdef __linux__
+static bool rx_batch_init(rx_batch_t *batch)
+{
+    memset(batch, 0, sizeof(*batch));
+    batch->storage = malloc(RX_BATCH_SIZE * MAX_PACKET_BYTES);
+    if (batch->storage == 0) {
+        return false;
+    }
+    for (size_t i = 0; i < RX_BATCH_SIZE; i++) {
+        batch->iovecs[i].iov_base = batch->storage + i * MAX_PACKET_BYTES;
+        batch->iovecs[i].iov_len = MAX_PACKET_BYTES;
+        batch->messages[i].msg_hdr.msg_iov = &batch->iovecs[i];
+        batch->messages[i].msg_hdr.msg_iovlen = 1;
+    }
+    return true;
+}
+
+static void rx_batch_free(rx_batch_t *batch)
+{
+    if (batch != 0) {
+        free(batch->storage);
+        memset(batch, 0, sizeof(*batch));
+    }
+}
+#endif
 
 static bool ui_recreate_texture(ui_t *ui, const app_config_t *config)
 {
@@ -473,7 +614,7 @@ static bool set_waterfall_rows(
     ui_t *ui,
     app_config_t *config,
     size_t rows,
-    size_t *samples_until_frame)
+    frame_sampler_t *sampler)
 {
     if (rows == 0U || rows == config->rows) {
         return true;
@@ -502,7 +643,7 @@ static bool set_waterfall_rows(
 
     waterfall_free(wf);
     *wf = next;
-    *samples_until_frame = 0U;
+    frame_sampler_reset(sampler);
     fprintf(stderr,
             "waterfall rows=%zu history=%.1fs stride=%zu samples\n",
             config->rows,
@@ -601,8 +742,13 @@ static void ui_update(ui_t *ui, const waterfall_t *wf, const app_config_t *confi
     float min_db = config->min_db;
     float max_db = config->max_db;
     compute_display_range(wf, config, &min_db, &max_db);
-    for (size_t i = 0; i < ui->pixel_count; i++) {
-        ui->pixels[i] = color_map(wf->history[i], min_db, max_db);
+    for (size_t row = 0; row < wf->rows; row++) {
+        const size_t source_row = (wf->next_row + row) % wf->rows;
+        const float *history_row = wf->history + source_row * wf->fft_size;
+        uint32_t *pixel_row = ui->pixels + row * wf->fft_size;
+        for (size_t bin = 0; bin < wf->fft_size; bin++) {
+            pixel_row[bin] = color_map(history_row[bin], min_db, max_db);
+        }
     }
     int window_width = 0;
     int window_height = 0;
@@ -673,8 +819,37 @@ int main(int argc, char **argv)
         return 4;
     }
 
+#ifdef __linux__
+    rx_batch_t rx_batch;
+    if (!rx_batch_init(&rx_batch)) {
+        if (use_ui) {
+            ui_free(&ui);
+        }
+        close(fd);
+        waterfall_free(&waterfall);
+        return 5;
+    }
+#else
     uint8_t *packet_buffer = malloc(MAX_PACKET_BYTES);
     if (packet_buffer == 0) {
+        if (use_ui) {
+            ui_free(&ui);
+        }
+        close(fd);
+        waterfall_free(&waterfall);
+        return 5;
+    }
+#endif
+
+    frame_sampler_t sampler;
+    memset(&sampler, 0, sizeof(sampler));
+    sampler.iq = calloc(2U * config.fft_size, sizeof(*sampler.iq));
+    if (sampler.iq == 0) {
+#ifdef __linux__
+        rx_batch_free(&rx_batch);
+#else
+        free(packet_buffer);
+#endif
         if (use_ui) {
             ui_free(&ui);
         }
@@ -685,17 +860,19 @@ int main(int argc, char **argv)
 
     rx_stats_t stats;
     memset(&stats, 0, sizeof(stats));
-    size_t samples_until_frame = 0;
     struct timespec start;
     clock_gettime(CLOCK_MONOTONIC, &start);
+    const int receive_buffer_bytes = socket_receive_buffer_bytes(fd);
     fprintf(stderr,
-            "listening on %s:%u fft=%zu rows=%zu history=%.1fs stride=%zu samples\n",
+            "listening on %s:%u fft=%zu rows=%zu history=%.1fs stride=%zu samples rcvbuf=%d bytes\n",
             config.host,
             config.port,
             config.fft_size,
             config.rows,
             config.history_seconds,
-            config.frame_stride_samples);
+            config.frame_stride_samples,
+            receive_buffer_bytes);
+    print_receive_buffer_warning(receive_buffer_bytes);
 
     while (keep_running) {
         bool frame_ready = false;
@@ -709,18 +886,18 @@ int main(int argc, char **argv)
                            event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED &&
                            config.auto_rows) {
                     const size_t rows = rows_for_window_height(event.window.data2);
-                    if (!set_waterfall_rows(&waterfall, &ui, &config, rows, &samples_until_frame)) {
+                    if (!set_waterfall_rows(&waterfall, &ui, &config, rows, &sampler)) {
                         keep_running = 0;
                     }
                     ui_needs_redraw = true;
                 } else if (event.type == SDL_KEYDOWN) {
                     if (event.key.keysym.sym == SDLK_LEFTBRACKET || event.key.keysym.sym == SDLK_MINUS) {
-                        set_history_seconds(&config, config.history_seconds - 1.0, &samples_until_frame);
+                        set_history_seconds(&config, config.history_seconds - 1.0, &sampler);
                         ui_needs_redraw = true;
                     } else if (event.key.keysym.sym == SDLK_RIGHTBRACKET ||
                                event.key.keysym.sym == SDLK_EQUALS ||
                                event.key.keysym.sym == SDLK_PLUS) {
-                        set_history_seconds(&config, config.history_seconds + 1.0, &samples_until_frame);
+                        set_history_seconds(&config, config.history_seconds + 1.0, &sampler);
                         ui_needs_redraw = true;
                     }
                 } else if (event.type == SDL_MOUSEBUTTONDOWN && event.button.button == SDL_BUTTON_LEFT) {
@@ -730,17 +907,53 @@ int main(int argc, char **argv)
                     (void)window_height;
                     ui_layout(&ui, window_width);
                     if (ui_point_in_rect(event.button.x, event.button.y, &ui.history_minus_button)) {
-                        set_history_seconds(&config, config.history_seconds - 1.0, &samples_until_frame);
+                        set_history_seconds(&config, config.history_seconds - 1.0, &sampler);
                         ui_needs_redraw = true;
                     } else if (ui_point_in_rect(event.button.x, event.button.y, &ui.history_plus_button)) {
-                        set_history_seconds(&config, config.history_seconds + 1.0, &samples_until_frame);
+                        set_history_seconds(&config, config.history_seconds + 1.0, &sampler);
                         ui_needs_redraw = true;
                     }
                 }
             }
         }
 
-        for (size_t drained = 0; drained < 4096U; drained++) {
+        for (size_t drained = 0; drained < 4096U;) {
+#ifdef __linux__
+            const unsigned int batch_limit = (4096U - drained) < RX_BATCH_SIZE ? (unsigned int)(4096U - drained) : RX_BATCH_SIZE;
+            const int received = recvmmsg(fd, rx_batch.messages, batch_limit, MSG_DONTWAIT, 0);
+            if (received < 0) {
+                if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                    break;
+                }
+                if (errno == EINTR) {
+                    continue;
+                }
+                fprintf(stderr, "recvmmsg failed: %s\n", strerror(errno));
+                keep_running = 0;
+                break;
+            }
+            if (received == 0) {
+                break;
+            }
+            drained += (size_t)received;
+            for (int i = 0; i < received; i++) {
+                const uint8_t *data = rx_batch.storage + (size_t)i * MAX_PACKET_BYTES;
+                if (handle_received_packet(&config,
+                                           &waterfall,
+                                           &stats,
+                                           &sampler,
+                                           data,
+                                           rx_batch.messages[i].msg_len,
+                                           &frame_ready)) {
+                    keep_running = 0;
+                    break;
+                }
+                rx_batch.messages[i].msg_len = 0;
+            }
+            if (!keep_running || received < (int)batch_limit) {
+                break;
+            }
+#else
             const ssize_t n = recv(fd, packet_buffer, MAX_PACKET_BYTES, 0);
             if (n < 0) {
                 if (errno == EAGAIN || errno == EWOULDBLOCK) {
@@ -753,26 +966,18 @@ int main(int argc, char **argv)
                 keep_running = 0;
                 break;
             }
-            vita49_rx_packet_t packet;
-            if (!vita49_rx_parse_if_data(packet_buffer, (size_t)n, &packet)) {
-                stats.bad_packets++;
-                continue;
-            }
-            update_sequence_stats(&stats, &packet);
-            stats.packets++;
-            stats.bytes += (uint64_t)n;
-            stats.payload_samples += (uint64_t)(packet.payload_bytes / 4U);
-            maybe_log_iq_stats(&config, &stats, &packet);
-
-            if (maybe_push_frame(&waterfall, &packet, &samples_until_frame, config.frame_stride_samples)) {
-                stats.frames++;
-                frame_ready = true;
-            }
-            if ((config.max_packets > 0 && stats.packets >= config.max_packets) ||
-                (config.max_frames > 0 && stats.frames >= config.max_frames)) {
+            drained++;
+            if (handle_received_packet(&config,
+                                       &waterfall,
+                                       &stats,
+                                       &sampler,
+                                       packet_buffer,
+                                       (size_t)n,
+                                       &frame_ready)) {
                 keep_running = 0;
                 break;
             }
+#endif
         }
 
         if (use_ui && (frame_ready || ui_needs_redraw)) {
@@ -797,7 +1002,12 @@ int main(int argc, char **argv)
     struct timespec stop;
     clock_gettime(CLOCK_MONOTONIC, &stop);
     print_status(&stats, &waterfall, elapsed_seconds(start, stop));
+    free(sampler.iq);
+#ifdef __linux__
+    rx_batch_free(&rx_batch);
+#else
     free(packet_buffer);
+#endif
     if (use_ui) {
         ui_free(&ui);
     }
