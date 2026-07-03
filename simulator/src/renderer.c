@@ -241,6 +241,91 @@ static double signal_passband_gain(uint64_t signal_center, uint32_t signal_bw, u
     return sqrt(power_fraction);
 }
 
+static uint64_t sample_index_from_time_ns(uint64_t scenario_time_ns, uint32_t sample_rate_hz)
+{
+    return (uint64_t)(((__uint128_t)scenario_time_ns * (uint64_t)sample_rate_hz) / 1000000000ULL);
+}
+
+static uint64_t splitmix64(uint64_t x)
+{
+    x += 0x9e3779b97f4a7c15ULL;
+    x = (x ^ (x >> 30U)) * 0xbf58476d1ce4e5b9ULL;
+    x = (x ^ (x >> 27U)) * 0x94d049bb133111ebULL;
+    return x ^ (x >> 31U);
+}
+
+static uint32_t xorshift32_next(uint32_t *state)
+{
+    uint32_t x = *state;
+    x ^= x << 13U;
+    x ^= x >> 17U;
+    x ^= x << 5U;
+    *state = x;
+    return x;
+}
+
+static int16_t clip_i32_to_i16(int32_t value)
+{
+    if (value > 32767) {
+        return 32767;
+    }
+    if (value < -32768) {
+        return -32768;
+    }
+    return (int16_t)value;
+}
+
+static int16_t scale_noise_i16(int32_t raw, int32_t amplitude)
+{
+    int64_t scaled = (int64_t)raw * (int64_t)amplitude;
+    scaled += scaled >= 0 ? 16384 : -16384;
+    return clip_i32_to_i16((int32_t)(scaled / 32768));
+}
+
+static void render_noise_floor(
+    const scenario_t *scenario,
+    uint64_t window_center_hz,
+    uint64_t window_bandwidth_hz,
+    uint32_t output_sample_rate_hz,
+    double output_scale,
+    double rf_reference_power_dbm,
+    uint64_t scenario_time_ns,
+    iq_ci16_t *out,
+    size_t count)
+{
+    if (!scenario->noise_floor.enabled) {
+        return;
+    }
+
+    const double amplitude_dbfs =
+        32767.0 * output_scale * pow(10.0, (scenario->noise_floor.power_dbm - rf_reference_power_dbm) / 20.0);
+    if (amplitude_dbfs <= 0.0) {
+        return;
+    }
+    int32_t amplitude = (int32_t)lrint(amplitude_dbfs);
+    if (amplitude <= 0) {
+        return;
+    }
+    if (amplitude > 32767) {
+        amplitude = 32767;
+    }
+
+    const uint64_t sample_index = sample_index_from_time_ns(scenario_time_ns, output_sample_rate_hz);
+    const uint64_t seed = splitmix64(scenario->noise_floor.seed) ^ splitmix64(sample_index) ^
+                          splitmix64(window_center_hz) ^ splitmix64(window_bandwidth_hz);
+    uint32_t state = (uint32_t)(seed ^ (seed >> 32U));
+    if (state == 0U) {
+        state = 0x6d2b79f5U;
+    }
+
+    for (size_t i = 0; i < count; i++) {
+        const int32_t raw_i = (int32_t)(xorshift32_next(&state) & 0xffffU) - 32768;
+        const int32_t raw_q = (int32_t)(xorshift32_next(&state) & 0xffffU) - 32768;
+        out[i].i = scale_noise_i16(raw_i, amplitude);
+        out[i].q = scale_noise_i16(raw_q, amplitude);
+    }
+}
+
 static void mix_accumulate_sample(iq_ci16_t *out, size_t index, double sample_i, double sample_q, double gain, double osc_c, double osc_s)
 {
     const double ii = gain * sample_i;
@@ -457,6 +542,15 @@ static bool renderer_render_window_block(
     if (stats != NULL) {
         memset(stats, 0, sizeof(*stats));
     }
+    render_noise_floor(scenario,
+                       window_center_hz,
+                       window_bandwidth_hz,
+                       output_sample_rate_hz,
+                       output_scale,
+                       rf_reference_power_dbm,
+                       scenario_time_ns,
+                       out,
+                       count);
     const double day_s = timebase_day_seconds_from_ns(scenario_time_ns);
 
     for (size_t s = 0; s < scenario->signal_count; s++) {

@@ -18,6 +18,18 @@ START_TEST(loads_and_validates_scenario)
 }
 END_TEST
 
+START_TEST(loads_optional_noise_floor)
+{
+    scenario_t scenario;
+    char error[128];
+    ck_assert_msg(scenario_load_json("simulator/scenarios/burst_1s_every_5s.json", &scenario, error, sizeof(error)), "%s", error);
+    ck_assert_msg(scenario_validate(&scenario, ".", error, sizeof(error)), "%s", error);
+    ck_assert(scenario.noise_floor.enabled);
+    ck_assert_double_eq_tol(scenario.noise_floor.power_dbm, -125.0, 0.001);
+    ck_assert_uint_eq(scenario.noise_floor.seed, 49152);
+}
+END_TEST
+
 START_TEST(derives_source_sample_count_from_file_size)
 {
     char path[] = "/tmp/sdr_scenario_without_sample_count_XXXXXX";
@@ -103,6 +115,7 @@ Suite *scenario_suite(void)
     Suite *suite = suite_create("scenario");
     TCase *tc = tcase_create("core");
     tcase_add_test(tc, loads_and_validates_scenario);
+    tcase_add_test(tc, loads_optional_noise_floor);
     tcase_add_test(tc, derives_source_sample_count_from_file_size);
     tcase_add_test(tc, rejects_duplicate_source_ids);
     tcase_add_test(tc, rejects_duplicate_signal_ids);

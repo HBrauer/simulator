@@ -94,9 +94,16 @@ typedef struct {
 } scenario_signal_t;
 
 typedef struct {
+    bool enabled;
+    double power_dbm;
+    uint64_t seed;
+} scenario_noise_floor_t;
+
+typedef struct {
     int schema_version;
     char scenario_id[SIM_MAX_ID];
     char description[256];
+    scenario_noise_floor_t noise_floor;
     size_t source_count;
     scenario_source_t sources[SIM_MAX_SOURCES];
     size_t signal_count;

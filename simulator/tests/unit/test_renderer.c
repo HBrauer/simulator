@@ -56,6 +56,16 @@ static int16_t sinc_scaled_i16(const iq_ci16_t *samples, size_t sample_count, do
     return interpolate_scaled_i16((int16_t)lrint(acc / weight_sum), (int16_t)lrint(acc / weight_sum), 0.0, gain);
 }
 
+static bool samples_have_energy(const iq_ci16_t *samples, size_t count)
+{
+    for (size_t i = 0; i < count; i++) {
+        if (samples[i].i != 0 || samples[i].q != 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static void setup_two_signal_mix(scenario_t *scenario, asset_cache_t *cache, iq_ci16_t *asset_a, iq_ci16_t *asset_b, int16_t a_i, int16_t a_q, int16_t b_i, int16_t b_q)
 {
     memset(scenario, 0, sizeof(*scenario));
@@ -462,6 +472,39 @@ START_TEST(renders_ddc_4096_sample_block_for_waterfall)
 }
 END_TEST
 
+START_TEST(renderer_adds_deterministic_noise_floor_without_active_signals)
+{
+    scenario_t scenario;
+    memset(&scenario, 0, sizeof(scenario));
+    scenario.schema_version = 1;
+    snprintf(scenario.scenario_id, sizeof(scenario.scenario_id), "%s", "unit_noise_floor");
+    scenario.noise_floor.enabled = true;
+    scenario.noise_floor.power_dbm = -85.0;
+    scenario.noise_floor.seed = 1234;
+
+    asset_cache_t cache;
+    memset(&cache, 0, sizeof(cache));
+    receiver_config_t receiver = fixed_center_receiver();
+    receiver.rf_reference_power_dbm = -85.0;
+
+    iq_ci16_t out_a[32];
+    iq_ci16_t out_b[32];
+    iq_ci16_t out_c[32];
+    render_stats_t stats;
+
+    ck_assert(renderer_render_80mhz_block(&scenario, &cache, &receiver, 1000000ULL, out_a, 32, &stats));
+    ck_assert_uint_eq(stats.active_signals, 0);
+    ck_assert_uint_eq(stats.samples_rendered, 32);
+    ck_assert(samples_have_energy(out_a, 32));
+
+    ck_assert(renderer_render_80mhz_block(&scenario, &cache, &receiver, 1000000ULL, out_b, 32, &stats));
+    ck_assert_mem_eq(out_a, out_b, sizeof(out_a));
+
+    ck_assert(renderer_render_80mhz_block(&scenario, &cache, &receiver, 2000000ULL, out_c, 32, &stats));
+    ck_assert(memcmp(out_a, out_c, sizeof(out_a)) != 0);
+}
+END_TEST
+
 START_TEST(renders_burst_scenario_only_during_active_second)
 {
     scenario_t scenario;
@@ -491,17 +534,9 @@ START_TEST(renders_burst_scenario_only_during_active_second)
     ck_assert(renderer_render_ddc_block(&scenario, &cache, &ddc, 5500000000ULL, active_b, 1024, &stats));
     ck_assert_uint_eq(stats.active_signals, 1);
 
-    bool active_a_nonzero = false;
-    bool inactive_nonzero = false;
-    bool active_b_nonzero = false;
-    for (size_t i = 0; i < 1024; i++) {
-        active_a_nonzero = active_a_nonzero || active_a[i].i != 0 || active_a[i].q != 0;
-        inactive_nonzero = inactive_nonzero || inactive[i].i != 0 || inactive[i].q != 0;
-        active_b_nonzero = active_b_nonzero || active_b[i].i != 0 || active_b[i].q != 0;
-    }
-    ck_assert(active_a_nonzero);
-    ck_assert(!inactive_nonzero);
-    ck_assert(active_b_nonzero);
+    ck_assert(samples_have_energy(active_a, 1024));
+    ck_assert(samples_have_energy(inactive, 1024));
+    ck_assert(samples_have_energy(active_b, 1024));
     asset_cache_free(&cache);
 }
 END_TEST
@@ -551,6 +586,7 @@ Suite *renderer_suite(void)
     tcase_add_test(tc, scanner_same_time_is_deterministic_across_instances);
     tcase_add_test(tc, renders_ddc_nonzero_visible_signal);
     tcase_add_test(tc, renders_ddc_4096_sample_block_for_waterfall);
+    tcase_add_test(tc, renderer_adds_deterministic_noise_floor_without_active_signals);
     tcase_add_test(tc, renders_burst_scenario_only_during_active_second);
     tcase_add_test(tc, renderer_applies_window_passband_gain);
     suite_add_tcase(suite, tc);
