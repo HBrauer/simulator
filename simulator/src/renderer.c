@@ -447,28 +447,23 @@ static void render_direct_nco(const iq_ci16_t *source_samples, size_t read_count
 {
     const size_t limit = read_count < count ? read_count : count;
 #if SIM_HAVE_VOLK
-    if (limit >= 16) {
-        const size_t alignment = volk_get_alignment();
-        lv_32fc_t *input = volk_malloc(limit * sizeof(*input), alignment);
-        lv_32fc_t *rotated = volk_malloc(limit * sizeof(*rotated), alignment);
-        if (input != NULL && rotated != NULL) {
-            for (size_t i = 0; i < limit; i++) {
-                input[i] = (float)source_samples[i].i + (float)source_samples[i].q * I;
-            }
-            lv_32fc_t phase = (float)init_c + (float)init_s * I;
-            const lv_32fc_t phase_inc = (float)step_c + (float)step_s * I;
-            volk_32fc_s32fc_x2_rotator2_32fc(rotated, input, &phase_inc, &phase, (unsigned int)limit);
-            const float gain_f = (float)source_gain;
-            for (size_t i = 0; i < limit; i++) {
-                bus[2U * i] += gain_f * crealf(rotated[i]);
-                bus[2U * i + 1U] += gain_f * cimagf(rotated[i]);
-            }
-            volk_free(rotated);
-            volk_free(input);
-            return;
+    /* Aligned stack scratch instead of a per-block volk_malloc/volk_free. Capped at the maximum
+     * streaming block size; an oversized one-shot render falls through to the scalar path. */
+    if (limit >= 16 && limit <= SIM_MAX_STREAM_BLOCK_SAMPLES) {
+        _Alignas(64) lv_32fc_t input[SIM_MAX_STREAM_BLOCK_SAMPLES];
+        _Alignas(64) lv_32fc_t rotated[SIM_MAX_STREAM_BLOCK_SAMPLES];
+        for (size_t i = 0; i < limit; i++) {
+            input[i] = (float)source_samples[i].i + (float)source_samples[i].q * I;
         }
-        volk_free(rotated);
-        volk_free(input);
+        lv_32fc_t phase = (float)init_c + (float)init_s * I;
+        const lv_32fc_t phase_inc = (float)step_c + (float)step_s * I;
+        volk_32fc_s32fc_x2_rotator2_32fc(rotated, input, &phase_inc, &phase, (unsigned int)limit);
+        const float gain_f = (float)source_gain;
+        for (size_t i = 0; i < limit; i++) {
+            bus[2U * i] += gain_f * crealf(rotated[i]);
+            bus[2U * i + 1U] += gain_f * cimagf(rotated[i]);
+        }
+        return;
     }
 #endif
     double osc_c = init_c;
