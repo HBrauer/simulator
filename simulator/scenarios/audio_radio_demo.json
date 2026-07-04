@@ -1,0 +1,71 @@
+{
+  "schema_version": 1,
+  "scenario_id": "audio_radio_demo",
+  "description": "Audio-file modulation demo with WBFM, AM, USB, and LSB signals generated from one mono WAV asset.",
+  "units": {
+    "frequency_unit": "Hz",
+    "time_unit": "s",
+    "level_unit": "dBm"
+  },
+  "noise_floor": {
+    "enabled": true,
+    "power_dbm": -125.0,
+    "seed": 57344
+  },
+  "sources": [
+    {
+      "id": "radio_clip_wav",
+      "source_type": "audio_file",
+      "file": "simulator/assets/radio_clip.wav",
+      "format": "wav",
+      "sample_rate_hz": 48000,
+      "bandwidth_hz": 200000,
+      "center_frequency_hz": 0,
+      "nominal_level_dbfs": -6.0
+    }
+  ],
+  "signals": [
+    {
+      "signal_id": "audio_wbfm_station",
+      "source_reference": "radio_clip_wav",
+      "modulation": "wbfm",
+      "center_frequency_hz": 10005000000,
+      "bandwidth_hz": 200000,
+      "power_dbm": -65.0,
+      "fm_deviation_hz": 75000,
+      "start_time_s": 0.0,
+      "repeat_interval_s": 30.0
+    },
+    {
+      "signal_id": "audio_am_station",
+      "source_reference": "radio_clip_wav",
+      "modulation": "am",
+      "center_frequency_hz": 10008000000,
+      "bandwidth_hz": 10000,
+      "power_dbm": -72.0,
+      "am_depth": 0.8,
+      "start_time_s": 0.0,
+      "repeat_interval_s": 86400.0
+    },
+    {
+      "signal_id": "audio_usb_station",
+      "source_reference": "radio_clip_wav",
+      "modulation": "usb",
+      "center_frequency_hz": 10011000000,
+      "bandwidth_hz": 3000,
+      "power_dbm": -74.0,
+      "start_time_s": 0.0,
+      "repeat_interval_s": 86400.0
+    },
+    {
+      "signal_id": "audio_lsb_station",
+      "source_reference": "radio_clip_wav",
+      "modulation": "lsb",
+      "center_frequency_hz": 10014000000,
+      "bandwidth_hz": 3000,
+      "power_dbm": -74.0,
+      "start_time_s": 0.0,
+      "repeat_interval_s": 86400.0
+    }
+  ]
+}

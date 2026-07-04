@@ -23,6 +23,7 @@
 #define LOW_RATE_LINEAR_MAX_SOURCE_PER_OUTPUT 0.125
 
 static void resample_ci16(const iq_ci16_t *samples, size_t sample_count, double source_position, double *out_i, double *out_q);
+static void mix_accumulate_sample(iq_ci16_t *out, size_t index, double sample_i, double sample_q, double gain, double osc_c, double osc_s);
 
 static double sinc_value(double x)
 {
@@ -239,6 +240,82 @@ static double signal_passband_gain(uint64_t signal_center, uint32_t signal_bw, u
     }
     const double power_fraction = (double)(overlap_hi - overlap_lo) / (double)signal_bw;
     return sqrt(power_fraction);
+}
+
+static double audio_linear_at(const float *samples, uint64_t sample_count, double position)
+{
+    if (samples == NULL || sample_count == 0 || position < 0.0) {
+        return 0.0;
+    }
+    uint64_t index = (uint64_t)position;
+    if (index + 1ULL >= sample_count) {
+        return index < sample_count ? (double)samples[index] : 0.0;
+    }
+    const double fraction = position - (double)index;
+    const double a = (double)samples[index];
+    const double b = (double)samples[index + 1ULL];
+    return a + (b - a) * fraction;
+}
+
+static double audio_integral_at(const cached_asset_t *asset, double position)
+{
+    if (asset == NULL || asset->audio_integral == NULL || asset->sample_count == 0 || position <= 0.0) {
+        return 0.0;
+    }
+    uint64_t index = (uint64_t)position;
+    if (index >= asset->sample_count) {
+        return asset->audio_integral[asset->sample_count];
+    }
+    const double fraction = position - (double)index;
+    return asset->audio_integral[index] + fraction * (double)asset->audio_samples[index];
+}
+
+static void render_audio_modulated(
+    const scenario_signal_t *signal,
+    const scenario_source_t *source,
+    const cached_asset_t *asset,
+    uint64_t sample_offset,
+    double offset_hz,
+    uint32_t output_sample_rate_hz,
+    double source_gain,
+    iq_ci16_t *out,
+    size_t count)
+{
+    const double source_per_output = (double)source->sample_rate_hz / (double)output_sample_rate_hz;
+    const double shift_phase_step = 2.0 * M_PI * offset_hz / (double)output_sample_rate_hz;
+    const double shift_step_c = cos(shift_phase_step);
+    const double shift_step_s = sin(shift_phase_step);
+    double shift_c = 1.0;
+    double shift_s = 0.0;
+    const double amplitude = 32767.0 * source_gain;
+
+    for (size_t i = 0; i < count; i++) {
+        const double audio_position = (double)sample_offset + (double)i * source_per_output;
+        double base_i = 0.0;
+        double base_q = 0.0;
+
+        if (signal->modulation == SCENARIO_MODULATION_WBFM) {
+            const double integral = audio_integral_at(asset, audio_position);
+            const double fm_phase = 2.0 * M_PI * signal->fm_deviation_hz * integral / (double)source->sample_rate_hz;
+            base_i = cos(fm_phase);
+            base_q = sin(fm_phase);
+        } else if (signal->modulation == SCENARIO_MODULATION_AM) {
+            const double audio = audio_linear_at(asset->audio_samples, asset->sample_count, audio_position);
+            const double envelope = 1.0 + signal->am_depth * audio;
+            base_i = envelope < 0.0 ? 0.0 : envelope;
+        } else {
+            const double audio = audio_linear_at(asset->audio_samples, asset->sample_count, audio_position);
+            const double hilbert = audio_linear_at(asset->audio_hilbert, asset->sample_count, audio_position);
+            base_i = audio;
+            base_q = signal->modulation == SCENARIO_MODULATION_USB ? hilbert : -hilbert;
+        }
+
+        mix_accumulate_sample(out, i, amplitude * base_i, amplitude * base_q, 1.0, shift_c, shift_s);
+        const double next_c = shift_c * shift_step_c - shift_s * shift_step_s;
+        const double next_s = shift_s * shift_step_c + shift_c * shift_step_s;
+        shift_c = next_c;
+        shift_s = next_s;
+    }
 }
 
 static uint64_t sample_index_from_time_ns(uint64_t scenario_time_ns, uint32_t sample_rate_hz)
@@ -563,14 +640,30 @@ static bool renderer_render_window_block(
             continue;
         }
 
+        const double offset_hz = (double)((int64_t)signal->center_frequency_hz - (int64_t)window_center_hz);
+        const double source_gain = passband_gain * output_scale * pow(10.0, (signal->power_dbm - rf_reference_power_dbm) / 20.0);
+        if (source->source_kind == SCENARIO_SOURCE_AUDIO_FILE) {
+            render_audio_modulated(signal,
+                                   source,
+                                   asset,
+                                   sample_offset,
+                                   offset_hz,
+                                   output_sample_rate_hz,
+                                   source_gain,
+                                   out,
+                                   count);
+            if (stats != NULL) {
+                stats->active_signals++;
+            }
+            continue;
+        }
+
         const double source_per_output = (double)source->sample_rate_hz / (double)output_sample_rate_hz;
         const uint64_t needed_source_samples = (uint64_t)ceil((double)(count > 0 ? count - 1 : 0) * source_per_output) + (uint64_t)RESAMPLER_RADIUS + 2ULL;
         const uint64_t available = sample_offset < asset->sample_count ? asset->sample_count - sample_offset : 0;
         const size_t read_count = available < needed_source_samples ? (size_t)available : (size_t)needed_source_samples;
         const iq_ci16_t *source_samples = &asset->samples[sample_offset];
 
-        const double offset_hz = (double)((int64_t)signal->center_frequency_hz - (int64_t)window_center_hz);
-        const double source_gain = passband_gain * output_scale * pow(10.0, (signal->power_dbm - rf_reference_power_dbm) / 20.0);
         const double phase_step = 2.0 * M_PI * offset_hz / (double)output_sample_rate_hz;
         const double step_c = cos(phase_step);
         const double step_s = sin(phase_step);

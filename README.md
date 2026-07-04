@@ -13,6 +13,7 @@ Current implementation includes:
 - per-receiver REST API.
 - VITA 49.2 UDP output for receiver-bandwidth and DDC streams.
 - cached IQ assets.
+- cached PCM WAV audio assets with WBFM, AM, USB, and LSB modulation.
 - scalar sample-rate-aware renderer.
 - DDC out-of-window empty stream behavior.
 - runtime metrics endpoint.
@@ -48,12 +49,27 @@ build/sdr-simulator \
 
 The receiver opens an SDL2 window, parses VITA 49.2 packets at UDP line rate, and displays the selected history duration across automatically computed waterfall rows. The 80-MHz scanner stream is still available on port `50000`, but the quick start uses DDC port `50001` because it is centered on the demo signal and is easier to verify visually.
 
-For a non-continuous signal, use `simulator/scenarios/burst_1s_every_5s.json`. It emits a one-second burst every five seconds on DDC 0, with silence in between:
+For a non-continuous signal, use `simulator/scenarios/burst_1s_every_5s.json`. It emits a one-second burst every five seconds on DDC 0 over a continuous simulated noise floor:
 
 ```sh
 build/sdr-simulator \
   --config simulator/configs/instance_001.yaml \
   --scenario simulator/scenarios/burst_1s_every_5s.json \
+  --stream-block-samples 1536
+```
+
+For an audio-modulated radio demo, create a mono 48 kHz PCM WAV asset first:
+
+```sh
+ffmpeg -i input.mp3 -ac 1 -ar 48000 -sample_fmt s16 simulator/assets/radio_clip.wav
+```
+
+Then run the audio scenario. It places WBFM, AM, USB, and LSB signals from the same WAV file inside DDC 0:
+
+```sh
+build/sdr-simulator \
+  --config simulator/configs/instance_001.yaml \
+  --scenario simulator/scenarios/audio_radio_demo.json \
   --stream-block-samples 1536
 ```
 
@@ -223,4 +239,4 @@ build/sdr-waterfall-receiver --host 127.0.0.1 --port 50000
 - Receiver and DDC windows use an explicit rectangular passband gain based on signal/window bandwidth overlap.
 - UDP streaming uses a renderer-to-UDP ringbuffer pipeline with sample-rate pacing.
 - Metrics are available per receiver and per stream.
-- Noise, gain, frontend impairments, IQ imbalance, and high-performance SIMD kernels are not yet implemented.
+- Frontend impairments, IQ imbalance, and high-performance SIMD kernels are not yet implemented.

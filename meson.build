@@ -62,7 +62,8 @@ sim_sources = files(
   'simulator/src/streamer.c',
   'simulator/src/timebase.c',
   'simulator/src/udp_output.c',
-  'simulator/src/vita49_packet.c'
+  'simulator/src/vita49_packet.c',
+  'simulator/src/wav_reader.c'
 )
 
 sim_deps = [m_dep, thread_dep, microhttpd_dep, jansson_dep, yaml_dep]

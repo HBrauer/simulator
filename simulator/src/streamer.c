@@ -68,6 +68,38 @@ uint64_t streamer_block_duration_ns(size_t block_samples, uint32_t sample_rate_h
     return (sample_ns + (uint64_t)sample_rate_hz - 1ULL) / (uint64_t)sample_rate_hz;
 }
 
+#define STREAM_DAY_NS (86400ULL * 1000000000ULL)
+
+uint64_t streamer_block_index_from_time_ns(uint64_t scenario_time_ns, size_t block_samples, uint32_t sample_rate_hz)
+{
+    if (block_samples == 0 || sample_rate_hz == 0) {
+        return 0;
+    }
+    const uint64_t sample_index =
+        (uint64_t)(((__uint128_t)scenario_time_ns * (uint64_t)sample_rate_hz) / 1000000000ULL);
+    return sample_index / (uint64_t)block_samples;
+}
+
+uint64_t streamer_block_start_ns(uint64_t block_index, size_t block_samples, uint32_t sample_rate_hz)
+{
+    if (sample_rate_hz == 0) {
+        return 0;
+    }
+    const __uint128_t samples = (__uint128_t)block_index * (uint64_t)block_samples;
+    return (uint64_t)((samples * 1000000000ULL) / (uint64_t)sample_rate_hz);
+}
+
+/* Advance to the next grid block, wrapping back to the first block of the day at midnight
+ * so the rendered scenario time stays a valid time-of-day in [0, 86400 s). */
+static uint64_t streamer_next_block_index(uint64_t block_index, size_t block_samples, uint32_t sample_rate_hz)
+{
+    const uint64_t next = block_index + 1ULL;
+    if (streamer_block_start_ns(next, block_samples, sample_rate_hz) >= STREAM_DAY_NS) {
+        return 0;
+    }
+    return next;
+}
+
 static void sleep_for_block(size_t block_samples, uint32_t sample_rate_hz)
 {
     const uint64_t duration_ns = streamer_block_duration_ns(block_samples, sample_rate_hz);
@@ -223,7 +255,10 @@ static void *stream_render_thread_main(void *arg)
     if (buffer == NULL) {
         return NULL;
     }
-    uint64_t render_time_ns = timebase_now_ns(worker->timebase);
+
+    uint32_t last_rate_hz = 0;
+    uint64_t block_index = 0;
+    bool grid_initialized = false;
 
     while (atomic_load(worker->running)) {
         pthread_mutex_lock(worker->receiver_lock);
@@ -231,18 +266,26 @@ static void *stream_render_thread_main(void *arg)
         ddc_config_t ddc_snapshot = receiver_snapshot.ddc[worker->ddc_index];
         pthread_mutex_unlock(worker->receiver_lock);
         const uint32_t sample_rate_hz = stream_sample_rate(worker, &receiver_snapshot, &ddc_snapshot);
-        const uint64_t block_duration_ns = streamer_block_duration_ns(worker->block_samples, sample_rate_hz);
 
         if (!stream_enabled(worker, &receiver_snapshot, &ddc_snapshot)) {
             stream_worker_set_active(worker, false);
             pthread_mutex_lock(&worker->ringbuffer_lock);
             ringbuffer_clear(&worker->ringbuffer);
             pthread_mutex_unlock(&worker->ringbuffer_lock);
-            render_time_ns = timebase_now_ns(worker->timebase);
+            grid_initialized = false;
             sleep_for_block(worker->block_samples, sample_rate_hz);
             continue;
         }
         stream_worker_set_active(worker, true);
+
+        /* Re-anchor the grid to the current time-of-day whenever we (re)start streaming or
+         * the sample rate changes; otherwise advance block-by-block so the rendered content
+         * is a pure function of the block index (and therefore identical across instances). */
+        if (!grid_initialized || sample_rate_hz != last_rate_hz) {
+            block_index = streamer_block_index_from_time_ns(timebase_now_ns(worker->timebase), worker->block_samples, sample_rate_hz);
+            last_rate_hz = sample_rate_hz;
+            grid_initialized = true;
+        }
 
         pthread_mutex_lock(&worker->ringbuffer_lock);
         const bool has_space = ringbuffer_available(&worker->ringbuffer) >= worker->packet_bytes;
@@ -253,10 +296,7 @@ static void *stream_render_thread_main(void *arg)
             continue;
         }
 
-        const uint64_t now_ns = timebase_now_ns(worker->timebase);
-        if (render_time_ns < now_ns) {
-            render_time_ns = now_ns;
-        }
+        const uint64_t render_time_ns = streamer_block_start_ns(block_index, worker->block_samples, sample_rate_hz);
         render_one_block(worker, buffer, &receiver_snapshot, &ddc_snapshot, render_time_ns);
 
         pthread_mutex_lock(&worker->ringbuffer_lock);
@@ -267,11 +307,7 @@ static void *stream_render_thread_main(void *arg)
         }
         pthread_mutex_unlock(&worker->ringbuffer_lock);
 
-        if (block_duration_ns > 0 && render_time_ns <= UINT64_MAX - block_duration_ns) {
-            render_time_ns += block_duration_ns;
-        } else {
-            render_time_ns = timebase_now_ns(worker->timebase);
-        }
+        block_index = streamer_next_block_index(block_index, worker->block_samples, sample_rate_hz);
     }
 
     free(buffer);

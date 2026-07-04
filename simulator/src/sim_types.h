@@ -24,6 +24,19 @@ typedef struct {
     int16_t q;
 } iq_ci16_t;
 
+typedef enum {
+    SCENARIO_SOURCE_IQ_FILE,
+    SCENARIO_SOURCE_AUDIO_FILE
+} scenario_source_kind_t;
+
+typedef enum {
+    SCENARIO_MODULATION_IQ,
+    SCENARIO_MODULATION_WBFM,
+    SCENARIO_MODULATION_AM,
+    SCENARIO_MODULATION_USB,
+    SCENARIO_MODULATION_LSB
+} scenario_modulation_t;
+
 typedef struct {
     uint16_t port;
 } udp_output_config_t;
@@ -72,6 +85,7 @@ typedef struct {
 typedef struct {
     char id[SIM_MAX_ID];
     char source_type[32];
+    scenario_source_kind_t source_kind;
     char file[SIM_MAX_PATH];
     char format[16];
     char byte_order[32];
@@ -86,9 +100,13 @@ typedef struct {
 typedef struct {
     char signal_id[SIM_MAX_ID];
     char source_reference[SIM_MAX_ID];
+    char modulation_name[16];
+    scenario_modulation_t modulation;
     uint64_t center_frequency_hz;
     uint32_t bandwidth_hz;
     double power_dbm;
+    double fm_deviation_hz;
+    double am_depth;
     double start_time_s;
     double repeat_interval_s;
 } scenario_signal_t;

@@ -71,7 +71,7 @@ Top-level fields:
 | `schema_version` | integer | yes | Must be `1`. |
 | `scenario_id` | string | yes | Scenario identifier. |
 | `description` | string | no | Human-readable description. |
-| `sources` | array | yes | IQ source definitions, up to `SIM_MAX_SOURCES` (`64`). |
+| `sources` | array | yes | IQ or audio source definitions, up to `SIM_MAX_SOURCES` (`64`). |
 | `signals` | array | yes | RF signal placements, up to `SIM_MAX_SIGNALS` (`256`). |
 
 Source fields:
@@ -79,16 +79,18 @@ Source fields:
 | Field | Type | Required | Notes |
 | --- | --- | --- | --- |
 | `id` | string | yes | Unique source ID. |
-| `source_type` | string | yes | Currently `iq_file`. |
-| `file` | string | yes | Path to the IQ asset. |
-| `format` | string | yes | Currently `ci16`. |
-| `byte_order` | string | yes | Currently `little_endian`. |
-| `iq_layout` | string | yes | Currently `interleaved_iq`. |
+| `source_type` | string | yes | `iq_file` or `audio_file`. |
+| `file` | string | yes | Path to the IQ or audio asset. |
+| `format` | string | yes | `ci16` for IQ files, `wav` for audio files. |
+| `byte_order` | string | IQ only | Currently `little_endian`. |
+| `iq_layout` | string | IQ only | Currently `interleaved_iq`. |
 | `sample_rate_hz` | integer | yes | Source sample rate. |
 | `bandwidth_hz` | integer | yes | Source bandwidth. |
-| `center_frequency_hz` | integer | yes | Source-relative center; current sample scenario uses `0`. |
-| `sample_count` | integer | yes | Number of complex samples in the file. |
+| `center_frequency_hz` | integer | yes | Source-relative center; current sample scenarios use `0`. |
+| `sample_count` | integer | no | Number of complex/audio samples in the file. CI16 and WAV sources can derive this from file size. |
 | `nominal_level_dbfs` | number | yes | Source nominal digital level. |
+
+`audio_file` sources currently support PCM16 WAV, mono or stereo. Stereo is folded to mono in the asset cache.
 
 Signal fields:
 
@@ -96,9 +98,12 @@ Signal fields:
 | --- | --- | --- | --- |
 | `signal_id` | string | yes | Unique signal ID. |
 | `source_reference` | string | yes | Must match an existing source `id`. |
+| `modulation` | string | no | Defaults to `iq`. Use `iq` for `iq_file`; use `wbfm`, `am`, `usb`, or `lsb` for `audio_file`. |
 | `center_frequency_hz` | integer | yes | Absolute RF center frequency. |
 | `bandwidth_hz` | integer | yes | Signal bandwidth. |
 | `power_dbm` | number | yes | RF power. Digital level is `nominal_level_dbfs + (power_dbm - rf_reference_power_dbm)` before `output_scale`. |
+| `fm_deviation_hz` | number | WBFM only | FM peak deviation. Defaults to `75000`. |
+| `am_depth` | number | AM only | AM modulation depth from `0.0` to `1.0`. Defaults to `0.8`. |
 | `start_time_s` | number | yes | Scenario start time for playback. |
 | `repeat_interval_s` | number | yes | Must be positive enough to repeat the source without invalid wrapping. |
 
@@ -112,6 +117,8 @@ Validation error codes include:
 - `source_unsupported`
 - `duplicate_source_id`
 - `signal_invalid`
+- `signal_modulation_invalid`
+- `signal_modulation_source_mismatch`
 - `duplicate_signal_id`
 - `missing_source_reference`
 - `signal_repeat_too_short`

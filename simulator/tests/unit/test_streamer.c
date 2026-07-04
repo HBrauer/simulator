@@ -28,6 +28,54 @@ START_TEST(rejects_empty_pacing_inputs)
 }
 END_TEST
 
+START_TEST(block_grid_contains_time_and_is_monotonic_without_drift)
+{
+    /* 96 MS/s: 1e9 is not divisible by the sample rate, so any ns-accumulating scheme drifts.
+     * The exact 128-bit grid must not: block starts are strictly increasing and the block that
+     * index_from_time() selects for a time t must actually contain t: start(k) <= t < start(k+1). */
+    const size_t block_samples = 1024;
+    const uint32_t rate = 96000000U;
+    uint64_t prev_start = 0;
+    for (uint64_t k = 1; k < 2000000ULL; k += 4099ULL) {
+        const uint64_t start_ns = streamer_block_start_ns(k, block_samples, rate);
+        ck_assert_uint_gt(start_ns, prev_start);
+        prev_start = start_ns;
+        /* Round-trip is exact to within the 1 ns quantisation of the block boundary (block_start
+         * rounds down, so it can land in the tail of block k-1). Crucially the error does not
+         * accumulate with k — no drift. */
+        const uint64_t idx = streamer_block_index_from_time_ns(start_ns, block_samples, rate);
+        ck_assert_uint_le(k - idx, 1ULL);
+        ck_assert_uint_le(idx, k);
+    }
+}
+END_TEST
+
+START_TEST(block_grid_start_matches_exact_sample_math)
+{
+    const size_t block_samples = 1024;
+    const uint32_t rate = 98304000U;
+    for (uint64_t k = 0; k < 100000ULL; k += 777ULL) {
+        const __uint128_t samples = (__uint128_t)k * block_samples;
+        const uint64_t expected = (uint64_t)((samples * 1000000000ULL) / rate);
+        ck_assert_uint_eq(streamer_block_start_ns(k, block_samples, rate), expected);
+    }
+}
+END_TEST
+
+START_TEST(block_grid_is_independent_of_query_phase)
+{
+    /* Two "instances" querying the grid at different wall-clock instants within the same
+     * block must resolve to the same block index (and therefore the same rendered content). */
+    const size_t block_samples = 1024;
+    const uint32_t rate = 96000000U;
+    const uint64_t k = 12345ULL;
+    const uint64_t start = streamer_block_start_ns(k, block_samples, rate);
+    const uint64_t mid = start + streamer_block_duration_ns(block_samples, rate) / 2ULL;
+    ck_assert_uint_eq(streamer_block_index_from_time_ns(start, block_samples, rate), k);
+    ck_assert_uint_eq(streamer_block_index_from_time_ns(mid, block_samples, rate), k);
+}
+END_TEST
+
 Suite *streamer_suite(void)
 {
     Suite *suite = suite_create("streamer");
@@ -35,6 +83,9 @@ Suite *streamer_suite(void)
     tcase_add_test(tc, calculates_80mhz_packet_pacing_duration);
     tcase_add_test(tc, calculates_ddc_packet_pacing_duration);
     tcase_add_test(tc, rejects_empty_pacing_inputs);
+    tcase_add_test(tc, block_grid_contains_time_and_is_monotonic_without_drift);
+    tcase_add_test(tc, block_grid_start_matches_exact_sample_math);
+    tcase_add_test(tc, block_grid_is_independent_of_query_phase);
     suite_add_tcase(suite, tc);
     return suite;
 }

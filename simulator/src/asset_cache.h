@@ -7,8 +7,12 @@
 
 typedef struct {
     char source_id[SIM_MAX_ID];
+    scenario_source_kind_t source_kind;
     uint64_t sample_count;
     iq_ci16_t *samples;
+    float *audio_samples;
+    float *audio_hilbert;
+    double *audio_integral;
 } cached_asset_t;
 
 typedef struct {

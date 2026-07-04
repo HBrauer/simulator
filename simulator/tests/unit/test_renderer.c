@@ -505,6 +505,72 @@ START_TEST(renderer_adds_deterministic_noise_floor_without_active_signals)
 }
 END_TEST
 
+START_TEST(renderer_renders_audio_modulation_modes)
+{
+    scenario_t scenario;
+    asset_cache_t cache;
+    float audio[32];
+    float hilbert[32];
+    double integral[33];
+    memset(&scenario, 0, sizeof(scenario));
+    memset(&cache, 0, sizeof(cache));
+
+    scenario.schema_version = 1;
+    snprintf(scenario.scenario_id, sizeof(scenario.scenario_id), "%s", "unit_audio_mods");
+    scenario.source_count = 1;
+    scenario.signal_count = 1;
+    snprintf(scenario.sources[0].id, sizeof(scenario.sources[0].id), "%s", "audio");
+    snprintf(scenario.sources[0].source_type, sizeof(scenario.sources[0].source_type), "%s", "audio_file");
+    scenario.sources[0].source_kind = SCENARIO_SOURCE_AUDIO_FILE;
+    snprintf(scenario.sources[0].format, sizeof(scenario.sources[0].format), "%s", "wav");
+    scenario.sources[0].sample_rate_hz = 48000;
+    scenario.sources[0].bandwidth_hz = 200000;
+    scenario.sources[0].sample_count = 32;
+
+    snprintf(scenario.signals[0].signal_id, sizeof(scenario.signals[0].signal_id), "%s", "audio_sig");
+    snprintf(scenario.signals[0].source_reference, sizeof(scenario.signals[0].source_reference), "%s", "audio");
+    scenario.signals[0].center_frequency_hz = 10000000000ULL;
+    scenario.signals[0].bandwidth_hz = 200000;
+    scenario.signals[0].power_dbm = -80.0;
+    scenario.signals[0].fm_deviation_hz = 75000.0;
+    scenario.signals[0].am_depth = 0.8;
+    scenario.signals[0].start_time_s = 0.0;
+    scenario.signals[0].repeat_interval_s = 1.0;
+
+    integral[0] = 0.0;
+    for (size_t i = 0; i < 32; i++) {
+        audio[i] = (float)sin(2.0 * M_PI * (double)i / 32.0);
+        hilbert[i] = (float)cos(2.0 * M_PI * (double)i / 32.0);
+        integral[i + 1U] = integral[i] + (double)audio[i];
+    }
+    cache.asset_count = 1;
+    snprintf(cache.assets[0].source_id, sizeof(cache.assets[0].source_id), "%s", "audio");
+    cache.assets[0].source_kind = SCENARIO_SOURCE_AUDIO_FILE;
+    cache.assets[0].sample_count = 32;
+    cache.assets[0].audio_samples = audio;
+    cache.assets[0].audio_hilbert = hilbert;
+    cache.assets[0].audio_integral = integral;
+
+    receiver_config_t receiver = fixed_center_receiver();
+    receiver.rf_reference_power_dbm = -40.0;
+    iq_ci16_t out[64];
+    render_stats_t stats;
+    const scenario_modulation_t modes[] = {
+        SCENARIO_MODULATION_WBFM,
+        SCENARIO_MODULATION_AM,
+        SCENARIO_MODULATION_USB,
+        SCENARIO_MODULATION_LSB,
+    };
+    for (size_t m = 0; m < sizeof(modes) / sizeof(modes[0]); m++) {
+        memset(out, 0, sizeof(out));
+        scenario.signals[0].modulation = modes[m];
+        ck_assert(renderer_render_80mhz_block(&scenario, &cache, &receiver, 0, out, 64, &stats));
+        ck_assert_uint_eq(stats.active_signals, 1);
+        ck_assert(samples_have_energy(out, 64));
+    }
+}
+END_TEST
+
 START_TEST(renders_burst_scenario_only_during_active_second)
 {
     scenario_t scenario;
@@ -587,6 +653,7 @@ Suite *renderer_suite(void)
     tcase_add_test(tc, renders_ddc_nonzero_visible_signal);
     tcase_add_test(tc, renders_ddc_4096_sample_block_for_waterfall);
     tcase_add_test(tc, renderer_adds_deterministic_noise_floor_without_active_signals);
+    tcase_add_test(tc, renderer_renders_audio_modulation_modes);
     tcase_add_test(tc, renders_burst_scenario_only_during_active_second);
     tcase_add_test(tc, renderer_applies_window_passband_gain);
     suite_add_tcase(suite, tc);
