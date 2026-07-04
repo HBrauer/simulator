@@ -704,6 +704,14 @@ static bool renderer_render_window_block(
         }
 
         const double offset_hz = (double)((int64_t)signal->center_frequency_hz - (int64_t)window_center_hz);
+        /* If the whole signal band, once shifted to baseband, lies beyond the output Nyquist it
+         * cannot be represented and would only fold back as aliases -- skip it. signal_passband_gain
+         * only tests overlap with the window bandwidth, which can exceed the output rate, so this
+         * catches the case the passband gain does not. (The straddle case, where a band crosses the
+         * window/Nyquist edge, is still only attenuated -- a documented approximation.) */
+        if (fabs(offset_hz) - (double)signal->bandwidth_hz / 2.0 > (double)output_sample_rate_hz / 2.0) {
+            continue;
+        }
         const double source_gain = passband_gain * output_scale * pow(10.0, (signal->power_dbm - rf_reference_power_dbm) / 20.0);
         if (source->source_kind == SCENARIO_SOURCE_AUDIO_FILE) {
             render_audio_modulated(signal,

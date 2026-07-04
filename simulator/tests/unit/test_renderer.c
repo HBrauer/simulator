@@ -756,11 +756,48 @@ START_TEST(nco_phase_is_continuous_across_block_boundaries)
 }
 END_TEST
 
+START_TEST(renderer_skips_signal_beyond_output_nyquist)
+{
+    /* Wide window (fits the signal, so passband gain > 0) but a low output rate: a signal
+     * 10 MHz off centre is well inside the 80 MHz window yet far beyond the +/-1 MHz output
+     * Nyquist, so it must be skipped entirely rather than aliased into the band. */
+    scenario_t scenario;
+    asset_cache_t cache;
+    iq_ci16_t asset_samples[8];
+    setup_constant_signal(&scenario, &cache, asset_samples, 10010000000ULL);
+    scenario.sources[0].sample_rate_hz = 2000000;
+    scenario.signals[0].bandwidth_hz = 100000;
+
+    ddc_config_t ddc = {
+        .id = 0,
+        .center_frequency_hz = 10000000000ULL,
+        .bandwidth_hz = 80000000U, /* window wider than the output rate */
+        .sample_rate_hz = 2000000U, /* Nyquist = 1 MHz */
+        .output_scale = 1.0,
+        .rf_reference_power_dbm = -40.0,
+    };
+    iq_ci16_t out[16];
+    render_stats_t stats;
+    ck_assert(renderer_render_ddc_block(&scenario, &cache, &ddc, 0, out, 16, &stats));
+    ck_assert_uint_eq(stats.active_signals, 0);
+    for (size_t i = 0; i < 16; i++) {
+        ck_assert_int_eq(out[i].i, 0);
+        ck_assert_int_eq(out[i].q, 0);
+    }
+
+    /* A signal only 0.3 MHz off centre is within Nyquist and still rendered. */
+    scenario.signals[0].center_frequency_hz = 10000300000ULL;
+    ck_assert(renderer_render_ddc_block(&scenario, &cache, &ddc, 0, out, 16, &stats));
+    ck_assert_uint_eq(stats.active_signals, 1);
+}
+END_TEST
+
 Suite *renderer_suite(void)
 {
     Suite *suite = suite_create("renderer");
     TCase *tc = tcase_create("core");
     tcase_add_test(tc, nco_phase_is_continuous_across_block_boundaries);
+    tcase_add_test(tc, renderer_skips_signal_beyond_output_nyquist);
     tcase_add_test(tc, renderer_mix_bus_clips_once_not_per_signal);
     tcase_add_test(tc, renders_nonzero_visible_signal);
     tcase_add_test(tc, renderer_80mhz_sinc_resamples_24576_source_to_98304_output);
