@@ -369,6 +369,61 @@ START_TEST(renderer_clips_after_mixing_two_signals)
 }
 END_TEST
 
+START_TEST(renderer_mix_bus_clips_once_not_per_signal)
+{
+    /* Three co-located signals summing to +30000 I / -30000 Q. The running sum crosses full
+     * scale mid-way (+25000 +25000 = +50000), which the old per-signal clipping would have
+     * saturated to 32767 before subtracting the third signal, giving an order-dependent 12767.
+     * With a float mix bus clipped once, the result is the true sum, saturated only at the end. */
+    scenario_t scenario;
+    asset_cache_t cache;
+    memset(&scenario, 0, sizeof(scenario));
+    memset(&cache, 0, sizeof(cache));
+    scenario.schema_version = 1;
+    snprintf(scenario.scenario_id, sizeof(scenario.scenario_id), "%s", "unit_mix3");
+    scenario.source_count = 3;
+    scenario.signal_count = 3;
+    cache.asset_count = 3;
+    static iq_ci16_t assets[3][8];
+    const int16_t iv[3] = {25000, 25000, -20000};
+    const int16_t qv[3] = {-25000, -25000, 20000};
+    for (size_t n = 0; n < 3; n++) {
+        for (size_t s = 0; s < 8; s++) {
+            assets[n][s] = (iq_ci16_t){.i = iv[n], .q = qv[n]};
+        }
+        scenario_source_t *src = &scenario.sources[n];
+        snprintf(src->id, sizeof(src->id), "s%zu", n);
+        snprintf(src->source_type, sizeof(src->source_type), "%s", "iq_file");
+        snprintf(src->format, sizeof(src->format), "%s", "ci16");
+        snprintf(src->byte_order, sizeof(src->byte_order), "%s", "little_endian");
+        snprintf(src->iq_layout, sizeof(src->iq_layout), "%s", "interleaved_iq");
+        src->sample_rate_hz = SIM_RECEIVER_SAMPLE_RATE_HZ;
+        src->bandwidth_hz = 1000;
+        src->sample_count = 8;
+        scenario_signal_t *sig = &scenario.signals[n];
+        snprintf(sig->signal_id, sizeof(sig->signal_id), "sig%zu", n);
+        snprintf(sig->source_reference, sizeof(sig->source_reference), "s%zu", n);
+        sig->center_frequency_hz = 10000000000ULL;
+        sig->bandwidth_hz = 1000;
+        sig->power_dbm = -40.0;
+        sig->repeat_interval_s = 1.0;
+        snprintf(cache.assets[n].source_id, sizeof(cache.assets[n].source_id), "s%zu", n);
+        cache.assets[n].sample_count = 8;
+        cache.assets[n].samples = assets[n];
+    }
+
+    const receiver_config_t receiver = fixed_center_receiver();
+    iq_ci16_t out[4];
+    render_stats_t stats;
+    ck_assert(renderer_render_80mhz_block(&scenario, &cache, &receiver, 0, out, 4, &stats));
+    ck_assert_uint_eq(stats.active_signals, 3);
+    for (size_t i = 0; i < 4; i++) {
+        ck_assert_int_eq(out[i].i, 30000);
+        ck_assert_int_eq(out[i].q, -30000);
+    }
+}
+END_TEST
+
 START_TEST(scanner_moves_fixed_rf_signal_through_baseband)
 {
     scenario_t scenario;
@@ -706,6 +761,7 @@ Suite *renderer_suite(void)
     Suite *suite = suite_create("renderer");
     TCase *tc = tcase_create("core");
     tcase_add_test(tc, nco_phase_is_continuous_across_block_boundaries);
+    tcase_add_test(tc, renderer_mix_bus_clips_once_not_per_signal);
     tcase_add_test(tc, renders_nonzero_visible_signal);
     tcase_add_test(tc, renderer_80mhz_sinc_resamples_24576_source_to_98304_output);
     tcase_add_test(tc, renderer_low_rate_upsample_uses_linear_path);

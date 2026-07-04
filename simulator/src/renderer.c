@@ -23,7 +23,7 @@
 #define LOW_RATE_LINEAR_MAX_SOURCE_PER_OUTPUT 0.125
 
 static void resample_ci16(const iq_ci16_t *samples, size_t sample_count, double source_position, double *out_i, double *out_q);
-static void mix_accumulate_sample(iq_ci16_t *out, size_t index, double sample_i, double sample_q, double gain, double osc_c, double osc_s);
+static void mix_accumulate_sample(float *bus, size_t index, double sample_i, double sample_q, double gain, double osc_c, double osc_s);
 
 static double sinc_value(double x)
 {
@@ -280,7 +280,7 @@ static void render_audio_modulated(
     uint32_t output_sample_rate_hz,
     uint64_t start_sample,
     double source_gain,
-    iq_ci16_t *out,
+    float *bus,
     size_t count)
 {
     const double source_per_output = (double)source->sample_rate_hz / (double)output_sample_rate_hz;
@@ -315,7 +315,7 @@ static void render_audio_modulated(
             base_q = signal->modulation == SCENARIO_MODULATION_USB ? hilbert : -hilbert;
         }
 
-        mix_accumulate_sample(out, i, amplitude * base_i, amplitude * base_q, 1.0, shift_c, shift_s);
+        mix_accumulate_sample(bus, i, amplitude * base_i, amplitude * base_q, 1.0, shift_c, shift_s);
         const double next_c = shift_c * shift_step_c - shift_s * shift_step_s;
         const double next_s = shift_s * shift_step_c + shift_c * shift_step_s;
         shift_c = next_c;
@@ -377,7 +377,7 @@ static void render_noise_floor(
     double output_scale,
     double rf_reference_power_dbm,
     uint64_t scenario_time_ns,
-    iq_ci16_t *out,
+    float *bus,
     size_t count)
 {
     if (!scenario->noise_floor.enabled) {
@@ -405,44 +405,45 @@ static void render_noise_floor(
         state = 0x6d2b79f5U;
     }
 
+    /* Noise is written first into a zeroed bus, so a plain add is an assignment. */
     for (size_t i = 0; i < count; i++) {
         const int32_t raw_i = (int32_t)(xorshift32_next(&state) & 0xffffU) - 32768;
         const int32_t raw_q = (int32_t)(xorshift32_next(&state) & 0xffffU) - 32768;
-        out[i].i = scale_noise_i16(raw_i, amplitude);
-        out[i].q = scale_noise_i16(raw_q, amplitude);
+        bus[2U * i] += (float)scale_noise_i16(raw_i, amplitude);
+        bus[2U * i + 1U] += (float)scale_noise_i16(raw_q, amplitude);
     }
 }
 
-static void mix_accumulate_sample(iq_ci16_t *out, size_t index, double sample_i, double sample_q, double gain, double osc_c, double osc_s)
+static void mix_accumulate_sample(float *bus, size_t index, double sample_i, double sample_q, double gain, double osc_c, double osc_s)
 {
     const double ii = gain * sample_i;
     const double qq = gain * sample_q;
-    out[index].i = sim_clip_i16((double)out[index].i + (ii * osc_c - qq * osc_s));
-    out[index].q = sim_clip_i16((double)out[index].q + (ii * osc_s + qq * osc_c));
+    bus[2U * index] += (float)(ii * osc_c - qq * osc_s);
+    bus[2U * index + 1U] += (float)(ii * osc_s + qq * osc_c);
 }
 
-static void accumulate_direct_baseband(iq_ci16_t *out, const iq_ci16_t *source_samples, size_t index, double source_gain)
+static void accumulate_direct_baseband(float *bus, const iq_ci16_t *source_samples, size_t index, double source_gain)
 {
-    out[index].i = sim_clip_i16((double)out[index].i + source_gain * (double)source_samples[index].i);
-    out[index].q = sim_clip_i16((double)out[index].q + source_gain * (double)source_samples[index].q);
+    bus[2U * index] += (float)(source_gain * (double)source_samples[index].i);
+    bus[2U * index + 1U] += (float)(source_gain * (double)source_samples[index].q);
 }
 
-static void render_direct_baseband(const iq_ci16_t *source_samples, size_t read_count, iq_ci16_t *out, size_t count, double source_gain)
+static void render_direct_baseband(const iq_ci16_t *source_samples, size_t read_count, float *bus, size_t count, double source_gain)
 {
     const size_t limit = read_count < count ? read_count : count;
     size_t i = 0;
     for (; i + 3 < limit; i += 4) {
-        accumulate_direct_baseband(out, source_samples, i, source_gain);
-        accumulate_direct_baseband(out, source_samples, i + 1, source_gain);
-        accumulate_direct_baseband(out, source_samples, i + 2, source_gain);
-        accumulate_direct_baseband(out, source_samples, i + 3, source_gain);
+        accumulate_direct_baseband(bus, source_samples, i, source_gain);
+        accumulate_direct_baseband(bus, source_samples, i + 1, source_gain);
+        accumulate_direct_baseband(bus, source_samples, i + 2, source_gain);
+        accumulate_direct_baseband(bus, source_samples, i + 3, source_gain);
     }
     for (; i < limit; i++) {
-        accumulate_direct_baseband(out, source_samples, i, source_gain);
+        accumulate_direct_baseband(bus, source_samples, i, source_gain);
     }
 }
 
-static void render_direct_nco(const iq_ci16_t *source_samples, size_t read_count, iq_ci16_t *out, size_t count, double source_gain, double init_c, double init_s, double step_c, double step_s)
+static void render_direct_nco(const iq_ci16_t *source_samples, size_t read_count, float *bus, size_t count, double source_gain, double init_c, double init_s, double step_c, double step_s)
 {
     const size_t limit = read_count < count ? read_count : count;
 #if SIM_HAVE_VOLK
@@ -457,9 +458,10 @@ static void render_direct_nco(const iq_ci16_t *source_samples, size_t read_count
             lv_32fc_t phase = (float)init_c + (float)init_s * I;
             const lv_32fc_t phase_inc = (float)step_c + (float)step_s * I;
             volk_32fc_s32fc_x2_rotator2_32fc(rotated, input, &phase_inc, &phase, (unsigned int)limit);
+            const float gain_f = (float)source_gain;
             for (size_t i = 0; i < limit; i++) {
-                out[i].i = sim_clip_i16((double)out[i].i + source_gain * (double)crealf(rotated[i]));
-                out[i].q = sim_clip_i16((double)out[i].q + source_gain * (double)cimagf(rotated[i]));
+                bus[2U * i] += gain_f * crealf(rotated[i]);
+                bus[2U * i + 1U] += gain_f * cimagf(rotated[i]);
             }
             volk_free(rotated);
             volk_free(input);
@@ -472,7 +474,7 @@ static void render_direct_nco(const iq_ci16_t *source_samples, size_t read_count
     double osc_c = init_c;
     double osc_s = init_s;
     for (size_t i = 0; i < limit; i++) {
-        mix_accumulate_sample(out, i, (double)source_samples[i].i, (double)source_samples[i].q, source_gain, osc_c, osc_s);
+        mix_accumulate_sample(bus, i, (double)source_samples[i].i, (double)source_samples[i].q, source_gain, osc_c, osc_s);
         const double next_c = osc_c * step_c - osc_s * step_s;
         const double next_s = osc_s * step_c + osc_c * step_s;
         osc_c = next_c;
@@ -485,7 +487,7 @@ static void render_direct_nco(const iq_ci16_t *source_samples, size_t read_count
     }
 }
 
-static void render_resampled_baseband(const iq_ci16_t *source_samples, size_t read_count, iq_ci16_t *out, size_t count, double source_gain, double source_per_output, double offset_fraction)
+static void render_resampled_baseband(const iq_ci16_t *source_samples, size_t read_count, float *bus, size_t count, double source_gain, double source_per_output, double offset_fraction)
 {
     /* The quarter-rate fast path indexes by output sample, which assumes positions land exactly
      * on i*0.25 -- only valid when the block starts on an integer source sample. */
@@ -502,8 +504,8 @@ static void render_resampled_baseband(const iq_ci16_t *source_samples, size_t re
             float resampled_i = 0.0f;
             float resampled_q = 0.0f;
             resample_linear_ci16_f(source_samples, read_count, source_position, &resampled_i, &resampled_q);
-            out[i].i = clip_i16_f((float)out[i].i + gain_f * resampled_i);
-            out[i].q = clip_i16_f((float)out[i].q + gain_f * resampled_q);
+            bus[2U * i] += gain_f * resampled_i;
+            bus[2U * i + 1U] += gain_f * resampled_q;
             source_position += source_step;
         }
         return;
@@ -524,12 +526,12 @@ static void render_resampled_baseband(const iq_ci16_t *source_samples, size_t re
         } else {
             resample_ci16(source_samples, read_count, source_position, &resampled_i, &resampled_q);
         }
-        out[i].i = sim_clip_i16((double)out[i].i + source_gain * resampled_i);
-        out[i].q = sim_clip_i16((double)out[i].q + source_gain * resampled_q);
+        bus[2U * i] += (float)(source_gain * resampled_i);
+        bus[2U * i + 1U] += (float)(source_gain * resampled_q);
     }
 }
 
-static void render_resampled_nco(const iq_ci16_t *source_samples, size_t read_count, iq_ci16_t *out, size_t count, double source_gain, double source_per_output, double offset_fraction, double init_c, double init_s, double step_c, double step_s)
+static void render_resampled_nco(const iq_ci16_t *source_samples, size_t read_count, float *bus, size_t count, double source_gain, double source_per_output, double offset_fraction, double init_c, double init_s, double step_c, double step_s)
 {
     /* The quarter-rate fast path indexes by output sample, valid only when the block starts on
      * an integer source sample (see render_resampled_baseband). */
@@ -552,8 +554,8 @@ static void render_resampled_nco(const iq_ci16_t *source_samples, size_t read_co
             resample_linear_ci16_f(source_samples, read_count, source_position, &resampled_i, &resampled_q);
             const float ii = gain_f * resampled_i;
             const float qq = gain_f * resampled_q;
-            out[i].i = clip_i16_f((float)out[i].i + (ii * osc_c - qq * osc_s));
-            out[i].q = clip_i16_f((float)out[i].q + (ii * osc_s + qq * osc_c));
+            bus[2U * i] += ii * osc_c - qq * osc_s;
+            bus[2U * i + 1U] += ii * osc_s + qq * osc_c;
             const float next_c = osc_c * step_c_f - osc_s * step_s_f;
             const float next_s = osc_s * step_c_f + osc_c * step_s_f;
             osc_c = next_c;
@@ -591,8 +593,8 @@ static void render_resampled_nco(const iq_ci16_t *source_samples, size_t read_co
             }
             const float ii = gain_f * resampled_i;
             const float qq = gain_f * resampled_q;
-            out[i].i = clip_i16_f((float)out[i].i + (ii * osc_c - qq * osc_s));
-            out[i].q = clip_i16_f((float)out[i].q + (ii * osc_s + qq * osc_c));
+            bus[2U * i] += ii * osc_c - qq * osc_s;
+            bus[2U * i + 1U] += ii * osc_s + qq * osc_c;
             const float next_c = osc_c * step_c_f - osc_s * step_s_f;
             const float next_s = osc_s * step_c_f + osc_c * step_s_f;
             osc_c = next_c;
@@ -623,7 +625,7 @@ static void render_resampled_nco(const iq_ci16_t *source_samples, size_t read_co
         } else {
             resample_ci16(source_samples, read_count, source_position, &resampled_i, &resampled_q);
         }
-        mix_accumulate_sample(out, i, resampled_i, resampled_q, source_gain, osc_c, osc_s);
+        mix_accumulate_sample(bus, i, resampled_i, resampled_q, source_gain, osc_c, osc_s);
         const double next_c = osc_c * step_c - osc_s * step_s;
         const double next_s = osc_s * step_c + osc_c * step_s;
         osc_c = next_c;
@@ -653,6 +655,29 @@ static bool renderer_render_window_block(
     if (stats != NULL) {
         memset(stats, 0, sizeof(*stats));
     }
+    if (count == 0) {
+        return true;
+    }
+
+    /* All signals and the noise floor accumulate into a wide float mix bus (interleaved I/Q)
+     * and are clipped to ci16 exactly once at the end. Accumulating in float keeps far more
+     * headroom than the ci16 output and makes the result independent of the order signals are
+     * mixed (intermediate sums may exceed +/-32767; only the final conversion saturates).
+     * The bus lives on the stack for the capped streaming block size; only an oversized
+     * one-shot render (CLI) falls back to a single heap allocation, so the hot path never
+     * allocates. */
+    float bus_stack[2U * SIM_MAX_STREAM_BLOCK_SAMPLES];
+    float *bus = bus_stack;
+    float *bus_heap = NULL;
+    if (count > SIM_MAX_STREAM_BLOCK_SAMPLES) {
+        bus_heap = malloc(2U * count * sizeof(*bus_heap));
+        if (bus_heap == NULL) {
+            return false;
+        }
+        bus = bus_heap;
+    }
+    memset(bus, 0, 2U * count * sizeof(*bus));
+
     render_noise_floor(scenario,
                        window_center_hz,
                        window_bandwidth_hz,
@@ -660,7 +685,7 @@ static bool renderer_render_window_block(
                        output_scale,
                        rf_reference_power_dbm,
                        scenario_time_ns,
-                       out,
+                       bus,
                        count);
     const double day_s = timebase_day_seconds_from_ns(scenario_time_ns);
     /* Absolute output-sample index of the first sample in this block. The frequency-shift
@@ -695,7 +720,7 @@ static bool renderer_render_window_block(
                                    output_sample_rate_hz,
                                    start_sample,
                                    source_gain,
-                                   out,
+                                   bus,
                                    count);
             if (stats != NULL) {
                 stats->active_signals++;
@@ -722,18 +747,26 @@ static bool renderer_render_window_block(
          * to the resampler, which starts at the exact fractional position. */
         const bool integer_aligned = offset_fraction < 1e-9;
         if (source->sample_rate_hz == output_sample_rate_hz && offset_hz == 0.0 && integer_aligned) {
-            render_direct_baseband(source_samples, read_count, out, count, source_gain);
+            render_direct_baseband(source_samples, read_count, bus, count, source_gain);
         } else if (source->sample_rate_hz == output_sample_rate_hz && integer_aligned) {
-            render_direct_nco(source_samples, read_count, out, count, source_gain, init_c, init_s, step_c, step_s);
+            render_direct_nco(source_samples, read_count, bus, count, source_gain, init_c, init_s, step_c, step_s);
         } else if (offset_hz == 0.0) {
-            render_resampled_baseband(source_samples, read_count, out, count, source_gain, source_per_output, offset_fraction);
+            render_resampled_baseband(source_samples, read_count, bus, count, source_gain, source_per_output, offset_fraction);
         } else {
-            render_resampled_nco(source_samples, read_count, out, count, source_gain, source_per_output, offset_fraction, init_c, init_s, step_c, step_s);
+            render_resampled_nco(source_samples, read_count, bus, count, source_gain, source_per_output, offset_fraction, init_c, init_s, step_c, step_s);
         }
         if (stats != NULL) {
             stats->active_signals++;
         }
     }
+
+    /* Single saturating conversion of the whole block. */
+    for (size_t i = 0; i < count; i++) {
+        out[i].i = clip_i16_f(bus[2U * i]);
+        out[i].q = clip_i16_f(bus[2U * i + 1U]);
+    }
+    free(bus_heap);
+
     if (stats != NULL) {
         stats->samples_rendered = count;
     }
