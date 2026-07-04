@@ -17,7 +17,7 @@
 #include <unistd.h>
 
 #define RENDER_BACKPRESSURE_NS 50000L
-#define RINGBUFFER_PACKET_CAPACITY 256U
+#define RINGBUFFER_PACKET_CAPACITY 8U
 #define STREAM_SEND_BATCH_SIZE 16U
 
 typedef enum {
@@ -39,13 +39,11 @@ typedef struct {
     size_t block_samples;
     size_t packet_bytes;
     ringbuffer_t ringbuffer;
-    pthread_mutex_t ringbuffer_lock;
     pthread_t render_thread;
     pthread_t udp_thread;
     bool render_started;
     bool udp_started;
     bool ringbuffer_initialized;
-    bool ringbuffer_lock_initialized;
     int stream_cpu;
     uint8_t vita_sequence;
 } stream_worker_t;
@@ -269,9 +267,6 @@ static void *stream_render_thread_main(void *arg)
 
         if (!stream_enabled(worker, &receiver_snapshot, &ddc_snapshot)) {
             stream_worker_set_active(worker, false);
-            pthread_mutex_lock(&worker->ringbuffer_lock);
-            ringbuffer_clear(&worker->ringbuffer);
-            pthread_mutex_unlock(&worker->ringbuffer_lock);
             grid_initialized = false;
             sleep_for_block(worker->block_samples, sample_rate_hz);
             continue;
@@ -287,10 +282,7 @@ static void *stream_render_thread_main(void *arg)
             grid_initialized = true;
         }
 
-        pthread_mutex_lock(&worker->ringbuffer_lock);
-        const bool has_space = ringbuffer_available(&worker->ringbuffer) >= worker->packet_bytes;
-        pthread_mutex_unlock(&worker->ringbuffer_lock);
-        if (!has_space) {
+        if (ringbuffer_available(&worker->ringbuffer) == 0) {
             struct timespec ts = {.tv_sec = 0, .tv_nsec = RENDER_BACKPRESSURE_NS};
             nanosleep(&ts, NULL);
             continue;
@@ -299,13 +291,9 @@ static void *stream_render_thread_main(void *arg)
         const uint64_t render_time_ns = streamer_block_start_ns(block_index, worker->block_samples, sample_rate_hz);
         render_one_block(worker, buffer, &receiver_snapshot, &ddc_snapshot, render_time_ns);
 
-        pthread_mutex_lock(&worker->ringbuffer_lock);
-        if (ringbuffer_available(&worker->ringbuffer) >= worker->packet_bytes) {
-            (void)ringbuffer_write(&worker->ringbuffer, (const uint8_t *)buffer, worker->packet_bytes);
-        } else {
+        if (!ringbuffer_try_push(&worker->ringbuffer, render_time_ns, buffer)) {
             record_overrun(worker);
         }
-        pthread_mutex_unlock(&worker->ringbuffer_lock);
 
         block_index = streamer_next_block_index(block_index, worker->block_samples, sample_rate_hz);
     }
@@ -345,16 +333,17 @@ static void *stream_udp_thread_main(void *arg)
         udp_output_close(&udp);
         return NULL;
     }
+    uint64_t payload_timestamps[STREAM_SEND_BATCH_SIZE];
     uint64_t next_send_ns = monotonic_now_ns();
 
     while (atomic_load(worker->running)) {
-        const uint64_t scenario_time_ns = timebase_now_ns(worker->timebase);
         pthread_mutex_lock(worker->receiver_lock);
         receiver_snapshot = *worker->receiver;
         ddc_snapshot = receiver_snapshot.ddc[worker->ddc_index];
         pthread_mutex_unlock(worker->receiver_lock);
 
         if (!stream_enabled(worker, &receiver_snapshot, &ddc_snapshot)) {
+            ringbuffer_drain(&worker->ringbuffer);
             next_send_ns = monotonic_now_ns();
             sleep_for_block(worker->block_samples, stream_sample_rate(worker, &receiver_snapshot, &ddc_snapshot));
             continue;
@@ -362,13 +351,13 @@ static void *stream_udp_thread_main(void *arg)
         const uint64_t block_duration_ns = streamer_block_duration_ns(worker->block_samples, stream_sample_rate(worker, &receiver_snapshot, &ddc_snapshot));
 
         size_t batch_count = 0;
-        pthread_mutex_lock(&worker->ringbuffer_lock);
-        while (batch_count < STREAM_SEND_BATCH_SIZE && ringbuffer_fill(&worker->ringbuffer) >= worker->packet_bytes) {
+        while (batch_count < STREAM_SEND_BATCH_SIZE) {
             uint8_t *payload = payloads + batch_count * worker->packet_bytes;
-            (void)ringbuffer_read(&worker->ringbuffer, payload, worker->packet_bytes);
+            if (!ringbuffer_try_pop(&worker->ringbuffer, &payload_timestamps[batch_count], payload)) {
+                break;
+            }
             batch_count++;
         }
-        pthread_mutex_unlock(&worker->ringbuffer_lock);
 
         if (batch_count == 0U) {
             record_underrun(worker);
@@ -386,14 +375,10 @@ static void *stream_udp_thread_main(void *arg)
         for (size_t i = 0; i < batch_count; i++) {
             uint8_t *packet = packets + i * send_capacity;
             const uint8_t *payload = payloads + i * worker->packet_bytes;
-            uint64_t timestamp_ns = scenario_time_ns;
-            if (block_duration_ns > 0U && i <= (UINT64_MAX - scenario_time_ns) / block_duration_ns) {
-                timestamp_ns = scenario_time_ns + (uint64_t)i * block_duration_ns;
-            }
             const vita49_if_data_packet_t vita_packet = {
                 .stream_id = stream_id,
                 .sequence = (uint8_t)((worker->vita_sequence + (uint8_t)i) & 0x0fU),
-                .timestamp_ns = timestamp_ns,
+                .timestamp_ns = payload_timestamps[i],
                 .payload = (const iq_ci16_t *)payload,
                 .payload_samples = worker->block_samples,
             };
@@ -450,14 +435,10 @@ static void *stream_udp_thread_main(void *arg)
 static bool stream_worker_start(stream_worker_t *worker)
 {
     worker->packet_bytes = worker->block_samples * sizeof(iq_ci16_t);
-    if (!ringbuffer_init(&worker->ringbuffer, worker->packet_bytes * RINGBUFFER_PACKET_CAPACITY)) {
+    if (!ringbuffer_init(&worker->ringbuffer, worker->packet_bytes, RINGBUFFER_PACKET_CAPACITY)) {
         return false;
     }
     worker->ringbuffer_initialized = true;
-    if (pthread_mutex_init(&worker->ringbuffer_lock, NULL) != 0) {
-        return false;
-    }
-    worker->ringbuffer_lock_initialized = true;
     if (pthread_create(&worker->render_thread, NULL, stream_render_thread_main, worker) != 0) {
         return false;
     }
@@ -480,10 +461,6 @@ static void stream_worker_join(stream_worker_t *worker)
         worker->udp_started = false;
     }
     stream_worker_set_active(worker, false);
-    if (worker->ringbuffer_lock_initialized) {
-        pthread_mutex_destroy(&worker->ringbuffer_lock);
-        worker->ringbuffer_lock_initialized = false;
-    }
     if (worker->ringbuffer_initialized) {
         ringbuffer_free(&worker->ringbuffer);
         worker->ringbuffer_initialized = false;
