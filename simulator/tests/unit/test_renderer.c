@@ -699,6 +699,83 @@ START_TEST(renderer_renders_audio_modulation_modes)
 }
 END_TEST
 
+static void setup_dc_audio_signal(scenario_t *scenario, asset_cache_t *cache, float *audio, size_t n,
+                                  float dc, scenario_modulation_t mod)
+{
+    memset(scenario, 0, sizeof(*scenario));
+    memset(cache, 0, sizeof(*cache));
+    for (size_t i = 0; i < n; i++) {
+        audio[i] = dc;
+    }
+    scenario->schema_version = 1;
+    scenario->source_count = 1;
+    scenario->signal_count = 1;
+    scenario_source_t *src = &scenario->sources[0];
+    snprintf(src->id, sizeof(src->id), "%s", "audio");
+    snprintf(src->source_type, sizeof(src->source_type), "%s", "audio_file");
+    src->source_kind = SCENARIO_SOURCE_AUDIO_FILE;
+    snprintf(src->format, sizeof(src->format), "%s", "wav");
+    src->sample_rate_hz = SIM_RECEIVER_SAMPLE_RATE_HZ; /* source_per_output = 1 */
+    src->bandwidth_hz = 200000;
+    src->sample_count = n;
+    scenario_signal_t *sig = &scenario->signals[0];
+    snprintf(sig->signal_id, sizeof(sig->signal_id), "%s", "audio_sig");
+    snprintf(sig->source_reference, sizeof(sig->source_reference), "%s", "audio");
+    sig->center_frequency_hz = 10000000000ULL; /* offset 0 for the fixed-centre receiver */
+    sig->bandwidth_hz = 200000;
+    sig->power_dbm = -40.0;
+    sig->am_depth = 0.8;
+    sig->modulation = mod;
+    sig->repeat_interval_s = 1.0;
+    cache->asset_count = 1;
+    snprintf(cache->assets[0].source_id, sizeof(cache->assets[0].source_id), "%s", "audio");
+    cache->assets[0].source_kind = SCENARIO_SOURCE_AUDIO_FILE;
+    cache->assets[0].sample_count = n;
+    cache->assets[0].audio_samples = audio;
+}
+
+START_TEST(renderer_am_envelope_is_normalised_and_does_not_over_saturate)
+{
+    /* DC audio 0.5 at depth 0.8: normalised envelope = (1 + 0.8*0.5)/(1+0.8) = 0.7778, so with
+     * unity gain the output is ~25485, not the old (1 + 0.4) = 1.4x that clipped to 32767. */
+    scenario_t scenario;
+    asset_cache_t cache;
+    float audio[64];
+    setup_dc_audio_signal(&scenario, &cache, audio, 64, 0.5f, SCENARIO_MODULATION_AM);
+    const receiver_config_t receiver = fixed_center_receiver();
+    iq_ci16_t out[8];
+    render_stats_t stats;
+    ck_assert(renderer_render_80mhz_block(&scenario, &cache, &receiver, 0, out, 8, &stats));
+    ck_assert_uint_eq(stats.active_signals, 1);
+    const int expected = (int)lrint(32767.0 * (1.0 + 0.8 * 0.5) / (1.0 + 0.8));
+    ck_assert_int_ne(out[0].i, 32767);
+    ck_assert_int_le(abs(out[0].i - expected), 2);
+}
+END_TEST
+
+START_TEST(renderer_audio_stops_at_end_of_asset_within_block)
+{
+    /* 4-sample asset at the output rate: a block of 8 renders samples 0..3 and leaves 4..7 at
+     * zero instead of holding a dead carrier. */
+    scenario_t scenario;
+    asset_cache_t cache;
+    float audio[4];
+    setup_dc_audio_signal(&scenario, &cache, audio, 4, 1.0f, SCENARIO_MODULATION_AM);
+    const receiver_config_t receiver = fixed_center_receiver();
+    iq_ci16_t out[8];
+    render_stats_t stats;
+    ck_assert(renderer_render_80mhz_block(&scenario, &cache, &receiver, 0, out, 8, &stats));
+    ck_assert_uint_eq(stats.active_signals, 1);
+    for (size_t i = 0; i < 4; i++) {
+        ck_assert_int_ne(out[i].i, 0);
+    }
+    for (size_t i = 4; i < 8; i++) {
+        ck_assert_int_eq(out[i].i, 0);
+        ck_assert_int_eq(out[i].q, 0);
+    }
+}
+END_TEST
+
 START_TEST(renders_burst_scenario_only_during_active_second)
 {
     scenario_t scenario;
@@ -923,6 +1000,8 @@ Suite *renderer_suite(void)
     tcase_add_test(tc, renderer_adds_deterministic_noise_floor_without_active_signals);
     tcase_add_test(tc, renderer_noise_scales_with_window_bandwidth_as_density);
     tcase_add_test(tc, renderer_renders_audio_modulation_modes);
+    tcase_add_test(tc, renderer_am_envelope_is_normalised_and_does_not_over_saturate);
+    tcase_add_test(tc, renderer_audio_stops_at_end_of_asset_within_block);
     tcase_add_test(tc, renders_burst_scenario_only_during_active_second);
     tcase_add_test(tc, renderer_applies_window_passband_gain);
     suite_add_tcase(suite, tc);

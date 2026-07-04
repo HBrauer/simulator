@@ -12,7 +12,31 @@
 #define M_PI 3.14159265358979323846
 #endif
 
-#define HILBERT_RADIUS 31
+#define HILBERT_RADIUS 95
+
+/* Target RMS the audio is normalised to at load, so power_dbm means the same thing for AM/SSB
+ * regardless of how hot the source file was mastered (a full-scale sine already sits here). */
+#define AUDIO_TARGET_RMS 0.70710678118654752440 /* 1/sqrt(2) */
+
+static double normalize_audio_rms(float *samples, size_t count)
+{
+    if (count == 0) {
+        return 1.0;
+    }
+    double sum_sq = 0.0;
+    for (size_t i = 0; i < count; i++) {
+        sum_sq += (double)samples[i] * (double)samples[i];
+    }
+    const double rms = sqrt(sum_sq / (double)count);
+    if (!(rms > 1e-9)) {
+        return 1.0;
+    }
+    const double gain = AUDIO_TARGET_RMS / rms;
+    for (size_t i = 0; i < count; i++) {
+        samples[i] = (float)((double)samples[i] * gain);
+    }
+    return gain;
+}
 
 static bool build_audio_helpers(cached_asset_t *asset, char *error, size_t error_size)
 {
@@ -106,6 +130,7 @@ bool asset_cache_load_limited(asset_cache_t *cache, const scenario_t *scenario, 
                 return false;
             }
             asset->audio_samples = audio.samples;
+            asset->normalization_gain = normalize_audio_rms(asset->audio_samples, (size_t)asset->sample_count);
             if (!build_audio_helpers(asset, error, error_size)) {
                 asset_cache_free(cache);
                 return false;

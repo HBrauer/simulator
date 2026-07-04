@@ -13,6 +13,7 @@ typedef struct {
     float *audio_samples;
     float *audio_hilbert;
     double *audio_integral;
+    double normalization_gain; /* factor applied to audio_samples at load (1.0 for IQ) */
 } cached_asset_t;
 
 typedef struct {

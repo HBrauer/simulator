@@ -319,6 +319,11 @@ static void render_audio_modulated(
 
     for (size_t i = 0; i < count; i++) {
         const double audio_position = (double)sample_offset + offset_fraction + (double)i * source_per_output;
+        /* Positions increase monotonically; once past the end of the asset the signal has
+         * finished, so stop rather than radiating a dead carrier for the rest of the block. */
+        if (audio_position >= (double)asset->sample_count) {
+            break;
+        }
         double base_i = 0.0;
         double base_q = 0.0;
 
@@ -329,7 +334,9 @@ static void render_audio_modulated(
             base_q = sin(fm_phase);
         } else if (signal->modulation == SCENARIO_MODULATION_AM) {
             const double audio = audio_linear_at(asset->audio_samples, asset->sample_count, audio_position);
-            const double envelope = 1.0 + signal->am_depth * audio;
+            /* Normalise by (1 + depth) so the modulation peak reaches full scale instead of 2x,
+             * which used to saturate the mixer at high depth and gain. */
+            const double envelope = (1.0 + signal->am_depth * audio) / (1.0 + signal->am_depth);
             base_i = envelope < 0.0 ? 0.0 : envelope;
         } else {
             const double audio = audio_linear_at(asset->audio_samples, asset->sample_count, audio_position);
