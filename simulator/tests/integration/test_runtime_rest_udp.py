@@ -12,6 +12,15 @@ from urllib.request import urlopen
 ROOT = Path(__file__).resolve().parents[3]
 SIM = ROOT / "build" / "sdr-simulator"
 _PORT_BLOCK_CURSOR = 30000
+_DEFAULT_RECEIVER_SAMPLE_RATE_HZ = 98304000
+
+
+def _grid_time_ns(scenario_time_ns, block_samples, sample_rate_hz=_DEFAULT_RECEIVER_SAMPLE_RATE_HZ):
+    """Render blocks are anchored to a fixed grid, so a packet carries the grid block that
+    contains the requested time, not the exact requested time. Mirror the C 128-bit math."""
+    sample_index = (scenario_time_ns * sample_rate_hz) // 1_000_000_000
+    block_index = sample_index // block_samples
+    return (block_index * block_samples * 1_000_000_000) // sample_rate_hz
 
 
 def _free_tcp_port():
@@ -447,7 +456,7 @@ def test_runtime_rest_and_udp_stream(tmp_path):
                 "--scenario",
                 "simulator/scenarios/test_scenario_001.json",
                 "--scenario-time-ns",
-                "450000",
+                str(_grid_time_ns(450000, 256)),
                 "--render-once-samples",
                 "256",
             ],
@@ -592,7 +601,9 @@ def test_vita49_udp_wraps_and_keeps_raw_payload(tmp_path):
         assert vita["sequence"] == 0
         assert vita["stream_id"] == 0x53440000
         assert vita["integer_seconds"] == 0
-        assert vita["fractional_ps"] == 450000000
+        # The block grid quantises the render time to the block that contains 450000 ns.
+        grid_ns = _grid_time_ns(450000, 128)
+        assert vita["fractional_ps"] == grid_ns * 1000
         payload = vita["payload"]
         assert len(payload) == 128 * 4
         expected = subprocess.check_output(
@@ -603,7 +614,7 @@ def test_vita49_udp_wraps_and_keeps_raw_payload(tmp_path):
                 "--scenario",
                 "simulator/scenarios/test_scenario_001.json",
                 "--scenario-time-ns",
-                "450000",
+                str(grid_ns),
                 "--render-once-samples",
                 "128",
             ],

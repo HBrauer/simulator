@@ -2,11 +2,13 @@
 #include "asset_cache.h"
 #include "renderer.h"
 #include "scenario.h"
+#include "streamer.h"
 #include "test_suites.h"
 
 #include <check.h>
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static int16_t interpolate_scaled_i16(int16_t a, int16_t b, double frac, double gain)
@@ -378,9 +380,15 @@ START_TEST(scanner_moves_fixed_rf_signal_through_baseband)
     ck_assert(renderer_render_80mhz_block(&scenario, &cache, &receiver, 400000ULL, negative_offset, 4, &stats));
     ck_assert_uint_eq(stats.active_signals, 1);
 
-    ck_assert_int_gt(positive_offset[1].q, 900);
-    ck_assert_int_eq(zero_offset[1].q, 0);
-    ck_assert_int_lt(negative_offset[1].q, -900);
+    /* The mixer phase now derives from absolute time, so a single sample's sign depends on the
+     * (nonzero) starting phase. The rotation *direction* is what encodes the offset sign, and it
+     * is phase-independent: for a tone A*exp(j(phi0 + i*w)), the discriminant
+     * out[0].i*out[1].q - out[0].q*out[1].i == A^2*sin(w) has the sign of the frequency offset. */
+    const long pos_disc = (long)positive_offset[0].i * positive_offset[1].q - (long)positive_offset[0].q * positive_offset[1].i;
+    const long neg_disc = (long)negative_offset[0].i * negative_offset[1].q - (long)negative_offset[0].q * negative_offset[1].i;
+    ck_assert_int_gt(pos_disc, 0);        /* signal above centre -> positive offset */
+    ck_assert_int_eq(zero_offset[1].q, 0); /* centre passes over the signal -> no rotation */
+    ck_assert_int_lt(neg_disc, 0);        /* signal below centre -> negative offset */
 }
 END_TEST
 
@@ -638,10 +646,57 @@ START_TEST(renderer_applies_window_passband_gain)
 }
 END_TEST
 
+START_TEST(nco_phase_is_continuous_across_block_boundaries)
+{
+    /* Render a constant IQ source (same rate, nonzero offset -> pure frequency shift) as two
+     * consecutive grid-aligned blocks, and as one double-length block. The second block must
+     * continue the phase of the first with no boundary jump: block1[j] == combined[64 + j]. */
+    scenario_t scenario;
+    asset_cache_t cache;
+    static iq_ci16_t asset_samples[256];
+    for (size_t s = 0; s < 256; s++) {
+        asset_samples[s] = (iq_ci16_t){.i = 1000, .q = 0};
+    }
+    setup_constant_signal(&scenario, &cache, asset_samples, 10000000000ULL);
+    /* Longer constant source so the signal stays active across both blocks (same rate,
+     * nonzero offset -> pure frequency shift), isolating the mixer phase. */
+    scenario.sources[0].sample_rate_hz = SIM_RECEIVER_SAMPLE_RATE_HZ;
+    scenario.sources[0].sample_count = 256;
+    scenario.signals[0].center_frequency_hz = 10001234500ULL; /* non-block-periodic offset */
+    scenario.signals[0].bandwidth_hz = 200000;
+    cache.assets[0].sample_count = 256;
+
+    const receiver_config_t receiver = fixed_center_receiver();
+    const uint32_t rate = receiver.sample_rate_hz;
+    const uint64_t t0 = streamer_block_start_ns(0, 64, rate);
+    const uint64_t t1 = streamer_block_start_ns(1, 64, rate);
+
+    iq_ci16_t block0[64];
+    iq_ci16_t block1[64];
+    iq_ci16_t combined[128];
+    render_stats_t stats;
+    ck_assert(renderer_render_80mhz_block(&scenario, &cache, &receiver, t0, block0, 64, &stats));
+    ck_assert(renderer_render_80mhz_block(&scenario, &cache, &receiver, t1, block1, 64, &stats));
+    ck_assert(renderer_render_80mhz_block(&scenario, &cache, &receiver, t0, combined, 128, &stats));
+
+    for (size_t j = 0; j < 64; j++) {
+        ck_assert_int_eq(block0[j].i, combined[j].i);
+        ck_assert_int_eq(block0[j].q, combined[j].q);
+    }
+    for (size_t j = 0; j < 64; j++) {
+        /* Constant source, so amplitude is identical; only the continuous phase carries over.
+         * Allow +/-1 LSB for the independent float rounding of the two renders. */
+        ck_assert_int_le(abs(block1[j].i - combined[64 + j].i), 1);
+        ck_assert_int_le(abs(block1[j].q - combined[64 + j].q), 1);
+    }
+}
+END_TEST
+
 Suite *renderer_suite(void)
 {
     Suite *suite = suite_create("renderer");
     TCase *tc = tcase_create("core");
+    tcase_add_test(tc, nco_phase_is_continuous_across_block_boundaries);
     tcase_add_test(tc, renders_nonzero_visible_signal);
     tcase_add_test(tc, renderer_80mhz_sinc_resamples_24576_source_to_98304_output);
     tcase_add_test(tc, renderer_low_rate_upsample_uses_linear_path);

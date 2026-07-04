@@ -277,6 +277,7 @@ static void render_audio_modulated(
     uint64_t sample_offset,
     double offset_hz,
     uint32_t output_sample_rate_hz,
+    uint64_t start_sample,
     double source_gain,
     iq_ci16_t *out,
     size_t count)
@@ -285,8 +286,11 @@ static void render_audio_modulated(
     const double shift_phase_step = 2.0 * M_PI * offset_hz / (double)output_sample_rate_hz;
     const double shift_step_c = cos(shift_phase_step);
     const double shift_step_s = sin(shift_phase_step);
-    double shift_c = 1.0;
-    double shift_s = 0.0;
+    /* Continuous starting phase from the absolute output-sample index (see nco.h). */
+    const uint64_t shift_step_q64 = nco_phase_step_q64(offset_hz, (double)output_sample_rate_hz);
+    const double shift_phase0 = nco_phase_rad_at(shift_step_q64, start_sample);
+    double shift_c = cos(shift_phase0);
+    double shift_s = sin(shift_phase0);
     const double amplitude = 32767.0 * source_gain;
 
     for (size_t i = 0; i < count; i++) {
@@ -315,6 +319,11 @@ static void render_audio_modulated(
         const double next_s = shift_s * shift_step_c + shift_c * shift_step_s;
         shift_c = next_c;
         shift_s = next_s;
+        if ((i & 0xffU) == 0xffU) {
+            const double inv = 1.0 / sqrt(shift_c * shift_c + shift_s * shift_s);
+            shift_c *= inv;
+            shift_s *= inv;
+        }
     }
 }
 
@@ -432,7 +441,7 @@ static void render_direct_baseband(const iq_ci16_t *source_samples, size_t read_
     }
 }
 
-static void render_direct_nco(const iq_ci16_t *source_samples, size_t read_count, iq_ci16_t *out, size_t count, double source_gain, double step_c, double step_s)
+static void render_direct_nco(const iq_ci16_t *source_samples, size_t read_count, iq_ci16_t *out, size_t count, double source_gain, double init_c, double init_s, double step_c, double step_s)
 {
     const size_t limit = read_count < count ? read_count : count;
 #if SIM_HAVE_VOLK
@@ -444,7 +453,7 @@ static void render_direct_nco(const iq_ci16_t *source_samples, size_t read_count
             for (size_t i = 0; i < limit; i++) {
                 input[i] = (float)source_samples[i].i + (float)source_samples[i].q * I;
             }
-            lv_32fc_t phase = 1.0f + 0.0f * I;
+            lv_32fc_t phase = (float)init_c + (float)init_s * I;
             const lv_32fc_t phase_inc = (float)step_c + (float)step_s * I;
             volk_32fc_s32fc_x2_rotator2_32fc(rotated, input, &phase_inc, &phase, (unsigned int)limit);
             for (size_t i = 0; i < limit; i++) {
@@ -459,14 +468,19 @@ static void render_direct_nco(const iq_ci16_t *source_samples, size_t read_count
         volk_free(input);
     }
 #endif
-    double osc_c = 1.0;
-    double osc_s = 0.0;
+    double osc_c = init_c;
+    double osc_s = init_s;
     for (size_t i = 0; i < limit; i++) {
         mix_accumulate_sample(out, i, (double)source_samples[i].i, (double)source_samples[i].q, source_gain, osc_c, osc_s);
         const double next_c = osc_c * step_c - osc_s * step_s;
         const double next_s = osc_s * step_c + osc_c * step_s;
         osc_c = next_c;
         osc_s = next_s;
+        if ((i & 0xffU) == 0xffU) {
+            const double inv = 1.0 / sqrt(osc_c * osc_c + osc_s * osc_s);
+            osc_c *= inv;
+            osc_s *= inv;
+        }
     }
 }
 
@@ -512,7 +526,7 @@ static void render_resampled_baseband(const iq_ci16_t *source_samples, size_t re
     }
 }
 
-static void render_resampled_nco(const iq_ci16_t *source_samples, size_t read_count, iq_ci16_t *out, size_t count, double source_gain, double source_per_output, double step_c, double step_s)
+static void render_resampled_nco(const iq_ci16_t *source_samples, size_t read_count, iq_ci16_t *out, size_t count, double source_gain, double source_per_output, double init_c, double init_s, double step_c, double step_s)
 {
     const bool quarter_rate = fabs(source_per_output - 0.25) < 1e-12;
     const bool low_rate_linear = source_per_output > 0.0 && source_per_output <= LOW_RATE_LINEAR_MAX_SOURCE_PER_OUTPUT;
@@ -522,8 +536,8 @@ static void render_resampled_nco(const iq_ci16_t *source_samples, size_t read_co
         const float step_c_f = (float)step_c;
         const float step_s_f = (float)step_s;
         float source_position = 0.0f;
-        float osc_c = 1.0f;
-        float osc_s = 0.0f;
+        float osc_c = (float)init_c;
+        float osc_s = (float)init_s;
         for (size_t i = 0; i < count; i++) {
             if ((size_t)source_position >= read_count) {
                 break;
@@ -539,6 +553,11 @@ static void render_resampled_nco(const iq_ci16_t *source_samples, size_t read_co
             const float next_s = osc_s * step_c_f + osc_c * step_s_f;
             osc_c = next_c;
             osc_s = next_s;
+            if ((i & 0xffU) == 0xffU) {
+                const float inv = 1.0f / sqrtf(osc_c * osc_c + osc_s * osc_s);
+                osc_c *= inv;
+                osc_s *= inv;
+            }
             source_position += source_step;
         }
         return;
@@ -549,8 +568,8 @@ static void render_resampled_nco(const iq_ci16_t *source_samples, size_t read_co
         const float gain_f = (float)source_gain;
         const float step_c_f = (float)step_c;
         const float step_s_f = (float)step_s;
-        float osc_c = 1.0f;
-        float osc_s = 0.0f;
+        float osc_c = (float)init_c;
+        float osc_s = (float)init_s;
         for (size_t i = 0; i < count; i++) {
             const size_t center = i / 4U;
             if (center >= read_count) {
@@ -573,6 +592,11 @@ static void render_resampled_nco(const iq_ci16_t *source_samples, size_t read_co
             const float next_s = osc_s * step_c_f + osc_c * step_s_f;
             osc_c = next_c;
             osc_s = next_s;
+            if ((i & 0xffU) == 0xffU) {
+                const float inv = 1.0f / sqrtf(osc_c * osc_c + osc_s * osc_s);
+                osc_c *= inv;
+                osc_s *= inv;
+            }
         }
         return;
     }
@@ -580,8 +604,8 @@ static void render_resampled_nco(const iq_ci16_t *source_samples, size_t read_co
     if (quarter_rate) {
         build_quarter_phase_weights(quarter_weights);
     }
-    double osc_c = 1.0;
-    double osc_s = 0.0;
+    double osc_c = init_c;
+    double osc_s = init_s;
     for (size_t i = 0; i < count; i++) {
         const double source_position = (double)i * source_per_output;
         if ((size_t)floor(source_position) >= read_count) {
@@ -599,6 +623,11 @@ static void render_resampled_nco(const iq_ci16_t *source_samples, size_t read_co
         const double next_s = osc_s * step_c + osc_c * step_s;
         osc_c = next_c;
         osc_s = next_s;
+        if ((i & 0xffU) == 0xffU) {
+            const double inv = 1.0 / sqrt(osc_c * osc_c + osc_s * osc_s);
+            osc_c *= inv;
+            osc_s *= inv;
+        }
     }
 }
 
@@ -629,6 +658,14 @@ static bool renderer_render_window_block(
                        out,
                        count);
     const double day_s = timebase_day_seconds_from_ns(scenario_time_ns);
+    /* Absolute output-sample index of the first sample in this block. The frequency-shift
+     * phase of every signal is derived from it so the mixer stays phase-continuous across
+     * block boundaries and identical across instances (scenario_time_ns is a grid time).
+     * Rounding (not floor) inverts streamer_block_start_ns() exactly for any output rate
+     * below 500 MHz, so a grid timestamp maps back to its exact block sample index without a
+     * 1-sample boundary glitch. */
+    const uint64_t start_sample =
+        (uint64_t)(((__uint128_t)scenario_time_ns * (uint64_t)output_sample_rate_hz + 500000000ULL) / 1000000000ULL);
 
     for (size_t s = 0; s < scenario->signal_count; s++) {
         const scenario_signal_t *signal = &scenario->signals[s];
@@ -649,6 +686,7 @@ static bool renderer_render_window_block(
                                    sample_offset,
                                    offset_hz,
                                    output_sample_rate_hz,
+                                   start_sample,
                                    source_gain,
                                    out,
                                    count);
@@ -667,14 +705,19 @@ static bool renderer_render_window_block(
         const double phase_step = 2.0 * M_PI * offset_hz / (double)output_sample_rate_hz;
         const double step_c = cos(phase_step);
         const double step_s = sin(phase_step);
+        /* Continuous starting phase for this block, from the absolute output-sample index. */
+        const uint64_t phase_step_q64 = nco_phase_step_q64(offset_hz, (double)output_sample_rate_hz);
+        const double phase0 = nco_phase_rad_at(phase_step_q64, start_sample);
+        const double init_c = cos(phase0);
+        const double init_s = sin(phase0);
         if (source->sample_rate_hz == output_sample_rate_hz && offset_hz == 0.0) {
             render_direct_baseband(source_samples, read_count, out, count, source_gain);
         } else if (source->sample_rate_hz == output_sample_rate_hz) {
-            render_direct_nco(source_samples, read_count, out, count, source_gain, step_c, step_s);
+            render_direct_nco(source_samples, read_count, out, count, source_gain, init_c, init_s, step_c, step_s);
         } else if (offset_hz == 0.0) {
             render_resampled_baseband(source_samples, read_count, out, count, source_gain, source_per_output);
         } else {
-            render_resampled_nco(source_samples, read_count, out, count, source_gain, source_per_output, step_c, step_s);
+            render_resampled_nco(source_samples, read_count, out, count, source_gain, source_per_output, init_c, init_s, step_c, step_s);
         }
         if (stats != NULL) {
             stats->active_signals++;

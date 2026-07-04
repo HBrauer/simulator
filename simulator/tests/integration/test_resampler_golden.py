@@ -73,12 +73,28 @@ def test_80mhz_resampler_matches_python_windowed_sinc_reference():
     asset = _read_ci16(ROOT / "simulator/assets/fsk_20mhz.c16")
     offset = 11059
     source = asset[offset : offset + 8]
+
+    # The mixer phase now derives from the absolute output-sample index (phase-continuous across
+    # blocks), computed in Q0.64 fixed point. Mirror that exactly here.
+    sample_rate = 98_304_000
+    offset_hz = 5_000_000.0
+    two64 = 1 << 64
+    turns = offset_hz / sample_rate
+    turns -= math.floor(turns)
+    step_q64 = int(turns * two64)
+    start_sample = (450000 * sample_rate + 500_000_000) // 1_000_000_000
+    phase0 = ((step_q64 * start_sample) % two64) / two64 * 2.0 * math.pi
+
+    phase_step = 2.0 * math.pi * offset_hz / sample_rate
     expected = []
-    phase_step = 2.0 * math.pi * 5_000_000.0 / 98_304_000.0
     for index in range(8):
         ii, qq = _resample(source, index * 0.25)
-        phase = phase_step * index
+        phase = phase0 + phase_step * index
         rotated_i = ii * math.cos(phase) - qq * math.sin(phase)
         rotated_q = ii * math.sin(phase) + qq * math.cos(phase)
         expected.append((_clip_i16(rotated_i), _clip_i16(rotated_q)))
-    assert actual == expected
+    # Independent float rounding in C vs Python: allow +/-2 LSB per component.
+    assert len(actual) == len(expected)
+    for (ai, aq), (ei, eq) in zip(actual, expected):
+        assert abs(ai - ei) <= 2, f"I: {ai} vs {ei}"
+        assert abs(aq - eq) <= 2, f"Q: {aq} vs {eq}"

@@ -2,11 +2,11 @@
 
 #include <math.h>
 
-void nco_init(nco_t *nco, double frequency_hz, double sample_rate_hz)
-{
-    nco->phase_rad = 0.0;
-    nco->phase_step_rad = 2.0 * M_PI * frequency_hz / sample_rate_hz;
-}
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
+#define NCO_TWO_POW_64 18446744073709551616.0 /* 2^64 */
 
 int16_t sim_clip_i16(double value)
 {
@@ -19,21 +19,23 @@ int16_t sim_clip_i16(double value)
     return (int16_t)lrint(value);
 }
 
-void nco_mix_ci16(const nco_t *initial, const iq_ci16_t *in, iq_ci16_t *out, size_t count, double gain)
+uint64_t nco_phase_step_q64(double frequency_hz, double sample_rate_hz)
 {
-    double phase = initial->phase_rad;
-    for (size_t i = 0; i < count; i++) {
-        const double c = cos(phase);
-        const double s = sin(phase);
-        const double ii = (double)in[i].i;
-        const double qq = (double)in[i].q;
-        out[i].i = sim_clip_i16(gain * (ii * c - qq * s));
-        out[i].q = sim_clip_i16(gain * (ii * s + qq * c));
-        phase += initial->phase_step_rad;
-        if (phase > M_PI) {
-            phase -= 2.0 * M_PI;
-        } else if (phase < -M_PI) {
-            phase += 2.0 * M_PI;
-        }
+    if (!(sample_rate_hz > 0.0)) {
+        return 0;
     }
+    double turns = frequency_hz / sample_rate_hz; /* cycles per sample, any sign/magnitude */
+    turns -= floor(turns);                        /* reduce to [0, 1) turns */
+    double scaled = turns * NCO_TWO_POW_64;
+    if (scaled >= NCO_TWO_POW_64) {
+        scaled = 0.0; /* guard against rounding turns==0.999.. up to exactly 2^64 */
+    }
+    return (uint64_t)scaled;
+}
+
+double nco_phase_rad_at(uint64_t phase_step_q64, uint64_t sample_index)
+{
+    const uint64_t phase_q64 = phase_step_q64 * sample_index; /* wrapping == mod one turn */
+    const double frac = (double)phase_q64 / NCO_TWO_POW_64;   /* [0, 1) turns */
+    return frac * (2.0 * M_PI);
 }
