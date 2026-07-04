@@ -85,10 +85,16 @@ def test_80mhz_resampler_matches_python_windowed_sinc_reference():
     start_sample = (450000 * sample_rate + 500_000_000) // 1_000_000_000
     phase0 = ((step_q64 * start_sample) % two64) / two64 * 2.0 * math.pi
 
+    # Playback starts at the exact fractional source sample: 450000 ns * 24576000 Hz = 11059.2.
+    source_rate = 24_576_000
+    exact = (450000 / 1_000_000_000) * source_rate
+    fraction = exact - math.floor(exact)
+    source_per_output = source_rate / sample_rate
+
     phase_step = 2.0 * math.pi * offset_hz / sample_rate
     expected = []
     for index in range(8):
-        ii, qq = _resample(source, index * 0.25)
+        ii, qq = _resample(source, fraction + index * source_per_output)
         phase = phase0 + phase_step * index
         rotated_i = ii * math.cos(phase) - qq * math.sin(phase)
         rotated_q = ii * math.sin(phase) + qq * math.cos(phase)

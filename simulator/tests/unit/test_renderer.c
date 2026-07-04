@@ -221,12 +221,17 @@ START_TEST(renderer_80mhz_sinc_resamples_24576_source_to_98304_output)
     ck_assert_ptr_nonnull(asset);
     const double gain = 1.0;
     const size_t offset = 11059;
-    ck_assert_int_eq(out[0].i, sinc_scaled_i16(&asset->samples[offset], 8, 0.0, false, gain));
-    ck_assert_int_eq(out[0].q, sinc_scaled_i16(&asset->samples[offset], 8, 0.0, true, gain));
-    ck_assert_int_eq(out[1].i, sinc_scaled_i16(&asset->samples[offset], 8, 0.25, false, gain));
-    ck_assert_int_eq(out[2].i, sinc_scaled_i16(&asset->samples[offset], 8, 0.50, false, gain));
-    ck_assert_int_eq(out[3].i, sinc_scaled_i16(&asset->samples[offset], 8, 0.75, false, gain));
-    ck_assert_int_eq(out[4].i, sinc_scaled_i16(&asset->samples[offset], 8, 1.0, false, gain));
+    /* Playback now starts at the exact fractional sample: 450000 ns * 24576000 Hz = 11059.2,
+     * so the resampler samples at fraction + i*0.25 instead of snapping to sample 11059. */
+    const double base_s = 450000.0 / 1000000000.0;
+    const double exact = base_s * 24576000.0;
+    const double fraction = exact - floor(exact);
+    const double source_per_output = 24576000.0 / 98304000.0;
+    for (size_t i = 0; i < 5; i++) {
+        const double pos = fraction + (double)i * source_per_output;
+        ck_assert_int_le(abs(out[i].i - sinc_scaled_i16(&asset->samples[offset], 8, pos, false, gain)), 2);
+        ck_assert_int_le(abs(out[i].q - sinc_scaled_i16(&asset->samples[offset], 8, pos, true, gain)), 2);
+    }
     asset_cache_free(&cache);
 }
 END_TEST
@@ -311,7 +316,11 @@ START_TEST(renderer_applies_rf_power_relative_to_reference)
     const cached_asset_t *asset = asset_cache_find(&cache, "asset_fsk_001");
     ck_assert_ptr_nonnull(asset);
     const double gain = pow(10.0, 6.0 / 20.0);
-    ck_assert_int_eq(out[0].i, interpolate_scaled_i16(asset->samples[11059].i, asset->samples[11059].i, 0.0, gain));
+    /* +6 dB relative to the reference. Playback starts at the fractional sample 11059.2. */
+    const double base_s = 450000.0 / 1000000000.0;
+    const double exact = base_s * 24576000.0;
+    const double fraction = exact - floor(exact);
+    ck_assert_int_le(abs(out[0].i - sinc_scaled_i16(&asset->samples[11059], 8, fraction, false, gain)), 2);
     asset_cache_free(&cache);
 }
 END_TEST

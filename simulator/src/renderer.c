@@ -275,6 +275,7 @@ static void render_audio_modulated(
     const scenario_source_t *source,
     const cached_asset_t *asset,
     uint64_t sample_offset,
+    double offset_fraction,
     double offset_hz,
     uint32_t output_sample_rate_hz,
     uint64_t start_sample,
@@ -294,7 +295,7 @@ static void render_audio_modulated(
     const double amplitude = 32767.0 * source_gain;
 
     for (size_t i = 0; i < count; i++) {
-        const double audio_position = (double)sample_offset + (double)i * source_per_output;
+        const double audio_position = (double)sample_offset + offset_fraction + (double)i * source_per_output;
         double base_i = 0.0;
         double base_q = 0.0;
 
@@ -484,14 +485,16 @@ static void render_direct_nco(const iq_ci16_t *source_samples, size_t read_count
     }
 }
 
-static void render_resampled_baseband(const iq_ci16_t *source_samples, size_t read_count, iq_ci16_t *out, size_t count, double source_gain, double source_per_output)
+static void render_resampled_baseband(const iq_ci16_t *source_samples, size_t read_count, iq_ci16_t *out, size_t count, double source_gain, double source_per_output, double offset_fraction)
 {
-    const bool quarter_rate = fabs(source_per_output - 0.25) < 1e-12;
+    /* The quarter-rate fast path indexes by output sample, which assumes positions land exactly
+     * on i*0.25 -- only valid when the block starts on an integer source sample. */
+    const bool quarter_rate = fabs(source_per_output - 0.25) < 1e-12 && offset_fraction < 1e-9;
     const bool low_rate_linear = source_per_output > 0.0 && source_per_output <= LOW_RATE_LINEAR_MAX_SOURCE_PER_OUTPUT;
     if (low_rate_linear) {
         const float gain_f = (float)source_gain;
         const float source_step = (float)source_per_output;
-        float source_position = 0.0f;
+        float source_position = (float)offset_fraction;
         for (size_t i = 0; i < count; i++) {
             if ((size_t)source_position >= read_count) {
                 break;
@@ -510,7 +513,7 @@ static void render_resampled_baseband(const iq_ci16_t *source_samples, size_t re
         build_quarter_phase_weights(quarter_weights);
     }
     for (size_t i = 0; i < count; i++) {
-        const double source_position = (double)i * source_per_output;
+        const double source_position = offset_fraction + (double)i * source_per_output;
         if ((size_t)floor(source_position) >= read_count) {
             break;
         }
@@ -526,16 +529,18 @@ static void render_resampled_baseband(const iq_ci16_t *source_samples, size_t re
     }
 }
 
-static void render_resampled_nco(const iq_ci16_t *source_samples, size_t read_count, iq_ci16_t *out, size_t count, double source_gain, double source_per_output, double init_c, double init_s, double step_c, double step_s)
+static void render_resampled_nco(const iq_ci16_t *source_samples, size_t read_count, iq_ci16_t *out, size_t count, double source_gain, double source_per_output, double offset_fraction, double init_c, double init_s, double step_c, double step_s)
 {
-    const bool quarter_rate = fabs(source_per_output - 0.25) < 1e-12;
+    /* The quarter-rate fast path indexes by output sample, valid only when the block starts on
+     * an integer source sample (see render_resampled_baseband). */
+    const bool quarter_rate = fabs(source_per_output - 0.25) < 1e-12 && offset_fraction < 1e-9;
     const bool low_rate_linear = source_per_output > 0.0 && source_per_output <= LOW_RATE_LINEAR_MAX_SOURCE_PER_OUTPUT;
     if (low_rate_linear) {
         const float gain_f = (float)source_gain;
         const float source_step = (float)source_per_output;
         const float step_c_f = (float)step_c;
         const float step_s_f = (float)step_s;
-        float source_position = 0.0f;
+        float source_position = (float)offset_fraction;
         float osc_c = (float)init_c;
         float osc_s = (float)init_s;
         for (size_t i = 0; i < count; i++) {
@@ -607,7 +612,7 @@ static void render_resampled_nco(const iq_ci16_t *source_samples, size_t read_co
     double osc_c = init_c;
     double osc_s = init_s;
     for (size_t i = 0; i < count; i++) {
-        const double source_position = (double)i * source_per_output;
+        const double source_position = offset_fraction + (double)i * source_per_output;
         if ((size_t)floor(source_position) >= read_count) {
             break;
         }
@@ -673,7 +678,8 @@ static bool renderer_render_window_block(
         const cached_asset_t *asset = asset_cache_find(cache, signal->source_reference);
         const double passband_gain = signal_passband_gain(signal->center_frequency_hz, signal->bandwidth_hz, window_center_hz, window_bandwidth_hz);
         uint64_t sample_offset = 0;
-        if (source == NULL || asset == NULL || passband_gain <= 0.0 || !iq_signal_active(signal, source, day_s, &sample_offset)) {
+        double offset_fraction = 0.0;
+        if (source == NULL || asset == NULL || passband_gain <= 0.0 || !iq_signal_active(signal, source, day_s, &sample_offset, &offset_fraction)) {
             continue;
         }
 
@@ -684,6 +690,7 @@ static bool renderer_render_window_block(
                                    source,
                                    asset,
                                    sample_offset,
+                                   offset_fraction,
                                    offset_hz,
                                    output_sample_rate_hz,
                                    start_sample,
@@ -710,14 +717,18 @@ static bool renderer_render_window_block(
         const double phase0 = nco_phase_rad_at(phase_step_q64, start_sample);
         const double init_c = cos(phase0);
         const double init_s = sin(phase0);
-        if (source->sample_rate_hz == output_sample_rate_hz && offset_hz == 0.0) {
+        /* A nonzero fractional playback position means the block does not start on an integer
+         * source sample, so the direct (integer-aligned) paths can't represent it -- fall back
+         * to the resampler, which starts at the exact fractional position. */
+        const bool integer_aligned = offset_fraction < 1e-9;
+        if (source->sample_rate_hz == output_sample_rate_hz && offset_hz == 0.0 && integer_aligned) {
             render_direct_baseband(source_samples, read_count, out, count, source_gain);
-        } else if (source->sample_rate_hz == output_sample_rate_hz) {
+        } else if (source->sample_rate_hz == output_sample_rate_hz && integer_aligned) {
             render_direct_nco(source_samples, read_count, out, count, source_gain, init_c, init_s, step_c, step_s);
         } else if (offset_hz == 0.0) {
-            render_resampled_baseband(source_samples, read_count, out, count, source_gain, source_per_output);
+            render_resampled_baseband(source_samples, read_count, out, count, source_gain, source_per_output, offset_fraction);
         } else {
-            render_resampled_nco(source_samples, read_count, out, count, source_gain, source_per_output, init_c, init_s, step_c, step_s);
+            render_resampled_nco(source_samples, read_count, out, count, source_gain, source_per_output, offset_fraction, init_c, init_s, step_c, step_s);
         }
         if (stats != NULL) {
             stats->active_signals++;

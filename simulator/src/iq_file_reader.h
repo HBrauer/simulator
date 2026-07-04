@@ -14,6 +14,10 @@ typedef struct {
 bool iq_file_reader_open(iq_file_reader_t *reader, const char *path, uint64_t declared_sample_count, char *error, size_t error_size);
 void iq_file_reader_close(iq_file_reader_t *reader);
 bool iq_file_reader_read(iq_file_reader_t *reader, uint64_t sample_offset, iq_ci16_t *out, size_t count, size_t *read_count);
-bool iq_signal_active(const scenario_signal_t *signal, const scenario_source_t *source, double day_time_s, uint64_t *sample_offset);
+/* Reports whether a signal is playing at the given time-of-day. On success returns the source
+ * playback position split into an integer *sample_offset and a [0,1) *offset_fraction, so the
+ * renderer can start the resampler at the exact fractional sample and avoid per-block timing
+ * jitter. offset_fraction may be NULL if the caller does not need the fractional part. */
+bool iq_signal_active(const scenario_signal_t *signal, const scenario_source_t *source, double day_time_s, uint64_t *sample_offset, double *offset_fraction);
 
 #endif

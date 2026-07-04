@@ -61,8 +61,11 @@ bool iq_file_reader_read(iq_file_reader_t *reader, uint64_t sample_offset, iq_ci
     return *read_count == wanted;
 }
 
-bool iq_signal_active(const scenario_signal_t *signal, const scenario_source_t *source, double day_time_s, uint64_t *sample_offset)
+bool iq_signal_active(const scenario_signal_t *signal, const scenario_source_t *source, double day_time_s, uint64_t *sample_offset, double *offset_fraction)
 {
+    if (offset_fraction != NULL) {
+        *offset_fraction = 0.0;
+    }
     if (signal->repeat_interval_s <= 0.0 || source->sample_rate_hz == 0 || source->sample_count == 0) {
         return false;
     }
@@ -75,9 +78,14 @@ bool iq_signal_active(const scenario_signal_t *signal, const scenario_source_t *
     if (occurrence_elapsed < 0.0 || occurrence_elapsed >= file_duration_s) {
         return false;
     }
-    *sample_offset = (uint64_t)floor(occurrence_elapsed * (double)source->sample_rate_hz);
+    const double exact_position = occurrence_elapsed * (double)source->sample_rate_hz;
+    const double integer_position = floor(exact_position);
+    *sample_offset = (uint64_t)integer_position;
     if (*sample_offset >= source->sample_count) {
         return false;
+    }
+    if (offset_fraction != NULL) {
+        *offset_fraction = exact_position - integer_position;
     }
     return true;
 }
