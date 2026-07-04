@@ -113,7 +113,9 @@ typedef struct {
 
 typedef struct {
     bool enabled;
-    double power_dbm;
+    bool use_density;         /* true: power_dbm_per_hz is set; false: legacy total power_dbm */
+    double power_dbm;         /* legacy: total noise power in the window */
+    double power_dbm_per_hz;  /* preferred: noise power spectral density */
     uint64_t seed;
 } scenario_noise_floor_t;
 

@@ -577,6 +577,62 @@ START_TEST(renderer_adds_deterministic_noise_floor_without_active_signals)
 }
 END_TEST
 
+static double measure_noise_rms(uint64_t window_bw_hz, double density_dbm_per_hz, double ref_dbm)
+{
+    scenario_t scenario;
+    memset(&scenario, 0, sizeof(scenario));
+    scenario.schema_version = 1;
+    scenario.noise_floor.enabled = true;
+    scenario.noise_floor.use_density = true;
+    scenario.noise_floor.power_dbm_per_hz = density_dbm_per_hz;
+    scenario.noise_floor.seed = 42;
+    asset_cache_t cache;
+    memset(&cache, 0, sizeof(cache));
+
+    ddc_config_t ddc = {
+        .id = 0,
+        .center_frequency_hz = 10000000000ULL,
+        .bandwidth_hz = (uint32_t)window_bw_hz,
+        .sample_rate_hz = 4000000U,
+        .output_scale = 1.0,
+        .rf_reference_power_dbm = ref_dbm,
+    };
+    /* Average power over several blocks (different pool slices) to shrink statistical error. */
+    double power = 0.0;
+    size_t total = 0;
+    iq_ci16_t out[2048];
+    render_stats_t stats;
+    for (uint64_t b = 0; b < 16; b++) {
+        const uint64_t t = 1000000ULL + b * 700000ULL;
+        ck_assert(renderer_render_ddc_block(&scenario, &cache, &ddc, t, out, 2048, &stats));
+        for (size_t i = 0; i < 2048; i++) {
+            power += (double)out[i].i * out[i].i + (double)out[i].q * out[i].q;
+            total++;
+        }
+    }
+    return sqrt(power / (double)total / 2.0); /* per-component RMS */
+}
+
+START_TEST(renderer_noise_scales_with_window_bandwidth_as_density)
+{
+    /* Noise specified as a density: total power = density + 10*log10(bandwidth), so the RMS must
+     * track the window bandwidth. A 1 MHz window carries 10*log10(1e6/25e3) ~= 16 dB more noise
+     * power (a factor sqrt(40) ~= 6.32 in amplitude) than a 25 kHz window. */
+    const double ref = -70.0;
+    const double density = -140.0;
+    const double rms_wide = measure_noise_rms(1000000ULL, density, ref);
+    const double rms_narrow = measure_noise_rms(25000ULL, density, ref);
+
+    const double expected_amp_wide = 32767.0 * pow(10.0, (density + 10.0 * log10(1000000.0) - ref) / 20.0);
+    const double expected_amp_narrow = 32767.0 * pow(10.0, (density + 10.0 * log10(25000.0) - ref) / 20.0);
+
+    /* Absolute level within 0.3 dB, and the wide/narrow ratio matches sqrt(bw ratio). */
+    ck_assert(fabs(20.0 * log10(rms_wide / expected_amp_wide)) < 0.3);
+    ck_assert(fabs(20.0 * log10(rms_narrow / expected_amp_narrow)) < 0.3);
+    ck_assert(fabs(20.0 * log10((rms_wide / rms_narrow) / sqrt(1000000.0 / 25000.0))) < 0.3);
+}
+END_TEST
+
 START_TEST(renderer_renders_audio_modulation_modes)
 {
     scenario_t scenario;
@@ -865,6 +921,7 @@ Suite *renderer_suite(void)
     tcase_add_test(tc, renders_ddc_nonzero_visible_signal);
     tcase_add_test(tc, renders_ddc_4096_sample_block_for_waterfall);
     tcase_add_test(tc, renderer_adds_deterministic_noise_floor_without_active_signals);
+    tcase_add_test(tc, renderer_noise_scales_with_window_bandwidth_as_density);
     tcase_add_test(tc, renderer_renders_audio_modulation_modes);
     tcase_add_test(tc, renders_burst_scenario_only_during_active_second);
     tcase_add_test(tc, renderer_applies_window_passband_gain);

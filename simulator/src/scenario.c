@@ -114,11 +114,19 @@ bool scenario_load_json(const char *path, scenario_t *scenario, char *error, siz
         json_t *enabled = json_object_get(noise, "enabled");
         scenario->noise_floor.enabled = enabled == NULL ? true : json_is_true(enabled);
         if (scenario->noise_floor.enabled) {
-            if (!get_json_double(noise, "power_dbm", &scenario->noise_floor.power_dbm)) {
+            const bool has_density = get_json_double(noise, "power_dbm_per_hz", &scenario->noise_floor.power_dbm_per_hz);
+            const bool has_total = get_json_double(noise, "power_dbm", &scenario->noise_floor.power_dbm);
+            if (has_density && has_total) {
+                json_decref(root);
+                snprintf(error, error_size, "noise_floor_conflicting_power");
+                return false;
+            }
+            if (!has_density && !has_total) {
                 json_decref(root);
                 snprintf(error, error_size, "noise_floor_invalid");
                 return false;
             }
+            scenario->noise_floor.use_density = has_density;
             if (!get_json_u64(noise, "seed", &scenario->noise_floor.seed)) {
                 scenario->noise_floor.seed = 1ULL;
             }
@@ -224,9 +232,13 @@ const scenario_source_t *scenario_find_source(const scenario_t *scenario, const 
 bool scenario_validate(scenario_t *scenario, const char *base_dir, char *error, size_t error_size)
 {
     (void)base_dir;
-    if (scenario->noise_floor.enabled && !isfinite(scenario->noise_floor.power_dbm)) {
-        snprintf(error, error_size, "noise_floor_invalid");
-        return false;
+    if (scenario->noise_floor.enabled) {
+        const double level = scenario->noise_floor.use_density ? scenario->noise_floor.power_dbm_per_hz
+                                                               : scenario->noise_floor.power_dbm;
+        if (!isfinite(level)) {
+            snprintf(error, error_size, "noise_floor_invalid");
+            return false;
+        }
     }
     for (size_t i = 0; i < scenario->source_count; i++) {
         scenario_source_t *source = &scenario->sources[i];

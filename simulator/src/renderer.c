@@ -364,32 +364,28 @@ static uint64_t splitmix64(uint64_t x)
     return x ^ (x >> 31U);
 }
 
-static uint32_t xorshift32_next(uint32_t *state)
-{
-    uint32_t x = *state;
-    x ^= x << 13U;
-    x ^= x >> 17U;
-    x ^= x << 5U;
-    *state = x;
-    return x;
-}
+/* Precomputed reservoir of unit-variance Gaussian noise (interleaved I/Q). It is generated once
+ * with a fixed internal seed; the scenario seed only chooses which slice each block reads, so
+ * the noise is white, has the correct crest factor (unlike the old uniform noise, whose RMS ran
+ * ~4.8 dB below the configured power), costs almost nothing per block, and is identical across
+ * instances with the same scenario seed. */
+#define NOISE_POOL_SAMPLES (1U << 20) /* 1,048,576 complex samples */
+static float g_noise_pool[2U * NOISE_POOL_SAMPLES];
+static pthread_once_t g_noise_once = PTHREAD_ONCE_INIT;
 
-static int16_t clip_i32_to_i16(int32_t value)
+static void init_noise_pool(void)
 {
-    if (value > 32767) {
-        return 32767;
+    uint64_t state = 0x1234567890abcdefULL;
+    for (size_t i = 0; i < 2U * NOISE_POOL_SAMPLES; i++) {
+        /* Irwin-Hall: sum of 12 uniforms in [0,1) minus 6 has unit variance and is close to
+         * Gaussian -- a far better noise-floor crest factor than a single uniform. */
+        double acc = 0.0;
+        for (int k = 0; k < 12; k++) {
+            state = splitmix64(state);
+            acc += (double)(state >> 11) * (1.0 / 9007199254740992.0); /* [0,1) */
+        }
+        g_noise_pool[i] = (float)(acc - 6.0);
     }
-    if (value < -32768) {
-        return -32768;
-    }
-    return (int16_t)value;
-}
-
-static int16_t scale_noise_i16(int32_t raw, int32_t amplitude)
-{
-    int64_t scaled = (int64_t)raw * (int64_t)amplitude;
-    scaled += scaled >= 0 ? 16384 : -16384;
-    return clip_i32_to_i16((int32_t)(scaled / 32768));
 }
 
 static void render_noise_floor(
@@ -407,33 +403,35 @@ static void render_noise_floor(
         return;
     }
 
-    const double amplitude_dbfs =
-        32767.0 * output_scale * pow(10.0, (scenario->noise_floor.power_dbm - rf_reference_power_dbm) / 20.0);
-    if (amplitude_dbfs <= 0.0) {
+    /* Target RMS amplitude of each I/Q component in ci16 counts. In density mode the total
+     * in-window power is (density + 10*log10(window_bandwidth)); in legacy mode it is the total
+     * power directly. Because the pool is unit-RMS, the amplitude is exactly the RMS -- no
+     * distribution-dependent correction is needed. */
+    double power_dbm = scenario->noise_floor.power_dbm;
+    if (scenario->noise_floor.use_density) {
+        const double bandwidth = window_bandwidth_hz > 0U ? (double)window_bandwidth_hz : 1.0;
+        power_dbm = scenario->noise_floor.power_dbm_per_hz + 10.0 * log10(bandwidth);
+    }
+    const double amplitude = 32767.0 * output_scale * pow(10.0, (power_dbm - rf_reference_power_dbm) / 20.0);
+    if (!(amplitude > 0.0)) {
         return;
     }
-    int32_t amplitude = (int32_t)lrint(amplitude_dbfs);
-    if (amplitude <= 0) {
-        return;
-    }
-    if (amplitude > 32767) {
-        amplitude = 32767;
-    }
+
+    pthread_once(&g_noise_once, init_noise_pool);
 
     const uint64_t sample_index = sample_index_from_time_ns(scenario_time_ns, output_sample_rate_hz);
-    const uint64_t seed = splitmix64(scenario->noise_floor.seed) ^ splitmix64(sample_index) ^
+    const uint64_t block_index = count > 0 ? sample_index / (uint64_t)count : sample_index;
+    const uint64_t hash = splitmix64(scenario->noise_floor.seed) ^ splitmix64(block_index) ^
                           splitmix64(window_center_hz) ^ splitmix64(window_bandwidth_hz);
-    uint32_t state = (uint32_t)(seed ^ (seed >> 32U));
-    if (state == 0U) {
-        state = 0x6d2b79f5U;
-    }
+    /* Read a contiguous slice; keep it inside the pool so no bounds check is needed per sample. */
+    const uint64_t max_offset = NOISE_POOL_SAMPLES - (count < NOISE_POOL_SAMPLES ? count : NOISE_POOL_SAMPLES);
+    const size_t offset = max_offset > 0 ? (size_t)(hash % (max_offset + 1U)) : 0U;
+    const float amp_f = (float)amplitude;
 
-    /* Noise is written first into a zeroed bus, so a plain add is an assignment. */
-    for (size_t i = 0; i < count; i++) {
-        const int32_t raw_i = (int32_t)(xorshift32_next(&state) & 0xffffU) - 32768;
-        const int32_t raw_q = (int32_t)(xorshift32_next(&state) & 0xffffU) - 32768;
-        bus[2U * i] += (float)scale_noise_i16(raw_i, amplitude);
-        bus[2U * i + 1U] += (float)scale_noise_i16(raw_q, amplitude);
+    const size_t n = count < NOISE_POOL_SAMPLES ? count : NOISE_POOL_SAMPLES;
+    for (size_t i = 0; i < n; i++) {
+        bus[2U * i] += amp_f * g_noise_pool[2U * (offset + i)];
+        bus[2U * i + 1U] += amp_f * g_noise_pool[2U * (offset + i) + 1U];
     }
 }
 

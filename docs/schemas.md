@@ -107,6 +107,17 @@ Signal fields:
 | `start_time_s` | number | yes | Scenario start time for playback. |
 | `repeat_interval_s` | number | yes | Must be positive enough to repeat the source without invalid wrapping. |
 
+Optional `noise_floor` object:
+
+| Field | Type | Required | Notes |
+| --- | --- | --- | --- |
+| `enabled` | bool | no | Defaults to `true` when the object is present. |
+| `power_dbm_per_hz` | number | one of | Preferred. Noise power spectral **density**. In-window power is `power_dbm_per_hz + 10*log10(window_bandwidth_hz)`, so a narrow DDC and the wide stream carry the same density (constant dBm/Hz) rather than the same total power. |
+| `power_dbm` | number | one of | Legacy. Total noise power in the window, independent of bandwidth. Kept for backward compatibility; prefer `power_dbm_per_hz`. |
+| `seed` | integer | no | Selects the noise realization. Same seed + same scenario time yields identical noise across instances. Defaults to `1`. |
+
+Exactly one of `power_dbm_per_hz` or `power_dbm` must be given when the noise floor is enabled; specifying both is an error (`noise_floor_conflicting_power`). The noise is Gaussian with unit crest factor, so the produced RMS matches the configured level (the earlier uniform noise ran ~4.8 dB low).
+
 Validation error codes include:
 
 - `scenario_invalid`
@@ -122,3 +133,5 @@ Validation error codes include:
 - `duplicate_signal_id`
 - `missing_source_reference`
 - `signal_repeat_too_short`
+- `noise_floor_invalid`
+- `noise_floor_conflicting_power`
