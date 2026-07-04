@@ -756,6 +756,60 @@ START_TEST(nco_phase_is_continuous_across_block_boundaries)
 }
 END_TEST
 
+static double render_decimated_tone_power(double tone_cycles_per_source_sample)
+{
+    /* Source at 4x the output rate carrying a complex tone; render at offset 0 (decimate by 4)
+     * and return the mean output power. A tone below the output Nyquist should pass; one above
+     * it must be attenuated by the anti-alias kernel instead of folding back at full power. */
+    enum { SRC = 2048, OUT = 256 };
+    static iq_ci16_t src[SRC];
+    for (size_t n = 0; n < SRC; n++) {
+        const double phase = 2.0 * M_PI * tone_cycles_per_source_sample * (double)n;
+        src[n].i = (int16_t)lrint(10000.0 * cos(phase));
+        src[n].q = (int16_t)lrint(10000.0 * sin(phase));
+    }
+    scenario_t scenario;
+    asset_cache_t cache;
+    iq_ci16_t dummy[8];
+    setup_constant_signal(&scenario, &cache, dummy, 10000000000ULL);
+    scenario.sources[0].sample_rate_hz = 4000000;
+    scenario.sources[0].sample_count = SRC;
+    scenario.signals[0].bandwidth_hz = 2000000;
+    cache.assets[0].sample_count = SRC;
+    cache.assets[0].samples = src;
+
+    const receiver_config_t receiver = {
+        .id = 0,
+        .frequency_start_hz = 9999500000ULL,
+        .frequency_stop_hz = 10000500000ULL,
+        .bandwidth_hz = 1000000,
+        .sample_rate_hz = 1000000, /* source_per_output = 4 */
+        .output_scale = 1.0,
+        .rf_reference_power_dbm = -40.0,
+    };
+    iq_ci16_t out[OUT];
+    render_stats_t stats;
+    ck_assert(renderer_render_80mhz_block(&scenario, &cache, &receiver, 0, out, OUT, &stats));
+    ck_assert_uint_eq(stats.active_signals, 1);
+    double power = 0.0;
+    for (size_t i = 0; i < OUT; i++) {
+        power += (double)out[i].i * out[i].i + (double)out[i].q * out[i].q;
+    }
+    return power / (double)OUT;
+}
+
+START_TEST(renderer_decimation_attenuates_out_of_band_tone)
+{
+    /* Output Nyquist is 0.125 cycles/source-sample. 0.03 is in band; 0.4 is far out of band. */
+    const double in_band = render_decimated_tone_power(0.03);
+    const double out_of_band = render_decimated_tone_power(0.4);
+    ck_assert(in_band > 1.0e6); /* the passband tone survives with substantial power */
+    /* Without the decimation-aware cutoff the out-of-band tone would alias back at nearly full
+     * power (ratio ~1). The band-limited kernel must push it well down. */
+    ck_assert(out_of_band < in_band * 0.05);
+}
+END_TEST
+
 START_TEST(renderer_skips_signal_beyond_output_nyquist)
 {
     /* Wide window (fits the signal, so passband gain > 0) but a low output rate: a signal
@@ -799,6 +853,7 @@ Suite *renderer_suite(void)
     tcase_add_test(tc, nco_phase_is_continuous_across_block_boundaries);
     tcase_add_test(tc, renderer_skips_signal_beyond_output_nyquist);
     tcase_add_test(tc, renderer_mix_bus_clips_once_not_per_signal);
+    tcase_add_test(tc, renderer_decimation_attenuates_out_of_band_tone);
     tcase_add_test(tc, renders_nonzero_visible_signal);
     tcase_add_test(tc, renderer_80mhz_sinc_resamples_24576_source_to_98304_output);
     tcase_add_test(tc, renderer_low_rate_upsample_uses_linear_path);
