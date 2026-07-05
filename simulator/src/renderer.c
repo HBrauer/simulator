@@ -1,3 +1,14 @@
+/* Render model (do not reintroduce wall-clock coupling here):
+ *
+ * A block is rendered for a scenario time that is always a point on the fixed block grid
+ * (see streamer_block_start_ns). From that grid time this file derives the absolute output
+ * sample index of the block, and every time-varying quantity -- each signal's frequency-shift
+ * phase, its source playback position (integer + fraction), and the noise slice -- is a pure
+ * function of that index. Nothing here reads the wall clock. That is what keeps the output
+ * phase-continuous across block boundaries and byte-identical across independent instances.
+ *
+ * All signals and the noise floor accumulate into a wide float mix bus and are saturated to
+ * ci16 exactly once, at the end of the block, so the result is independent of signal order. */
 #include "renderer.h"
 #include "iq_file_reader.h"
 #include "nco.h"

@@ -146,8 +146,37 @@ build/sdr-simulator \
 Expected hash at the current implementation state:
 
 ```text
-9a095096b608ffffb1c17b57c276a6eb3c88f292af80df0038a7f93064389c62
+34ac4515f66233038dc8a2d1f6c225dfe9a8dc8a6ec58fe664cf58565e7935c2
 ```
+
+### Determinism guarantees
+
+Rendered output is a pure function of the scenario, the receiver/DDC configuration, and the
+scenario time. Two instances started with the same configuration produce **byte-identical**
+samples and VITA-49 timestamps for the same block, because:
+
+- Block boundaries are anchored to a fixed grid derived from the time of day using exact
+  integer math (no accumulated-nanosecond drift, even at 96 MS/s).
+- Each signal's frequency-shift phase is derived from the absolute output-sample index, so it is
+  continuous across blocks and identical across instances.
+- Each VITA-49 packet carries the scenario time its samples were rendered for (not the send-time
+  clock).
+- The noise floor is drawn from a fixed reservoir at a slice chosen by the scenario `seed`, so
+  even the noise is reproducible; change the `seed` for a different (still calibrated) realization.
+
+The guarantee holds between configuration changes. A live retune is an external event and takes
+effect within the ring depth (~8 blocks); the in-flight blocks rendered under the old
+configuration are not retroactively changed.
+
+### Streaming configuration
+
+- `stream_cpus` (instance YAML): CPUs to spread the render/UDP threads across, as a comma list
+  and/or ranges, e.g. `"2-7"` or `"0,2,4-6"`. Render and UDP threads are placed on distinct cores.
+  Absent means no pinning. The older single-integer `stream_cpu` still works and maps to a
+  one-element set.
+- `noise_floor.power_dbm_per_hz` (scenario JSON): preferred way to specify the noise floor as a
+  spectral density that scales with window bandwidth. The legacy total-power `power_dbm` is still
+  accepted; see `docs/schemas.md`.
 
 ## Tests
 
