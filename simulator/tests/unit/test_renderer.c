@@ -68,6 +68,75 @@ static bool samples_have_energy(const iq_ci16_t *samples, size_t count)
     return false;
 }
 
+/* Complex-DFT magnitude of a ci16 block at frequency f (Hz). */
+static double dft_bin_mag(const iq_ci16_t *x, size_t n, double f, double fs)
+{
+    double re = 0.0;
+    double im = 0.0;
+    for (size_t t = 0; t < n; t++) {
+        const double th = 2.0 * M_PI * f * (double)t / fs;
+        const double c = cos(th);
+        const double s = sin(th);
+        re += (double)x[t].i * c + (double)x[t].q * s;
+        im += (double)x[t].q * c - (double)x[t].i * s;
+    }
+    return hypot(re, im) / (double)n;
+}
+
+/* Set up a single audio signal, pre-render it with `pp`, and render one output block at out_rate
+ * (signal at window centre, offset 0). Frees the pre-render buffer before returning. */
+static void render_audio_once(scenario_modulation_t mod, uint32_t audio_rate, const float *audio, size_t an,
+                              uint32_t bw, double dev, const prerender_params_t *pp, uint32_t out_rate,
+                              iq_ci16_t *out, size_t n)
+{
+    scenario_t sc;
+    asset_cache_t cache;
+    memset(&sc, 0, sizeof(sc));
+    memset(&cache, 0, sizeof(cache));
+    sc.schema_version = 1;
+    sc.source_count = 1;
+    sc.signal_count = 1;
+    scenario_source_t *src = &sc.sources[0];
+    snprintf(src->id, sizeof(src->id), "%s", "audio");
+    src->source_kind = SCENARIO_SOURCE_AUDIO_FILE;
+    src->sample_rate_hz = audio_rate;
+    src->bandwidth_hz = bw;
+    src->sample_count = an;
+    scenario_signal_t *g = &sc.signals[0];
+    snprintf(g->signal_id, sizeof(g->signal_id), "%s", "sig");
+    snprintf(g->source_reference, sizeof(g->source_reference), "%s", "audio");
+    g->center_frequency_hz = 10000000000ULL;
+    g->bandwidth_hz = bw;
+    g->power_dbm = -40.0;
+    g->modulation = mod;
+    g->fm_deviation_hz = dev;
+    g->am_depth = 0.8;
+    g->repeat_interval_s = 1000.0;
+    cache.asset_count = 1;
+    snprintf(cache.assets[0].source_id, sizeof(cache.assets[0].source_id), "%s", "audio");
+    cache.assets[0].source_kind = SCENARIO_SOURCE_AUDIO_FILE;
+    cache.assets[0].sample_count = an;
+
+    cached_prerender_t pr;
+    char err[128];
+    ck_assert_msg(asset_cache_prerender_from_audio(&pr, audio, an, audio_rate, g, pp, err, sizeof(err)), "%s", err);
+    cache.prerenders[0] = pr;
+
+    const receiver_config_t rx = {
+        .id = 0,
+        .frequency_start_hz = 10000000000ULL - out_rate / 2,
+        .frequency_stop_hz = 10000000000ULL + out_rate / 2,
+        .bandwidth_hz = out_rate,
+        .sample_rate_hz = out_rate,
+        .output_scale = 1.0,
+        .rf_reference_power_dbm = -40.0,
+    };
+    render_stats_t st;
+    ck_assert(renderer_render_80mhz_block(&sc, &cache, &rx, 0, out, n, &st));
+    ck_assert_uint_eq(st.active_signals, 1);
+    free(pr.samples);
+}
+
 static void setup_two_signal_mix(scenario_t *scenario, asset_cache_t *cache, iq_ci16_t *asset_a, iq_ci16_t *asset_b, int16_t a_i, int16_t a_q, int16_t b_i, int16_t b_q)
 {
     memset(scenario, 0, sizeof(*scenario));
@@ -1004,6 +1073,269 @@ START_TEST(renderer_skips_signal_beyond_output_nyquist)
 }
 END_TEST
 
+/* Largest magnitude in the spectrum outside +/-1.5 bins of any listed signal frequency, in dBc
+ * relative to peak_ref. Used to bound resampler images/quantisation spurs in the parity tests. */
+static double max_spur_dbc(const iq_ci16_t *x, size_t n, uint32_t fs, const double *sig_freqs, size_t nsig, double peak_ref)
+{
+    const double bin_hz = (double)fs / (double)n;
+    double worst = 0.0;
+    for (size_t k = 0; k < n; k++) {
+        double f = (double)k * bin_hz;
+        if (f > (double)fs / 2.0) {
+            f -= (double)fs;
+        }
+        bool is_signal = false;
+        for (size_t j = 0; j < nsig; j++) {
+            if (fabs(f - sig_freqs[j]) < 1.5 * bin_hz) {
+                is_signal = true;
+                break;
+            }
+        }
+        if (is_signal) {
+            continue;
+        }
+        const double m = dft_bin_mag(x, n, f, fs);
+        if (m > worst) {
+            worst = m;
+        }
+    }
+    return 20.0 * log10(worst / peak_ref);
+}
+
+START_TEST(renderer_prerender_am_matches_reference_synthesis)
+{
+    /* AT2 parity: render an AM tone via the low-rate pre-render (oversample 2) and via a
+     * pre-render forced to the output rate (== full-rate reference synthesis), then compare
+     * spectra. Carrier and both sidebands within 0.5 dB; no spur above -38 dBc (the 2x-oversample
+     * resampler image floor). */
+    enum { OUT = 480000, AR = 48000, AN = 4096, N = 1200 };
+    const double tone = 4000.0;
+    float audio[AN];
+    for (size_t i = 0; i < AN; i++) {
+        audio[i] = (float)(0.9 * sin(2.0 * M_PI * tone * (double)i / (double)AR));
+    }
+    const prerender_params_t ref_pp = {.oversample = 1e9, .max_rate_hz = OUT}; /* rate == OUT */
+    const prerender_params_t low_pp = {.oversample = 2.0, .max_rate_hz = 4000000U};
+    iq_ci16_t ref[N];
+    iq_ci16_t test[N];
+    render_audio_once(SCENARIO_MODULATION_AM, AR, audio, AN, 12000, 0.0, &ref_pp, OUT, ref, N);
+    render_audio_once(SCENARIO_MODULATION_AM, AR, audio, AN, 12000, 0.0, &low_pp, OUT, test, N);
+
+    const double car_ref = dft_bin_mag(ref, N, 0.0, OUT);
+    const double car_test = dft_bin_mag(test, N, 0.0, OUT);
+    const double sb_ref = dft_bin_mag(ref, N, tone, OUT);
+    const double sb_test = dft_bin_mag(test, N, tone, OUT);
+    ck_assert(fabs(20.0 * log10(car_test / car_ref)) < 0.5);
+    ck_assert(fabs(20.0 * log10(sb_test / sb_ref)) < 0.5);
+
+    const double sig[] = {0.0, tone, -tone};
+    ck_assert(max_spur_dbc(test, N, OUT, sig, 3, car_ref) < -38.0);
+}
+END_TEST
+
+START_TEST(renderer_prerender_ssb_matches_reference_and_rejects_image)
+{
+    /* AT2 + AQ2: SSB tone level within 0.5 dB of the full-rate reference, opposite sideband
+     * rejected (Hilbert-limited ~46 dB), spurs below -38 dBc, for both USB and LSB. */
+    enum { OUT = 480000, AR = 48000, AN = 4096, N = 1200 };
+    const double tone = 4000.0;
+    float audio[AN];
+    for (size_t i = 0; i < AN; i++) {
+        audio[i] = (float)(0.9 * sin(2.0 * M_PI * tone * (double)i / (double)AR));
+    }
+    const prerender_params_t ref_pp = {.oversample = 1e9, .max_rate_hz = OUT};
+    const prerender_params_t low_pp = {.oversample = 2.0, .max_rate_hz = 4000000U};
+    const scenario_modulation_t modes[] = {SCENARIO_MODULATION_USB, SCENARIO_MODULATION_LSB};
+    for (size_t m = 0; m < 2; m++) {
+        const double tone_f = modes[m] == SCENARIO_MODULATION_USB ? tone : -tone;
+        iq_ci16_t ref[N];
+        iq_ci16_t test[N];
+        render_audio_once(modes[m], AR, audio, AN, 6000, 0.0, &ref_pp, OUT, ref, N);
+        render_audio_once(modes[m], AR, audio, AN, 6000, 0.0, &low_pp, OUT, test, N);
+
+        const double tone_ref = dft_bin_mag(ref, N, tone_f, OUT);
+        const double tone_test = dft_bin_mag(test, N, tone_f, OUT);
+        const double image = dft_bin_mag(test, N, -tone_f, OUT);
+        ck_assert(fabs(20.0 * log10(tone_test / tone_ref)) < 0.5);
+        ck_assert(20.0 * log10(tone_test / image) >= 44.0);
+    }
+}
+END_TEST
+
+START_TEST(renderer_wbfm_prerender_demod_recovers_tone)
+{
+    /* AQ1 -- the end-to-end gate proving the rearchitecture preserves FM fidelity: pre-render a
+     * 1 kHz tone as WBFM, render >=16 consecutive grid blocks, channel-filter and FM-demodulate,
+     * and require the recovered tone at >=40 dB SNR with no spectral line at the block rate. */
+    const uint32_t OUT = 3072000U;
+    const uint32_t AR = 192000U; /* tone well-sampled so the audio-integration floor is not the limit */
+    const double TONE = 1000.0;
+    const size_t BLK = 4096;
+    const size_t NBLK = 40; /* >= 16 consecutive grid blocks; longer window tightens the SNR estimate */
+    const size_t N = BLK * NBLK;
+    const size_t AN = (size_t)((double)N * AR / OUT) + 512;
+    float *audio = malloc(AN * sizeof(*audio));
+    ck_assert_ptr_nonnull(audio);
+    for (size_t i = 0; i < AN; i++) {
+        audio[i] = (float)(0.9 * sin(2.0 * M_PI * TONE * (double)i / (double)AR));
+    }
+
+    scenario_t sc;
+    asset_cache_t cache;
+    memset(&sc, 0, sizeof(sc));
+    memset(&cache, 0, sizeof(cache));
+    sc.schema_version = 1;
+    sc.source_count = 1;
+    sc.signal_count = 1;
+    snprintf(sc.sources[0].id, sizeof(sc.sources[0].id), "%s", "audio");
+    sc.sources[0].source_kind = SCENARIO_SOURCE_AUDIO_FILE;
+    sc.sources[0].sample_rate_hz = AR;
+    sc.sources[0].bandwidth_hz = 200000;
+    sc.sources[0].sample_count = AN;
+    snprintf(sc.signals[0].signal_id, sizeof(sc.signals[0].signal_id), "%s", "sig");
+    snprintf(sc.signals[0].source_reference, sizeof(sc.signals[0].source_reference), "%s", "audio");
+    sc.signals[0].center_frequency_hz = 10000000000ULL;
+    sc.signals[0].bandwidth_hz = 200000;
+    sc.signals[0].power_dbm = -40.0;
+    sc.signals[0].modulation = SCENARIO_MODULATION_WBFM;
+    sc.signals[0].fm_deviation_hz = 75000.0;
+    sc.signals[0].repeat_interval_s = 1000.0;
+    cache.asset_count = 1;
+    snprintf(cache.assets[0].source_id, sizeof(cache.assets[0].source_id), "%s", "audio");
+    cache.assets[0].source_kind = SCENARIO_SOURCE_AUDIO_FILE;
+    cache.assets[0].sample_count = AN;
+    cached_prerender_t pr;
+    char err[128];
+    const prerender_params_t low_pp = {.oversample = 2.0, .max_rate_hz = 4000000U};
+    ck_assert_msg(asset_cache_prerender_from_audio(&pr, audio, AN, AR, &sc.signals[0], &low_pp, err, sizeof(err)), "%s", err);
+    cache.prerenders[0] = pr;
+
+    const receiver_config_t rx = {
+        .id = 0,
+        .frequency_start_hz = 10000000000ULL - OUT / 2,
+        .frequency_stop_hz = 10000000000ULL + OUT / 2,
+        .bandwidth_hz = OUT,
+        .sample_rate_hz = OUT,
+        .output_scale = 1.0,
+        .rf_reference_power_dbm = -40.0,
+    };
+    double *re = malloc(N * sizeof(*re));
+    double *im = malloc(N * sizeof(*im));
+    ck_assert(re != NULL && im != NULL);
+    render_stats_t st;
+    for (size_t b = 0; b < NBLK; b++) {
+        iq_ci16_t blk[4096];
+        const uint64_t t = streamer_block_start_ns(b, BLK, OUT);
+        ck_assert(renderer_render_80mhz_block(&sc, &cache, &rx, t, blk, BLK, &st));
+        for (size_t i = 0; i < BLK; i++) {
+            re[b * BLK + i] = (double)blk[i].i;
+            im[b * BLK + i] = (double)blk[i].q;
+        }
+    }
+
+    /* Channel LPF a real receiver applies before demod: 127-tap windowed sinc, cutoff 120 kHz. */
+    enum { TAPS = 127 };
+    double h[TAPS];
+    double hsum = 0.0;
+    const double fc = 120000.0 / (double)OUT;
+    for (int k = 0; k < TAPS; k++) {
+        const int mm = k - TAPS / 2;
+        const double sinc = (mm == 0) ? 2.0 * fc : sin(2.0 * M_PI * fc * mm) / (M_PI * mm);
+        const double win = 0.54 - 0.46 * cos(2.0 * M_PI * k / (TAPS - 1));
+        h[k] = sinc * win;
+        hsum += h[k];
+    }
+    for (int k = 0; k < TAPS; k++) {
+        h[k] /= hsum;
+    }
+
+    double *demod = malloc(N * sizeof(*demod));
+    ck_assert_ptr_nonnull(demod);
+    size_t dn = 0;
+    double prev_re = 0.0;
+    double prev_im = 0.0;
+    bool have_prev = false;
+    for (size_t i = TAPS; i < N - TAPS; i++) {
+        double fr = 0.0;
+        double fi = 0.0;
+        for (int k = 0; k < TAPS; k++) {
+            const size_t j = i - (size_t)(k - TAPS / 2);
+            fr += h[k] * re[j];
+            fi += h[k] * im[j];
+        }
+        if (have_prev && hypot(fr, fi) > 1.0 && hypot(prev_re, prev_im) > 1.0) {
+            /* angle(z * conj(prev)) */
+            const double cr = fr * prev_re + fi * prev_im;
+            const double ci = fi * prev_re - fr * prev_im;
+            demod[dn++] = atan2(ci, cr);
+        }
+        prev_re = fr;
+        prev_im = fi;
+        have_prev = true;
+    }
+
+    double mean = 0.0;
+    for (size_t i = 0; i < dn; i++) {
+        mean += demod[i];
+    }
+    mean /= (double)dn;
+    double cr = 0.0;
+    double ci = 0.0;
+    for (size_t i = 0; i < dn; i++) {
+        demod[i] -= mean;
+        const double th = 2.0 * M_PI * TONE * (double)i / (double)OUT;
+        cr += demod[i] * cos(th);
+        ci += demod[i] * sin(th);
+    }
+    cr *= 2.0 / (double)dn;
+    ci *= 2.0 / (double)dn;
+    const double tone_power = 0.5 * (cr * cr + ci * ci);
+    double resid = 0.0;
+    double br_re = 0.0;
+    double br_im = 0.0;
+    const double block_rate = (double)OUT / (double)BLK;
+    for (size_t i = 0; i < dn; i++) {
+        const double th = 2.0 * M_PI * TONE * (double)i / (double)OUT;
+        const double r = demod[i] - (cr * cos(th) + ci * sin(th));
+        resid += r * r;
+        const double thb = 2.0 * M_PI * block_rate * (double)i / (double)OUT;
+        br_re += r * cos(thb);
+        br_im += r * sin(thb);
+    }
+    resid /= (double)dn;
+    const double snr_db = 10.0 * log10(tone_power / resid);
+    const double br_amp = (2.0 / (double)dn) * sqrt(br_re * br_re + br_im * br_im);
+    const double block_line_power = 0.5 * br_amp * br_amp;
+    const double block_line_dbc = 10.0 * log10(block_line_power / tone_power);
+    ck_assert_msg(snr_db >= 40.0, "WBFM demod SNR %.1f dB < 40 dB", snr_db);
+    ck_assert_msg(block_line_dbc <= -40.0, "block-rate line %.1f dBc > -40 dBc", block_line_dbc);
+
+    free(pr.samples);
+    free(audio);
+    free(re);
+    free(im);
+    free(demod);
+}
+END_TEST
+
+START_TEST(renderer_prerender_audio_is_deterministic)
+{
+    /* AQ4 extended to a pre-rendered audio signal: two independent instances (fresh caches, fresh
+     * pre-render) render the same grid block byte-for-byte identically. */
+    enum { AR = 48000, AN = 2048, N = 512 };
+    float audio[AN];
+    for (size_t i = 0; i < AN; i++) {
+        audio[i] = (float)(0.8 * sin(2.0 * M_PI * 1500.0 * (double)i / (double)AR));
+    }
+    const prerender_params_t pp = {.oversample = 2.0, .max_rate_hz = 4000000U};
+    iq_ci16_t a[N];
+    iq_ci16_t b[N];
+    render_audio_once(SCENARIO_MODULATION_WBFM, AR, audio, AN, 200000, 75000.0, &pp, 3072000U, a, N);
+    render_audio_once(SCENARIO_MODULATION_WBFM, AR, audio, AN, 200000, 75000.0, &pp, 3072000U, b, N);
+    ck_assert_int_eq(memcmp(a, b, sizeof(a)), 0);
+}
+END_TEST
+
 Suite *renderer_suite(void)
 {
     Suite *suite = suite_create("renderer");
@@ -1027,6 +1359,10 @@ Suite *renderer_suite(void)
     tcase_add_test(tc, renderer_renders_audio_modulation_modes);
     tcase_add_test(tc, renderer_am_envelope_is_normalised_and_does_not_over_saturate);
     tcase_add_test(tc, renderer_audio_stops_at_end_of_asset_within_block);
+    tcase_add_test(tc, renderer_prerender_am_matches_reference_synthesis);
+    tcase_add_test(tc, renderer_prerender_ssb_matches_reference_and_rejects_image);
+    tcase_add_test(tc, renderer_wbfm_prerender_demod_recovers_tone);
+    tcase_add_test(tc, renderer_prerender_audio_is_deterministic);
     tcase_add_test(tc, renders_burst_scenario_only_during_active_second);
     tcase_add_test(tc, renderer_applies_window_passband_gain);
     suite_add_tcase(suite, tc);

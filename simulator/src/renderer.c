@@ -70,7 +70,7 @@ static double hann_window(double distance)
  * phase (positional error <= 1/(2*RESAMPLER_PHASES) sample), so the hot path costs RESAMPLER_TAPS
  * MACs instead of ~2*RESAMPLER_TAPS transcendentals. The old hardcoded quarter-rate special case
  * is now just the cutoff==1.0 table with the ratio landing exactly on phases 0/16/32/48. */
-#define RESAMPLER_PHASES 64U
+#define RESAMPLER_PHASES 256U
 #define RESAMPLER_TABLE_CACHE 32U
 
 typedef struct {
