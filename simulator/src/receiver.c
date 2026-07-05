@@ -22,10 +22,12 @@ uint64_t receiver_center_frequency_hz(const receiver_config_t *receiver, uint64_
         return receiver_fixed_center_hz(receiver);
     }
 
+    if (!(receiver->scan_rate_hz_per_s > 0.0)) {
+        return receiver->frequency_start_hz; /* validation rejects this; stay defensive */
+    }
     const double span = (double)(receiver->frequency_stop_hz - receiver->frequency_start_hz);
     const double t = (double)scenario_time_ns / 1000000000.0;
-    const double scan_rate = receiver->scan_rate_hz_per_s > 0.0 ? receiver->scan_rate_hz_per_s : 100000000000.0;
-    const double position = fmod(scan_rate * t, span);
+    const double position = fmod(receiver->scan_rate_hz_per_s * t, span);
     return receiver->frequency_start_hz + (uint64_t)llround(position);
 }
 
@@ -56,6 +58,11 @@ bool receiver_validate(const receiver_config_t *receiver, char *error, size_t er
     }
     if (receiver->output_scale <= 0.0) {
         snprintf(error, error_size, "invalid_output_scale");
+        return false;
+    }
+    /* Scan mode needs a positive sweep rate; fixed mode ignores it. */
+    if (receiver_effective_mode(receiver) == RECEIVER_MODE_SCAN && !(receiver->scan_rate_hz_per_s > 0.0)) {
+        snprintf(error, error_size, "invalid_scan_rate");
         return false;
     }
     for (size_t i = 0; i < SIM_DDC_COUNT; i++) {

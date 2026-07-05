@@ -200,6 +200,26 @@ START_TEST(rejects_invalid_stream_cpu)
 }
 END_TEST
 
+START_TEST(rejects_zero_scan_rate_only_in_scan_mode)
+{
+    /* Scan mode (span > bandwidth) requires a positive scan rate. */
+    receiver_config_t scan = valid_receiver(0, 8100, 50000);
+    scan.frequency_start_hz = 9960000000ULL;
+    scan.frequency_stop_hz = 10060000000ULL; /* 100 MHz span > 80 MHz bandwidth -> scan */
+    scan.scan_rate_hz_per_s = 0.0;
+    char error[128];
+    ck_assert(!receiver_validate(&scan, error, sizeof(error)));
+    ck_assert_str_eq(error, "invalid_scan_rate");
+
+    /* Fixed mode (span <= bandwidth) ignores the scan rate. */
+    receiver_config_t fixed = valid_receiver(0, 8100, 50000);
+    fixed.frequency_start_hz = 9960000000ULL;
+    fixed.frequency_stop_hz = 10040000000ULL; /* 80 MHz span == bandwidth -> fixed */
+    fixed.scan_rate_hz_per_s = 0.0;
+    ck_assert_msg(receiver_validate(&fixed, error, sizeof(error)), "%s", error);
+}
+END_TEST
+
 START_TEST(rejects_duplicate_udp_port_within_receiver)
 {
     simulator_config_t config = {
@@ -266,6 +286,7 @@ Suite *config_suite(void)
     tcase_add_test(tc, legacy_stream_cpu_maps_to_single_element_set);
     tcase_add_test(tc, rejects_invalid_stream_block_samples);
     tcase_add_test(tc, rejects_invalid_stream_cpu);
+    tcase_add_test(tc, rejects_zero_scan_rate_only_in_scan_mode);
     tcase_add_test(tc, rejects_duplicate_udp_port_within_receiver);
     tcase_add_test(tc, rejects_duplicate_ports_across_receivers);
     tcase_add_test(tc, rejects_invalid_output_scale);

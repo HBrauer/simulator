@@ -246,6 +246,32 @@ static void resolve_asset_path(char *file, size_t file_size, const char *base_di
     }
 }
 
+/* Non-fatal sanity warnings (stderr): they never fail validation, so existing scenarios keep
+ * loading, but they flag likely mistakes such as a declared bandwidth that does not match the
+ * source, WBFM narrower than Carson's rule, or a zero AM depth (a bare carrier). */
+static void scenario_warn_signal_bandwidth(const scenario_signal_t *signal, const scenario_source_t *source)
+{
+    if (source->source_kind == SCENARIO_SOURCE_AUDIO_FILE) {
+        const double audio_bw = (double)source->sample_rate_hz / 2.0;
+        if (signal->modulation == SCENARIO_MODULATION_WBFM) {
+            const double carson = 2.0 * (signal->fm_deviation_hz + audio_bw);
+            if ((double)signal->bandwidth_hz < carson) {
+                fprintf(stderr,
+                        "warning: signal %s bandwidth %u Hz is below Carson's rule (~%.0f Hz) for the configured deviation\n",
+                        signal->signal_id, signal->bandwidth_hz, carson);
+            }
+        } else if (signal->modulation == SCENARIO_MODULATION_AM && signal->am_depth == 0.0) {
+            fprintf(stderr, "warning: signal %s is AM with am_depth 0 (unmodulated carrier)\n", signal->signal_id);
+        }
+    } else if (source->source_kind == SCENARIO_SOURCE_IQ_FILE) {
+        if (signal->bandwidth_hz > source->bandwidth_hz && source->bandwidth_hz > 0U) {
+            fprintf(stderr,
+                    "warning: signal %s bandwidth %u Hz exceeds source %s bandwidth %u Hz\n",
+                    signal->signal_id, signal->bandwidth_hz, source->id, source->bandwidth_hz);
+        }
+    }
+}
+
 bool scenario_validate(scenario_t *scenario, const char *base_dir, char *error, size_t error_size)
 {
     if (scenario->noise_floor.enabled) {
@@ -336,6 +362,7 @@ bool scenario_validate(scenario_t *scenario, const char *base_dir, char *error, 
             snprintf(error, error_size, "signal_modulation_invalid");
             return false;
         }
+        scenario_warn_signal_bandwidth(signal, source);
     }
     snprintf(error, error_size, "ok");
     return true;
