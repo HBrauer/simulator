@@ -9,7 +9,7 @@
   },
   "noise_floor": {
     "enabled": true,
-    "power_dbm": -125.0,
+    "power_dbm_per_hz": -160.0,
     "seed": 49152
   },
   "sources": [

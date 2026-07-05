@@ -69,7 +69,8 @@ START_TEST(loads_optional_noise_floor)
     ck_assert_msg(scenario_load_json("simulator/scenarios/burst_1s_every_5s.json", &scenario, error, sizeof(error)), "%s", error);
     ck_assert_msg(scenario_validate(&scenario, ".", error, sizeof(error)), "%s", error);
     ck_assert(scenario.noise_floor.enabled);
-    ck_assert_double_eq_tol(scenario.noise_floor.power_dbm, -125.0, 0.001);
+    ck_assert(scenario.noise_floor.use_density);
+    ck_assert_double_eq_tol(scenario.noise_floor.power_dbm_per_hz, -160.0, 0.001);
     ck_assert_uint_eq(scenario.noise_floor.seed, 49152);
 }
 END_TEST
