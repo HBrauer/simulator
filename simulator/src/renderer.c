@@ -20,6 +20,7 @@
 #include <complex.h>
 #include <math.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -63,46 +64,102 @@ static double hann_window(double distance)
     return 0.5 + 0.5 * cos(M_PI * normalized);
 }
 
-static void build_quarter_phase_weights(double weights[4][RESAMPLER_TAPS])
+/* Polyphase kernel table. For a given anti-alias cutoff we precompute RESAMPLER_PHASES phase
+ * positions x RESAMPLER_TAPS weights from the same sinc(cutoff*d)*hann(d) formula the exact
+ * resampler uses, normalised per phase for unity DC gain. Each output sample selects the nearest
+ * phase (positional error <= 1/(2*RESAMPLER_PHASES) sample), so the hot path costs RESAMPLER_TAPS
+ * MACs instead of ~2*RESAMPLER_TAPS transcendentals. The old hardcoded quarter-rate special case
+ * is now just the cutoff==1.0 table with the ratio landing exactly on phases 0/16/32/48. */
+#define RESAMPLER_PHASES 64U
+#define RESAMPLER_TABLE_CACHE 32U
+
+typedef struct {
+    double cutoff;
+    float w[RESAMPLER_PHASES][RESAMPLER_TAPS];
+} resampler_table_t;
+
+static void build_resampler_table(resampler_table_t *table, double cutoff)
 {
-    for (size_t phase = 0; phase < 4; phase++) {
-        const double fraction = (double)phase * 0.25;
+    table->cutoff = cutoff;
+    for (size_t phase = 0; phase < RESAMPLER_PHASES; phase++) {
+        const double fraction = (double)phase / (double)RESAMPLER_PHASES;
         double weight_sum = 0.0;
         for (size_t tap_index = 0; tap_index < RESAMPLER_TAPS; tap_index++) {
             const int tap = (int)tap_index - RESAMPLER_RADIUS + 1;
             const double distance = fraction - (double)tap;
-            const double weight = sinc_value(distance) * hann_window(distance);
-            weights[phase][tap_index] = weight;
+            const double weight = sinc_value(cutoff * distance) * hann_window(distance);
+            table->w[phase][tap_index] = (float)weight;
             weight_sum += weight;
         }
         if (fabs(weight_sum) >= 1e-12) {
             for (size_t tap_index = 0; tap_index < RESAMPLER_TAPS; tap_index++) {
-                weights[phase][tap_index] /= weight_sum;
+                table->w[phase][tap_index] = (float)((double)table->w[phase][tap_index] / weight_sum);
             }
         }
     }
 }
 
-static void build_quarter_phase_weights_f(float weights[4][RESAMPLER_TAPS])
+/* Tables are pure functions of the cutoff and are built once per distinct ratio into a small
+ * global cache. The fast path is a lock-free scan of already-built entries; the mutex is taken
+ * only to append a new one, so after the first block that uses a ratio the lookup never locks
+ * (satisfies "no locking/table construction on the per-block hot path" once warmed). */
+static resampler_table_t g_resampler_tables[RESAMPLER_TABLE_CACHE];
+static _Atomic size_t g_resampler_table_count = 0;
+static pthread_mutex_t g_resampler_table_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static const resampler_table_t *resampler_table_for_cutoff(double cutoff)
 {
-    double double_weights[4][RESAMPLER_TAPS];
-    build_quarter_phase_weights(double_weights);
-    for (size_t phase = 0; phase < 4; phase++) {
-        for (size_t tap_index = 0; tap_index < RESAMPLER_TAPS; tap_index++) {
-            weights[phase][tap_index] = (float)double_weights[phase][tap_index];
+    size_t count = atomic_load_explicit(&g_resampler_table_count, memory_order_acquire);
+    for (size_t i = 0; i < count; i++) {
+        if (g_resampler_tables[i].cutoff == cutoff) {
+            return &g_resampler_tables[i];
         }
     }
+    pthread_mutex_lock(&g_resampler_table_lock);
+    count = atomic_load_explicit(&g_resampler_table_count, memory_order_relaxed);
+    for (size_t i = 0; i < count; i++) {
+        if (g_resampler_tables[i].cutoff == cutoff) {
+            pthread_mutex_unlock(&g_resampler_table_lock);
+            return &g_resampler_tables[i];
+        }
+    }
+    const resampler_table_t *result = NULL;
+    if (count < RESAMPLER_TABLE_CACHE) {
+        build_resampler_table(&g_resampler_tables[count], cutoff);
+        atomic_store_explicit(&g_resampler_table_count, count + 1, memory_order_release);
+        result = &g_resampler_tables[count];
+    }
+    pthread_mutex_unlock(&g_resampler_table_lock);
+    return result;
 }
 
-/* The quarter-rate (4x upsample) kernels are pure; compute them once instead of per block. */
-static double g_quarter_weights[4][RESAMPLER_TAPS];
-static float g_quarter_weights_f[4][RESAMPLER_TAPS];
-static pthread_once_t g_quarter_once = PTHREAD_ONCE_INIT;
-
-static void init_quarter_weights(void)
+/* Table-driven resample at a fractional source position. Interior positions use the nearest
+ * polyphase kernel; positions whose 8-tap window would run off either end of the buffer fall
+ * back to the exact per-position kernel (which handles partial windows), exactly as the old
+ * quarter-rate path did. */
+static void resample_table_ci16(const iq_ci16_t *samples, size_t sample_count, double source_position, const resampler_table_t *table, double *out_i, double *out_q)
 {
-    build_quarter_phase_weights(g_quarter_weights);
-    build_quarter_phase_weights_f(g_quarter_weights_f);
+    const double center_f = floor(source_position);
+    long phase = lrint((source_position - center_f) * (double)RESAMPLER_PHASES);
+    int64_t center = (int64_t)center_f;
+    if (phase >= (long)RESAMPLER_PHASES) {
+        phase = 0;
+        center += 1;
+    }
+    if (center < RESAMPLER_RADIUS - 1 || (uint64_t)center + RESAMPLER_RADIUS >= sample_count) {
+        resample_ci16(samples, sample_count, source_position, table->cutoff, out_i, out_q);
+        return;
+    }
+    double acc_i = 0.0;
+    double acc_q = 0.0;
+    const float *weights = table->w[phase];
+    for (size_t tap_index = 0; tap_index < RESAMPLER_TAPS; tap_index++) {
+        const int64_t index = center + (int64_t)tap_index - RESAMPLER_RADIUS + 1;
+        acc_i += (double)samples[index].i * (double)weights[tap_index];
+        acc_q += (double)samples[index].q * (double)weights[tap_index];
+    }
+    *out_i = acc_i;
+    *out_q = acc_q;
 }
 
 static int16_t clip_i16_f(float value)
@@ -114,48 +171,6 @@ static int16_t clip_i16_f(float value)
         return -32768;
     }
     return (int16_t)lrintf(value);
-}
-
-static void resample_quarter_ci16(const iq_ci16_t *samples, size_t sample_count, size_t output_index, double weights[4][RESAMPLER_TAPS], double *out_i, double *out_q)
-{
-    const size_t center = output_index / 4U;
-    const size_t phase = output_index & 3U;
-    if (center < RESAMPLER_RADIUS - 1 || center + RESAMPLER_RADIUS >= sample_count) {
-        resample_ci16(samples, sample_count, (double)output_index * 0.25, 1.0, out_i, out_q);
-        return;
-    }
-
-    double acc_i = 0.0;
-    double acc_q = 0.0;
-    for (size_t tap_index = 0; tap_index < RESAMPLER_TAPS; tap_index++) {
-        const size_t index = center + tap_index - RESAMPLER_RADIUS + 1U;
-        const double weight = weights[phase][tap_index];
-        acc_i += (double)samples[index].i * weight;
-        acc_q += (double)samples[index].q * weight;
-    }
-    *out_i = acc_i;
-    *out_q = acc_q;
-}
-
-static bool resample_quarter_ci16_f(const iq_ci16_t *samples, size_t sample_count, size_t output_index, float weights[4][RESAMPLER_TAPS], float *out_i, float *out_q)
-{
-    const size_t center = output_index / 4U;
-    const size_t phase = output_index & 3U;
-    if (center < RESAMPLER_RADIUS - 1 || center + RESAMPLER_RADIUS >= sample_count) {
-        return false;
-    }
-
-    float acc_i = 0.0f;
-    float acc_q = 0.0f;
-    for (size_t tap_index = 0; tap_index < RESAMPLER_TAPS; tap_index++) {
-        const size_t index = center + tap_index - RESAMPLER_RADIUS + 1U;
-        const float weight = weights[phase][tap_index];
-        acc_i += (float)samples[index].i * weight;
-        acc_q += (float)samples[index].q * weight;
-    }
-    *out_i = acc_i;
-    *out_q = acc_q;
-    return true;
 }
 
 #if !SIM_USE_LIQUID_RESAMPLER
@@ -520,12 +535,22 @@ static void render_direct_nco(const iq_ci16_t *source_samples, size_t read_count
     }
 }
 
-static void render_resampled_baseband(const iq_ci16_t *source_samples, size_t read_count, float *bus, size_t count, double source_gain, double source_per_output, double offset_fraction)
+/* Resample one output sample at `source_position`, using the polyphase table when available and
+ * falling back to the exact per-position kernel when the ratio's table could not be cached. */
+static void resample_position(const iq_ci16_t *source_samples, size_t read_count, double source_position, const resampler_table_t *table, double cutoff, double *out_i, double *out_q)
 {
-    /* The quarter-rate fast path indexes by output sample, which assumes positions land exactly
-     * on i*0.25 -- only valid when the block starts on an integer source sample. */
-    const bool quarter_rate = fabs(source_per_output - 0.25) < 1e-12 && offset_fraction < 1e-9;
-    const bool low_rate_linear = source_per_output > 0.0 && source_per_output <= LOW_RATE_LINEAR_MAX_SOURCE_PER_OUTPUT;
+    if (table != NULL) {
+        resample_table_ci16(source_samples, read_count, source_position, table, out_i, out_q);
+    } else {
+        resample_ci16(source_samples, read_count, source_position, cutoff, out_i, out_q);
+    }
+}
+
+static void render_resampled_baseband(const iq_ci16_t *source_samples, size_t read_count, float *bus, size_t count, double source_gain, double source_per_output, double offset_fraction, bool allow_linear)
+{
+    /* Plain IQ files keep the cheap linear shortcut for very low ratios (AR3); pre-rendered audio
+     * disables it because linear image rejection (~-24 dB) is too poor for a modulated carrier. */
+    const bool low_rate_linear = allow_linear && source_per_output > 0.0 && source_per_output <= LOW_RATE_LINEAR_MAX_SOURCE_PER_OUTPUT;
     if (low_rate_linear) {
         const float gain_f = (float)source_gain;
         const float source_step = (float)source_per_output;
@@ -543,10 +568,8 @@ static void render_resampled_baseband(const iq_ci16_t *source_samples, size_t re
         }
         return;
     }
-    if (quarter_rate) {
-        pthread_once(&g_quarter_once, init_quarter_weights);
-    }
     const double cutoff = resampler_cutoff(source_per_output);
+    const resampler_table_t *table = resampler_table_for_cutoff(cutoff);
     for (size_t i = 0; i < count; i++) {
         const double source_position = offset_fraction + (double)i * source_per_output;
         if ((size_t)floor(source_position) >= read_count) {
@@ -554,22 +577,15 @@ static void render_resampled_baseband(const iq_ci16_t *source_samples, size_t re
         }
         double resampled_i = 0.0;
         double resampled_q = 0.0;
-        if (quarter_rate) {
-            resample_quarter_ci16(source_samples, read_count, i, g_quarter_weights, &resampled_i, &resampled_q);
-        } else {
-            resample_ci16(source_samples, read_count, source_position, cutoff, &resampled_i, &resampled_q);
-        }
+        resample_position(source_samples, read_count, source_position, table, cutoff, &resampled_i, &resampled_q);
         bus[2U * i] += (float)(source_gain * resampled_i);
         bus[2U * i + 1U] += (float)(source_gain * resampled_q);
     }
 }
 
-static void render_resampled_nco(const iq_ci16_t *source_samples, size_t read_count, float *bus, size_t count, double source_gain, double source_per_output, double offset_fraction, double init_c, double init_s, double step_c, double step_s)
+static void render_resampled_nco(const iq_ci16_t *source_samples, size_t read_count, float *bus, size_t count, double source_gain, double source_per_output, double offset_fraction, double init_c, double init_s, double step_c, double step_s, bool allow_linear)
 {
-    /* The quarter-rate fast path indexes by output sample, valid only when the block starts on
-     * an integer source sample (see render_resampled_baseband). */
-    const bool quarter_rate = fabs(source_per_output - 0.25) < 1e-12 && offset_fraction < 1e-9;
-    const bool low_rate_linear = source_per_output > 0.0 && source_per_output <= LOW_RATE_LINEAR_MAX_SOURCE_PER_OUTPUT;
+    const bool low_rate_linear = allow_linear && source_per_output > 0.0 && source_per_output <= LOW_RATE_LINEAR_MAX_SOURCE_PER_OUTPUT;
     if (low_rate_linear) {
         const float gain_f = (float)source_gain;
         const float source_step = (float)source_per_output;
@@ -602,49 +618,44 @@ static void render_resampled_nco(const iq_ci16_t *source_samples, size_t read_co
         }
         return;
     }
-    if (quarter_rate && count >= 64) {
-        pthread_once(&g_quarter_once, init_quarter_weights);
-        const float gain_f = (float)source_gain;
-        const float step_c_f = (float)step_c;
-        const float step_s_f = (float)step_s;
-        float osc_c = (float)init_c;
-        float osc_s = (float)init_s;
-        for (size_t i = 0; i < count; i++) {
-            const size_t center = i / 4U;
-            if (center >= read_count) {
+
+    const double cutoff = resampler_cutoff(source_per_output);
+    const resampler_table_t *table = resampler_table_for_cutoff(cutoff);
+
+#if SIM_HAVE_VOLK
+    /* Polyphase-resample the block into aligned float scratch, apply one VOLK rotator pass, then
+     * accumulate. Same scratch/rotator machinery as the direct-NCO path (C2), now fed by the
+     * resampler. Aligned stack scratch capped at the streaming block size; oversized one-shot
+     * renders and near-empty blocks fall through to the scalar loop. */
+    if (count >= 16 && count <= SIM_MAX_STREAM_BLOCK_SAMPLES) {
+        _Alignas(64) lv_32fc_t scratch[SIM_MAX_STREAM_BLOCK_SAMPLES];
+        _Alignas(64) lv_32fc_t rotated[SIM_MAX_STREAM_BLOCK_SAMPLES];
+        size_t valid = 0;
+        for (; valid < count; valid++) {
+            const double source_position = offset_fraction + (double)valid * source_per_output;
+            if ((size_t)floor(source_position) >= read_count) {
                 break;
             }
-            float resampled_i = 0.0f;
-            float resampled_q = 0.0f;
-            if (!resample_quarter_ci16_f(source_samples, read_count, i, g_quarter_weights_f, &resampled_i, &resampled_q)) {
-                double fallback_i = 0.0;
-                double fallback_q = 0.0;
-                resample_ci16(source_samples, read_count, (double)i * 0.25, 1.0, &fallback_i, &fallback_q);
-                resampled_i = (float)fallback_i;
-                resampled_q = (float)fallback_q;
-            }
-            const float ii = gain_f * resampled_i;
-            const float qq = gain_f * resampled_q;
-            bus[2U * i] += ii * osc_c - qq * osc_s;
-            bus[2U * i + 1U] += ii * osc_s + qq * osc_c;
-            const float next_c = osc_c * step_c_f - osc_s * step_s_f;
-            const float next_s = osc_s * step_c_f + osc_c * step_s_f;
-            osc_c = next_c;
-            osc_s = next_s;
-            if ((i & 0xffU) == 0xffU) {
-                const float inv = 1.0f / sqrtf(osc_c * osc_c + osc_s * osc_s);
-                osc_c *= inv;
-                osc_s *= inv;
-            }
+            double resampled_i = 0.0;
+            double resampled_q = 0.0;
+            resample_position(source_samples, read_count, source_position, table, cutoff, &resampled_i, &resampled_q);
+            scratch[valid] = (float)resampled_i + (float)resampled_q * I;
         }
-        return;
+        if (valid >= 16) {
+            lv_32fc_t phase = (float)init_c + (float)init_s * I;
+            const lv_32fc_t phase_inc = (float)step_c + (float)step_s * I;
+            volk_32fc_s32fc_x2_rotator2_32fc(rotated, scratch, &phase_inc, &phase, (unsigned int)valid);
+            const float gain_f = (float)source_gain;
+            for (size_t i = 0; i < valid; i++) {
+                bus[2U * i] += gain_f * crealf(rotated[i]);
+                bus[2U * i + 1U] += gain_f * cimagf(rotated[i]);
+            }
+            return;
+        }
     }
-    if (quarter_rate) {
-        pthread_once(&g_quarter_once, init_quarter_weights);
-    }
+#endif
     double osc_c = init_c;
     double osc_s = init_s;
-    const double cutoff = resampler_cutoff(source_per_output);
     for (size_t i = 0; i < count; i++) {
         const double source_position = offset_fraction + (double)i * source_per_output;
         if ((size_t)floor(source_position) >= read_count) {
@@ -652,11 +663,7 @@ static void render_resampled_nco(const iq_ci16_t *source_samples, size_t read_co
         }
         double resampled_i = 0.0;
         double resampled_q = 0.0;
-        if (quarter_rate) {
-            resample_quarter_ci16(source_samples, read_count, i, g_quarter_weights, &resampled_i, &resampled_q);
-        } else {
-            resample_ci16(source_samples, read_count, source_position, cutoff, &resampled_i, &resampled_q);
-        }
+        resample_position(source_samples, read_count, source_position, table, cutoff, &resampled_i, &resampled_q);
         mix_accumulate_sample(bus, i, resampled_i, resampled_q, source_gain, osc_c, osc_s);
         const double next_c = osc_c * step_c - osc_s * step_s;
         const double next_s = osc_s * step_c + osc_c * step_s;
@@ -791,9 +798,9 @@ static bool renderer_render_window_block(
         } else if (source->sample_rate_hz == output_sample_rate_hz && integer_aligned) {
             render_direct_nco(source_samples, read_count, bus, count, source_gain, init_c, init_s, step_c, step_s);
         } else if (offset_hz == 0.0) {
-            render_resampled_baseband(source_samples, read_count, bus, count, source_gain, source_per_output, offset_fraction);
+            render_resampled_baseband(source_samples, read_count, bus, count, source_gain, source_per_output, offset_fraction, true);
         } else {
-            render_resampled_nco(source_samples, read_count, bus, count, source_gain, source_per_output, offset_fraction, init_c, init_s, step_c, step_s);
+            render_resampled_nco(source_samples, read_count, bus, count, source_gain, source_per_output, offset_fraction, init_c, init_s, step_c, step_s, true);
         }
         if (stats != NULL) {
             stats->active_signals++;
