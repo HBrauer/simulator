@@ -73,6 +73,19 @@ build/sdr-simulator \
   --stream-block-samples 1536
 ```
 
+Each audio-modulated signal is **pre-rendered to complex-baseband IQ once at startup**, at an
+intermediate rate derived from its content bandwidth, and then streamed through the ordinary IQ
+path. This trades memory for a simpler, deterministic hot path: budget roughly `duration_s x
+prerender_rate_hz x 4` bytes per signal (e.g. a 15 s WBFM station at ~400 kHz ≈ 24 MB; AM ≈ 6 MB;
+SSB ≈ 3 MB). The buffers are counted against `asset_cache_max_bytes` and one line per signal is
+logged at startup (id, rate, sample count, MB, synth time). Two optional instance-YAML keys tune
+it:
+
+- `audio_prerender_oversample` (float, default `2.0`, min `1.25`): oversampling factor over the
+  content bandwidth. Higher improves image rejection at a proportional memory cost.
+- `audio_prerender_max_rate_hz` (int, default `4000000`): hard ceiling on the intermediate rate,
+  bounding memory for wide deviations or high audio rates.
+
 ## Run
 
 ```sh
@@ -146,7 +159,7 @@ build/sdr-simulator \
 Expected hash at the current implementation state:
 
 ```text
-34ac4515f66233038dc8a2d1f6c225dfe9a8dc8a6ec58fe664cf58565e7935c2
+81e38ff17713e9a8ef2789d7e42c9eb9bbb38704bce89998f28a4f2efabdf38a
 ```
 
 ### Determinism guarantees

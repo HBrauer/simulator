@@ -133,10 +133,11 @@ static const resampler_table_t *resampler_table_for_cutoff(double cutoff)
     return result;
 }
 
-/* Table-driven resample at a fractional source position. Interior positions use the nearest
- * polyphase kernel; positions whose 8-tap window would run off either end of the buffer fall
- * back to the exact per-position kernel (which handles partial windows), exactly as the old
- * quarter-rate path did. */
+/* Table-driven resample at a fractional source position, using the nearest polyphase kernel.
+ * Interior positions accumulate the full 8-tap window. Positions whose window runs off either end
+ * of the buffer sum only the in-range taps and renormalise by their weight -- still transcendental
+ * -free, which matters because a heavily-upsampled source (e.g. a 400 kHz pre-render into 98 MHz)
+ * spends the first RADIUS/ratio output samples of every block in this edge region. */
 static void resample_table_ci16(const iq_ci16_t *samples, size_t sample_count, double source_position, const resampler_table_t *table, double *out_i, double *out_q)
 {
     const double center_f = floor(source_position);
@@ -146,13 +147,32 @@ static void resample_table_ci16(const iq_ci16_t *samples, size_t sample_count, d
         phase = 0;
         center += 1;
     }
+    const float *weights = table->w[phase];
     if (center < RESAMPLER_RADIUS - 1 || (uint64_t)center + RESAMPLER_RADIUS >= sample_count) {
-        resample_ci16(samples, sample_count, source_position, table->cutoff, out_i, out_q);
+        double acc_i = 0.0;
+        double acc_q = 0.0;
+        double weight_sum = 0.0;
+        for (size_t tap_index = 0; tap_index < RESAMPLER_TAPS; tap_index++) {
+            const int64_t index = center + (int64_t)tap_index - RESAMPLER_RADIUS + 1;
+            if (index < 0 || (uint64_t)index >= sample_count) {
+                continue;
+            }
+            const double weight = (double)weights[tap_index];
+            acc_i += (double)samples[index].i * weight;
+            acc_q += (double)samples[index].q * weight;
+            weight_sum += weight;
+        }
+        if (fabs(weight_sum) < 1e-12) {
+            *out_i = 0.0;
+            *out_q = 0.0;
+            return;
+        }
+        *out_i = acc_i / weight_sum;
+        *out_q = acc_q / weight_sum;
         return;
     }
     double acc_i = 0.0;
     double acc_q = 0.0;
-    const float *weights = table->w[phase];
     for (size_t tap_index = 0; tap_index < RESAMPLER_TAPS; tap_index++) {
         const int64_t index = center + (int64_t)tap_index - RESAMPLER_RADIUS + 1;
         acc_i += (double)samples[index].i * (double)weights[tap_index];
@@ -458,6 +478,59 @@ static void resample_position(const iq_ci16_t *source_samples, size_t read_count
     }
 }
 
+#if SIM_HAVE_VOLK
+/* Polyphase-resample a whole block into interleaved float scratch (lv_32fc_t) and return the count
+ * of valid output samples (the source is exhausted beyond that). The interior -- where the full
+ * 8-tap window fits -- uses a branch-free single-precision dot product against the phase's float
+ * kernel, which is what makes a heavily-upsampled source (e.g. a 400 kHz pre-render into 98 MHz,
+ * one resample per output sample) cheap; buffer-edge positions fall back to the exact per-position
+ * path. */
+static size_t fill_scratch_polyphase(const iq_ci16_t *samples, size_t read_count, size_t count, double source_per_output, double offset_fraction, const resampler_table_t *table, double cutoff, lv_32fc_t *scratch)
+{
+    /* Interior samples advance the source position with a Q32.32 fixed-point accumulator, so the
+     * integer sample index and the RESAMPLER_PHASES-quantised phase come out as a shift and a mask
+     * instead of a floor()/lrint()/double-multiply per output sample -- the dominant cost when a
+     * narrowband source is upsampled far (one resample per wideband output sample). */
+    const uint64_t POS_ONE = 1ULL << 32U;
+    const uint64_t step_q = (uint64_t)llround(source_per_output * (double)POS_ONE);
+    uint64_t pos_q = (uint64_t)llround(offset_fraction * (double)POS_ONE);
+    size_t valid = 0;
+    for (; valid < count; valid++, pos_q += step_q) {
+        uint64_t center = pos_q >> 32U;
+        if (center >= read_count) {
+            break;
+        }
+        if (table != NULL) {
+            /* Round the 32-bit fraction to the nearest of RESAMPLER_PHASES phases, carrying into
+             * the integer index when it rounds up to a full sample. */
+            uint64_t phase = ((pos_q & 0xffffffffULL) * RESAMPLER_PHASES + (1ULL << 31U)) >> 32U;
+            if (phase >= RESAMPLER_PHASES) {
+                phase = 0;
+                center += 1;
+            }
+            if (center >= (uint64_t)(RESAMPLER_RADIUS - 1) && center + RESAMPLER_RADIUS < read_count) {
+                const float *weights = table->w[phase];
+                const iq_ci16_t *window = &samples[center - RESAMPLER_RADIUS + 1];
+                float acc_i = 0.0f;
+                float acc_q = 0.0f;
+                for (size_t tap_index = 0; tap_index < RESAMPLER_TAPS; tap_index++) {
+                    acc_i += (float)window[tap_index].i * weights[tap_index];
+                    acc_q += (float)window[tap_index].q * weights[tap_index];
+                }
+                scratch[valid] = acc_i + acc_q * I;
+                continue;
+            }
+        }
+        const double source_position = offset_fraction + (double)valid * source_per_output;
+        double resampled_i = 0.0;
+        double resampled_q = 0.0;
+        resample_position(samples, read_count, source_position, table, cutoff, &resampled_i, &resampled_q);
+        scratch[valid] = (float)resampled_i + (float)resampled_q * I;
+    }
+    return valid;
+}
+#endif
+
 static void render_resampled_baseband(const iq_ci16_t *source_samples, size_t read_count, float *bus, size_t count, double source_gain, double source_per_output, double offset_fraction, bool allow_linear)
 {
     /* Plain IQ files keep the cheap linear shortcut for very low ratios (AR3); pre-rendered audio
@@ -542,17 +615,7 @@ static void render_resampled_nco(const iq_ci16_t *source_samples, size_t read_co
     if (count >= 16 && count <= SIM_MAX_STREAM_BLOCK_SAMPLES) {
         _Alignas(64) lv_32fc_t scratch[SIM_MAX_STREAM_BLOCK_SAMPLES];
         _Alignas(64) lv_32fc_t rotated[SIM_MAX_STREAM_BLOCK_SAMPLES];
-        size_t valid = 0;
-        for (; valid < count; valid++) {
-            const double source_position = offset_fraction + (double)valid * source_per_output;
-            if ((size_t)floor(source_position) >= read_count) {
-                break;
-            }
-            double resampled_i = 0.0;
-            double resampled_q = 0.0;
-            resample_position(source_samples, read_count, source_position, table, cutoff, &resampled_i, &resampled_q);
-            scratch[valid] = (float)resampled_i + (float)resampled_q * I;
-        }
+        const size_t valid = fill_scratch_polyphase(source_samples, read_count, count, source_per_output, offset_fraction, table, cutoff, scratch);
         if (valid >= 16) {
             lv_32fc_t phase = (float)init_c + (float)init_s * I;
             const lv_32fc_t phase_inc = (float)step_c + (float)step_s * I;
