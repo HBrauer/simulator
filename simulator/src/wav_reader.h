@@ -16,4 +16,8 @@ typedef struct {
 bool wav_reader_load_mono_f32(const char *path, wav_audio_t *audio, char *error, size_t error_size);
 void wav_audio_free(wav_audio_t *audio);
 
+/* Header-only probe: fills sample_rate_hz, channels, bits_per_sample and frame_count without
+ * reading or allocating the sample data. Used during validation so an asset is not loaded twice. */
+bool wav_reader_probe(const char *path, wav_audio_t *info, char *error, size_t error_size);
+
 #endif

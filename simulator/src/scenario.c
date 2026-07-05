@@ -229,9 +229,25 @@ const scenario_source_t *scenario_find_source(const scenario_t *scenario, const 
     return NULL;
 }
 
+/* Resolve a relative asset path against base_dir so a scenario works regardless of the process
+ * working directory. Absolute paths and an empty/"." base_dir are left as-is. */
+static void resolve_asset_path(char *file, size_t file_size, const char *base_dir)
+{
+    if (base_dir == NULL || base_dir[0] == '\0' || strcmp(base_dir, ".") == 0) {
+        return;
+    }
+    if (file[0] == '/') {
+        return;
+    }
+    char joined[SIM_MAX_PATH];
+    const int written = snprintf(joined, sizeof(joined), "%s/%s", base_dir, file);
+    if (written > 0 && (size_t)written < sizeof(joined)) {
+        sim_strlcpy(file, joined, file_size);
+    }
+}
+
 bool scenario_validate(scenario_t *scenario, const char *base_dir, char *error, size_t error_size)
 {
-    (void)base_dir;
     if (scenario->noise_floor.enabled) {
         const double level = scenario->noise_floor.use_density ? scenario->noise_floor.power_dbm_per_hz
                                                                : scenario->noise_floor.power_dbm;
@@ -252,6 +268,7 @@ bool scenario_validate(scenario_t *scenario, const char *base_dir, char *error, 
             snprintf(error, error_size, "source_unsupported");
             return false;
         }
+        resolve_asset_path(source->file, sizeof(source->file), base_dir);
         if (source->source_kind == SCENARIO_SOURCE_IQ_FILE) {
             if (strcmp(source->format, "ci16") != 0 || strcmp(source->byte_order, "little_endian") != 0 ||
                 strcmp(source->iq_layout, "interleaved_iq") != 0) {
@@ -269,17 +286,16 @@ bool scenario_validate(scenario_t *scenario, const char *base_dir, char *error, 
                 snprintf(error, error_size, "source_unsupported");
                 return false;
             }
-            wav_audio_t audio;
-            if (!wav_reader_load_mono_f32(source->file, &audio, error, error_size)) {
+            /* Header-only probe: do not read the samples here, the asset cache loads them once. */
+            wav_audio_t info;
+            if (!wav_reader_probe(source->file, &info, error, error_size)) {
                 return false;
             }
-            if (source->sample_rate_hz != audio.sample_rate_hz) {
-                wav_audio_free(&audio);
+            if (source->sample_rate_hz != info.sample_rate_hz) {
                 snprintf(error, error_size, "wav_sample_rate_mismatch");
                 return false;
             }
-            source->sample_count = audio.frame_count;
-            wav_audio_free(&audio);
+            source->sample_count = info.frame_count;
         } else {
             snprintf(error, error_size, "source_unsupported");
             return false;

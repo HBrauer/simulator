@@ -209,6 +209,20 @@ START_TEST(rejects_missing_source_reference)
 }
 END_TEST
 
+START_TEST(resolves_relative_asset_path_against_base_dir)
+{
+    scenario_t scenario;
+    char error[128];
+    ck_assert_msg(scenario_load_json("simulator/scenarios/test_scenario_001.json", &scenario, error, sizeof(error)), "%s", error);
+    /* Path relative to base_dir "simulator" resolves to simulator/assets/fsk_20mhz.c16. */
+    snprintf(scenario.sources[0].file, sizeof(scenario.sources[0].file), "%s", "assets/fsk_20mhz.c16");
+    scenario.sources[0].sample_count = 0;
+    ck_assert_msg(scenario_validate(&scenario, "simulator", error, sizeof(error)), "%s", error);
+    ck_assert_uint_eq(scenario.sources[0].sample_count, 24576);
+    ck_assert_str_eq(scenario.sources[0].file, "simulator/assets/fsk_20mhz.c16");
+}
+END_TEST
+
 Suite *scenario_suite(void)
 {
     Suite *suite = suite_create("scenario");
@@ -220,6 +234,7 @@ Suite *scenario_suite(void)
     tcase_add_test(tc, rejects_duplicate_source_ids);
     tcase_add_test(tc, rejects_duplicate_signal_ids);
     tcase_add_test(tc, rejects_missing_source_reference);
+    tcase_add_test(tc, resolves_relative_asset_path_against_base_dir);
     suite_add_tcase(suite, tc);
     return suite;
 }
