@@ -82,6 +82,8 @@ typedef struct {
     int stream_cpus[SIM_MAX_STREAM_CPUS];    /* CPUs the stream threads are spread across */
     size_t stream_cpu_count;                 /* 0 = no pinning */
     size_t asset_cache_max_bytes;
+    double audio_prerender_oversample;    /* oversampling factor over content bandwidth (default 2.0) */
+    uint32_t audio_prerender_max_rate_hz; /* ceiling on the intermediate pre-render rate (default 4 MHz) */
     size_t receiver_count;
     receiver_config_t receivers[SIM_MAX_RECEIVERS];
 } simulator_config_t;

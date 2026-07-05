@@ -157,6 +157,10 @@ static void apply_scalar(simulator_config_t *config, parse_state_t *state, const
         parse_cpu_list(value, config->stream_cpus, SIM_MAX_STREAM_CPUS, &config->stream_cpu_count);
     } else if (strcmp(key, "asset_cache_max_bytes") == 0) {
         config->asset_cache_max_bytes = (size_t)parse_u64(value);
+    } else if (strcmp(key, "audio_prerender_oversample") == 0) {
+        config->audio_prerender_oversample = parse_double_value(value);
+    } else if (strcmp(key, "audio_prerender_max_rate_hz") == 0) {
+        config->audio_prerender_max_rate_hz = (uint32_t)parse_u64(value);
     }
 }
 
@@ -270,6 +274,17 @@ bool config_validate(simulator_config_t *config, char *error, size_t error_size)
     if (config->stream_cpu < -1) {
         snprintf(error, error_size, "invalid_stream_cpu");
         return false;
+    }
+    /* Audio pre-render tuning (§5). Defaults chosen so nothing must be set; a too-small
+     * oversample would alias the modulation, so clamp up to the documented minimum. */
+    if (config->audio_prerender_oversample <= 0.0) {
+        config->audio_prerender_oversample = 2.0;
+    }
+    if (config->audio_prerender_oversample < 1.25) {
+        config->audio_prerender_oversample = 1.25;
+    }
+    if (config->audio_prerender_max_rate_hz == 0U) {
+        config->audio_prerender_max_rate_hz = 4000000U;
     }
     for (size_t i = 0; i < config->receiver_count; i++) {
         if (config->receivers[i].output_scale == 0.0) {

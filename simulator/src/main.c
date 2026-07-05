@@ -61,7 +61,11 @@ int main(int argc, char **argv)
         return 3;
     }
     asset_cache_t asset_cache;
-    if (!asset_cache_load_limited(&asset_cache, &scenario, config.asset_cache_max_bytes, 4096, error, sizeof(error))) {
+    const prerender_params_t prerender_params = {
+        .oversample = config.audio_prerender_oversample,
+        .max_rate_hz = config.audio_prerender_max_rate_hz,
+    };
+    if (!asset_cache_load_limited(&asset_cache, &scenario, config.asset_cache_max_bytes, 4096, &prerender_params, error, sizeof(error))) {
         fprintf(stderr, "asset cache error: %s\n", error);
         return 4;
     }
