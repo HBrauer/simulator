@@ -47,4 +47,8 @@ void asset_cache_free(asset_cache_t *cache);
 const cached_asset_t *asset_cache_find(const asset_cache_t *cache, const char *source_id);
 const cached_prerender_t *asset_cache_prerender(const asset_cache_t *cache, size_t signal_index);
 
+/* Pre-render one signal from an in-memory audio buffer (no RMS normalisation applied), using the
+ * exact load-time synthesis. Test/tool entry point; the caller owns and must free out->samples. */
+bool asset_cache_prerender_from_audio(cached_prerender_t *out, const float *audio, uint64_t audio_count, uint32_t audio_rate_hz, const scenario_signal_t *signal, const prerender_params_t *params, char *error, size_t error_size);
+
 #endif

@@ -171,6 +171,43 @@ static int16_t prerender_clip_i16(double value)
     return (int16_t)rounded;
 }
 
+/* Synthesise the complex baseband for one signal into `buffer` (pr_count samples) and return the
+ * peak-normalisation gain to fold back into source_gain. FM is constant-modulus (peak exactly 1,
+ * scale exactly 32767); AM/SSB scan for the data-dependent peak. A silent asset keeps gain 1.0 and
+ * renders as zeros (no divide-by-zero). Shared by the load-time engine and the test entry point. */
+static double prerender_fill_buffer(const cached_asset_t *asset, const scenario_signal_t *signal, double audio_rate, uint32_t rate, uint64_t pr_count, iq_ci16_t *buffer)
+{
+    double peak = 0.0;
+    if (signal->modulation == SCENARIO_MODULATION_WBFM) {
+        peak = 1.0;
+    } else {
+        for (uint64_t i = 0; i < pr_count; i++) {
+            const double position = (double)i * audio_rate / (double)rate;
+            double bi = 0.0;
+            double bq = 0.0;
+            prerender_base_sample(asset, signal, audio_rate, position, &bi, &bq);
+            const double ai = fabs(bi);
+            const double aq = fabs(bq);
+            if (ai > peak) {
+                peak = ai;
+            }
+            if (aq > peak) {
+                peak = aq;
+            }
+        }
+    }
+    const double scale = peak > 1e-12 ? 32767.0 / peak : 0.0;
+    for (uint64_t i = 0; i < pr_count; i++) {
+        const double position = (double)i * audio_rate / (double)rate;
+        double bi = 0.0;
+        double bq = 0.0;
+        prerender_base_sample(asset, signal, audio_rate, position, &bi, &bq);
+        buffer[i].i = prerender_clip_i16(bi * scale);
+        buffer[i].q = prerender_clip_i16(bq * scale);
+    }
+    return peak > 1e-12 ? peak : 1.0;
+}
+
 static bool prerender_signals(asset_cache_t *cache, const scenario_t *scenario, const prerender_params_t *params, size_t max_bytes, size_t *total_bytes, char *error, size_t error_size)
 {
     for (size_t s = 0; s < scenario->signal_count; s++) {
@@ -211,38 +248,7 @@ static bool prerender_signals(asset_cache_t *cache, const scenario_t *scenario, 
             }
         }
 
-        /* Peak-normalise into ci16 (AF4). FM is constant-modulus so its peak is exactly 1 and the
-         * scale is exactly 32767; AM/SSB scan for the data-dependent peak. A silent asset keeps
-         * gain 1.0 and renders as zeros (no divide-by-zero). */
-        double peak = 0.0;
-        if (signal->modulation == SCENARIO_MODULATION_WBFM) {
-            peak = 1.0;
-        } else {
-            for (uint64_t i = 0; i < pr_count; i++) {
-                const double position = (double)i * audio_rate / (double)rate;
-                double bi = 0.0;
-                double bq = 0.0;
-                prerender_base_sample(asset, signal, audio_rate, position, &bi, &bq);
-                const double ai = fabs(bi);
-                const double aq = fabs(bq);
-                if (ai > peak) {
-                    peak = ai;
-                }
-                if (aq > peak) {
-                    peak = aq;
-                }
-            }
-        }
-        const double scale = peak > 1e-12 ? 32767.0 / peak : 0.0;
-        const double gain = peak > 1e-12 ? peak : 1.0;
-        for (uint64_t i = 0; i < pr_count; i++) {
-            const double position = (double)i * audio_rate / (double)rate;
-            double bi = 0.0;
-            double bq = 0.0;
-            prerender_base_sample(asset, signal, audio_rate, position, &bi, &bq);
-            buffer[i].i = prerender_clip_i16(bi * scale);
-            buffer[i].q = prerender_clip_i16(bq * scale);
-        }
+        const double gain = pr_count > 0 ? prerender_fill_buffer(asset, signal, audio_rate, rate, pr_count, buffer) : 1.0;
 
         cache->prerenders[s].valid = true;
         cache->prerenders[s].sample_rate_hz = rate;
@@ -369,6 +375,19 @@ bool asset_cache_load_limited(asset_cache_t *cache, const scenario_t *scenario, 
         return false;
     }
 
+    /* The Hilbert transform and running integral were only needed to synthesise the pre-renders;
+     * the render path never touches them again, so reclaim them now (the dominant per-signal audio
+     * memory). audio_samples is kept -- it is small and still inspected by the RMS-normalisation
+     * test. */
+    for (size_t i = 0; i < cache->asset_count; i++) {
+        if (cache->assets[i].source_kind == SCENARIO_SOURCE_AUDIO_FILE) {
+            free(cache->assets[i].audio_hilbert);
+            free(cache->assets[i].audio_integral);
+            cache->assets[i].audio_hilbert = NULL;
+            cache->assets[i].audio_integral = NULL;
+        }
+    }
+
     snprintf(error, error_size, "ok");
     return true;
 }
@@ -401,6 +420,67 @@ const cached_prerender_t *asset_cache_prerender(const asset_cache_t *cache, size
         return NULL;
     }
     return &cache->prerenders[signal_index];
+}
+
+bool asset_cache_prerender_from_audio(cached_prerender_t *out, const float *audio, uint64_t audio_count, uint32_t audio_rate_hz, const scenario_signal_t *signal, const prerender_params_t *params, char *error, size_t error_size)
+{
+    memset(out, 0, sizeof(*out));
+    const prerender_params_t default_params = {.oversample = 2.0, .max_rate_hz = 4000000U};
+    if (params == NULL) {
+        params = &default_params;
+    }
+
+    /* Build a throwaway asset that owns a copy of the audio plus the Hilbert/integral helpers, so
+     * the exact same synthesis the load path uses is exercised on caller-supplied audio (no RMS
+     * normalisation here -- the caller controls the sample values directly). */
+    cached_asset_t asset;
+    memset(&asset, 0, sizeof(asset));
+    asset.source_kind = SCENARIO_SOURCE_AUDIO_FILE;
+    asset.sample_count = audio_count;
+    asset.normalization_gain = 1.0;
+    if (audio_count > 0) {
+        asset.audio_samples = malloc((size_t)audio_count * sizeof(*asset.audio_samples));
+        if (asset.audio_samples == NULL) {
+            snprintf(error, error_size, "asset_cache_alloc_failed");
+            return false;
+        }
+        memcpy(asset.audio_samples, audio, (size_t)audio_count * sizeof(*asset.audio_samples));
+        if (!build_audio_helpers(&asset, error, error_size)) {
+            free(asset.audio_samples);
+            return false;
+        }
+    }
+
+    scenario_source_t source;
+    memset(&source, 0, sizeof(source));
+    source.source_kind = SCENARIO_SOURCE_AUDIO_FILE;
+    source.sample_rate_hz = audio_rate_hz;
+    source.sample_count = audio_count;
+
+    const uint32_t rate = prerender_rate_hz(signal, &source, params);
+    const uint64_t pr_count = audio_count > 0 ? (uint64_t)llround((double)audio_count * (double)rate / (double)audio_rate_hz) : 0;
+    iq_ci16_t *buffer = NULL;
+    if (pr_count > 0) {
+        buffer = calloc((size_t)pr_count, sizeof(*buffer));
+        if (buffer == NULL) {
+            snprintf(error, error_size, "asset_cache_alloc_failed");
+            free(asset.audio_samples);
+            free(asset.audio_hilbert);
+            free(asset.audio_integral);
+            return false;
+        }
+    }
+    out->gain = pr_count > 0 ? prerender_fill_buffer(&asset, signal, (double)audio_rate_hz, rate, pr_count, buffer) : 1.0;
+    out->valid = true;
+    out->sample_rate_hz = rate;
+    out->sample_count = pr_count;
+    out->samples = buffer;
+
+    free(asset.audio_samples);
+    free(asset.audio_hilbert);
+    free(asset.audio_integral);
+    snprintf(error, error_size, "ok");
+    return true;
 }
 
 const cached_asset_t *asset_cache_find(const asset_cache_t *cache, const char *source_id)

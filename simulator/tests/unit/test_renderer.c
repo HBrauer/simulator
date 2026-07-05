@@ -635,11 +635,12 @@ END_TEST
 
 START_TEST(renderer_renders_audio_modulation_modes)
 {
+    /* Audio signals are pre-rendered to complex baseband at load (T3) and rendered through the
+     * IQ dispatch (T4). Build the pre-render for each modulation via the real engine and confirm
+     * the renderer emits energy for all four modes through the new path. */
     scenario_t scenario;
     asset_cache_t cache;
-    float audio[32];
-    float hilbert[32];
-    double integral[33];
+    float audio[512];
     memset(&scenario, 0, sizeof(scenario));
     memset(&cache, 0, sizeof(cache));
 
@@ -653,7 +654,7 @@ START_TEST(renderer_renders_audio_modulation_modes)
     snprintf(scenario.sources[0].format, sizeof(scenario.sources[0].format), "%s", "wav");
     scenario.sources[0].sample_rate_hz = 48000;
     scenario.sources[0].bandwidth_hz = 200000;
-    scenario.sources[0].sample_count = 32;
+    scenario.sources[0].sample_count = 512;
 
     snprintf(scenario.signals[0].signal_id, sizeof(scenario.signals[0].signal_id), "%s", "audio_sig");
     snprintf(scenario.signals[0].source_reference, sizeof(scenario.signals[0].source_reference), "%s", "audio");
@@ -665,24 +666,20 @@ START_TEST(renderer_renders_audio_modulation_modes)
     scenario.signals[0].start_time_s = 0.0;
     scenario.signals[0].repeat_interval_s = 1.0;
 
-    integral[0] = 0.0;
-    for (size_t i = 0; i < 32; i++) {
+    for (size_t i = 0; i < 512; i++) {
         audio[i] = (float)sin(2.0 * M_PI * (double)i / 32.0);
-        hilbert[i] = (float)cos(2.0 * M_PI * (double)i / 32.0);
-        integral[i + 1U] = integral[i] + (double)audio[i];
     }
     cache.asset_count = 1;
     snprintf(cache.assets[0].source_id, sizeof(cache.assets[0].source_id), "%s", "audio");
     cache.assets[0].source_kind = SCENARIO_SOURCE_AUDIO_FILE;
-    cache.assets[0].sample_count = 32;
+    cache.assets[0].sample_count = 512;
     cache.assets[0].audio_samples = audio;
-    cache.assets[0].audio_hilbert = hilbert;
-    cache.assets[0].audio_integral = integral;
 
     receiver_config_t receiver = fixed_center_receiver();
     receiver.rf_reference_power_dbm = -40.0;
     iq_ci16_t out[64];
     render_stats_t stats;
+    char error[128];
     const scenario_modulation_t modes[] = {
         SCENARIO_MODULATION_WBFM,
         SCENARIO_MODULATION_AM,
@@ -692,15 +689,23 @@ START_TEST(renderer_renders_audio_modulation_modes)
     for (size_t m = 0; m < sizeof(modes) / sizeof(modes[0]); m++) {
         memset(out, 0, sizeof(out));
         scenario.signals[0].modulation = modes[m];
+        cached_prerender_t pr;
+        ck_assert_msg(asset_cache_prerender_from_audio(&pr, audio, 512, 48000, &scenario.signals[0], NULL, error, sizeof(error)), "%s", error);
+        cache.prerenders[0] = pr;
         ck_assert(renderer_render_80mhz_block(&scenario, &cache, &receiver, 0, out, 64, &stats));
         ck_assert_uint_eq(stats.active_signals, 1);
         ck_assert(samples_have_energy(out, 64));
+        free(pr.samples);
+        cache.prerenders[0].valid = false;
     }
 }
 END_TEST
 
+/* Build a DC-audio AM/SSB signal and its pre-render (via the real engine) so the renderer sees it
+ * exactly as it would after asset_cache_load. audio_rate sets the source rate; the pre-render rate
+ * is then derived from it and stored in cache->prerenders[0]. Caller frees cache->prerenders[0].samples. */
 static void setup_dc_audio_signal(scenario_t *scenario, asset_cache_t *cache, float *audio, size_t n,
-                                  float dc, scenario_modulation_t mod)
+                                  float dc, scenario_modulation_t mod, uint32_t audio_rate, uint32_t signal_bw)
 {
     memset(scenario, 0, sizeof(*scenario));
     memset(cache, 0, sizeof(*cache));
@@ -715,14 +720,14 @@ static void setup_dc_audio_signal(scenario_t *scenario, asset_cache_t *cache, fl
     snprintf(src->source_type, sizeof(src->source_type), "%s", "audio_file");
     src->source_kind = SCENARIO_SOURCE_AUDIO_FILE;
     snprintf(src->format, sizeof(src->format), "%s", "wav");
-    src->sample_rate_hz = SIM_RECEIVER_SAMPLE_RATE_HZ; /* source_per_output = 1 */
-    src->bandwidth_hz = 200000;
+    src->sample_rate_hz = audio_rate;
+    src->bandwidth_hz = signal_bw;
     src->sample_count = n;
     scenario_signal_t *sig = &scenario->signals[0];
     snprintf(sig->signal_id, sizeof(sig->signal_id), "%s", "audio_sig");
     snprintf(sig->source_reference, sizeof(sig->source_reference), "%s", "audio");
     sig->center_frequency_hz = 10000000000ULL; /* offset 0 for the fixed-centre receiver */
-    sig->bandwidth_hz = 200000;
+    sig->bandwidth_hz = signal_bw;
     sig->power_dbm = -40.0;
     sig->am_depth = 0.8;
     sig->modulation = mod;
@@ -732,16 +737,23 @@ static void setup_dc_audio_signal(scenario_t *scenario, asset_cache_t *cache, fl
     cache->assets[0].source_kind = SCENARIO_SOURCE_AUDIO_FILE;
     cache->assets[0].sample_count = n;
     cache->assets[0].audio_samples = audio;
+
+    cached_prerender_t pr;
+    char error[128];
+    ck_assert_msg(asset_cache_prerender_from_audio(&pr, audio, n, audio_rate, sig, NULL, error, sizeof(error)), "%s", error);
+    cache->prerenders[0] = pr;
 }
 
 START_TEST(renderer_am_envelope_is_normalised_and_does_not_over_saturate)
 {
     /* DC audio 0.5 at depth 0.8: normalised envelope = (1 + 0.8*0.5)/(1+0.8) = 0.7778, so with
-     * unity gain the output is ~25485, not the old (1 + 0.4) = 1.4x that clipped to 32767. */
+     * unity gain the output is ~25485, not the old (1 + 0.4) = 1.4x that clipped to 32767. The
+     * pre-render peak-normalises the constant envelope to 32767 and folds 0.7778 into the gain,
+     * so the calibrated output is unchanged. */
     scenario_t scenario;
     asset_cache_t cache;
     float audio[64];
-    setup_dc_audio_signal(&scenario, &cache, audio, 64, 0.5f, SCENARIO_MODULATION_AM);
+    setup_dc_audio_signal(&scenario, &cache, audio, 64, 0.5f, SCENARIO_MODULATION_AM, 48000, 10000);
     const receiver_config_t receiver = fixed_center_receiver();
     iq_ci16_t out[8];
     render_stats_t stats;
@@ -750,18 +762,30 @@ START_TEST(renderer_am_envelope_is_normalised_and_does_not_over_saturate)
     const int expected = (int)lrint(32767.0 * (1.0 + 0.8 * 0.5) / (1.0 + 0.8));
     ck_assert_int_ne(out[0].i, 32767);
     ck_assert_int_le(abs(out[0].i - expected), 2);
+    free(cache.prerenders[0].samples);
 }
 END_TEST
 
 START_TEST(renderer_audio_stops_at_end_of_asset_within_block)
 {
-    /* 4-sample asset at the output rate: a block of 8 renders samples 0..3 and leaves 4..7 at
-     * zero instead of holding a dead carrier. */
+    /* Pre-render rate == output rate (AM at 48 kHz audio -> 96 kHz pre-render, rendered at 96 kHz):
+     * a 2-sample DC clip pre-renders to 4 samples, so a block of 8 renders samples 0..3 and leaves
+     * 4..7 at zero instead of holding a dead carrier. */
     scenario_t scenario;
     asset_cache_t cache;
-    float audio[4];
-    setup_dc_audio_signal(&scenario, &cache, audio, 4, 1.0f, SCENARIO_MODULATION_AM);
-    const receiver_config_t receiver = fixed_center_receiver();
+    float audio[2];
+    setup_dc_audio_signal(&scenario, &cache, audio, 2, 1.0f, SCENARIO_MODULATION_AM, 48000, 10000);
+    ck_assert_uint_eq(cache.prerenders[0].sample_rate_hz, 96000U);
+    ck_assert_uint_eq(cache.prerenders[0].sample_count, 4U);
+    const receiver_config_t receiver = {
+        .id = 0,
+        .frequency_start_hz = 9999900000ULL,
+        .frequency_stop_hz = 10000100000ULL,
+        .bandwidth_hz = 200000,
+        .sample_rate_hz = 96000, /* == pre-render rate: integer-aligned direct path */
+        .output_scale = 1.0,
+        .rf_reference_power_dbm = -40.0,
+    };
     iq_ci16_t out[8];
     render_stats_t stats;
     ck_assert(renderer_render_80mhz_block(&scenario, &cache, &receiver, 0, out, 8, &stats));
@@ -773,6 +797,7 @@ START_TEST(renderer_audio_stops_at_end_of_asset_within_block)
         ck_assert_int_eq(out[i].i, 0);
         ck_assert_int_eq(out[i].q, 0);
     }
+    free(cache.prerenders[0].samples);
 }
 END_TEST
 
