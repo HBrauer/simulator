@@ -44,7 +44,8 @@ typedef struct {
     bool render_started;
     bool udp_started;
     bool ringbuffer_initialized;
-    int stream_cpu;
+    int render_cpu;
+    int udp_cpu;
     uint8_t vita_sequence;
 } stream_worker_t;
 
@@ -157,6 +158,14 @@ static bool stream_enabled(const stream_worker_t *worker, const receiver_config_
     return worker->kind == STREAM_KIND_80MHZ ? receiver->stream_enabled : ddc->stream_enabled;
 }
 
+static int next_stream_cpu(const streamer_config_t *config, size_t *index)
+{
+    if (config->stream_cpus == NULL || config->stream_cpu_count == 0) {
+        return -1;
+    }
+    return config->stream_cpus[(*index)++ % config->stream_cpu_count];
+}
+
 static void stream_worker_set_active(stream_worker_t *worker, bool active)
 {
     const bool was_active = atomic_exchange(&worker->stream_metrics->active, active);
@@ -248,7 +257,7 @@ static void pace_or_record_late(stream_worker_t *worker, uint64_t *next_send_ns,
 static void *stream_render_thread_main(void *arg)
 {
     stream_worker_t *worker = arg;
-    apply_stream_affinity(worker->stream_cpu);
+    apply_stream_affinity(worker->render_cpu);
     iq_ci16_t *buffer = calloc(worker->block_samples, sizeof(*buffer));
     if (buffer == NULL) {
         return NULL;
@@ -305,7 +314,7 @@ static void *stream_render_thread_main(void *arg)
 static void *stream_udp_thread_main(void *arg)
 {
     stream_worker_t *worker = arg;
-    apply_stream_affinity(worker->stream_cpu);
+    apply_stream_affinity(worker->udp_cpu);
     pthread_mutex_lock(worker->receiver_lock);
     receiver_config_t receiver_snapshot = *worker->receiver;
     ddc_config_t ddc_snapshot = receiver_snapshot.ddc[worker->ddc_index];
@@ -475,9 +484,17 @@ bool streamer_manager_start(streamer_manager_t **manager, const streamer_config_
     }
     atomic_init(&m->running, true);
 
+    /* Spread the render and UDP threads across the configured CPU set (round-robin, render and
+     * UDP threads of a worker on distinct CPUs) instead of pinning every thread to one core,
+     * which serialised them. Empty set -> no pinning. Wideband render threads are assigned first
+     * per receiver so they tend to land on their own core. */
+    size_t next_cpu = 0;
+
     for (size_t i = 0; i < config->config->receiver_count; i++) {
         receiver_config_t *receiver = &config->config->receivers[i];
         stream_worker_t *worker = &m->workers[m->worker_count++];
+        const int wb_render_cpu = next_stream_cpu(config, &next_cpu);
+        const int wb_udp_cpu = next_stream_cpu(config, &next_cpu);
         *worker = (stream_worker_t){
             .running = &m->running,
             .scenario = config->scenario,
@@ -489,7 +506,8 @@ bool streamer_manager_start(streamer_manager_t **manager, const streamer_config_
             .receiver_lock = config->receiver_lock,
             .kind = STREAM_KIND_80MHZ,
             .block_samples = config->block_samples,
-            .stream_cpu = config->stream_cpu,
+            .render_cpu = wb_render_cpu,
+            .udp_cpu = wb_udp_cpu,
         };
         if (!stream_worker_start(worker)) {
             streamer_manager_stop(m);
@@ -498,6 +516,8 @@ bool streamer_manager_start(streamer_manager_t **manager, const streamer_config_
 
         for (size_t d = 0; d < SIM_DDC_COUNT; d++) {
             stream_worker_t *ddc_worker = &m->workers[m->worker_count++];
+            const int ddc_render_cpu = next_stream_cpu(config, &next_cpu);
+            const int ddc_udp_cpu = next_stream_cpu(config, &next_cpu);
             *ddc_worker = (stream_worker_t){
                 .running = &m->running,
                 .scenario = config->scenario,
@@ -510,7 +530,8 @@ bool streamer_manager_start(streamer_manager_t **manager, const streamer_config_
                 .receiver_lock = config->receiver_lock,
                 .kind = STREAM_KIND_DDC,
                 .block_samples = config->block_samples,
-                .stream_cpu = config->stream_cpu,
+                .render_cpu = ddc_render_cpu,
+                .udp_cpu = ddc_udp_cpu,
             };
             if (!stream_worker_start(ddc_worker)) {
                 streamer_manager_stop(m);

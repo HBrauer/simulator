@@ -3,6 +3,38 @@
 #include "test_suites.h"
 
 #include <check.h>
+#include <stdio.h>
+#include <unistd.h>
+
+static const char *write_temp_config(const char *body)
+{
+    static char path[256];
+    snprintf(path, sizeof(path), "/tmp/sim_cfg_%d.yaml", (int)getpid());
+    FILE *f = fopen(path, "wb");
+    if (f == NULL) {
+        return NULL;
+    }
+    fputs("schema_version: 1\n", f);
+    fputs("instance_id: \"t\"\n", f);
+    fputs("scenario_file: \"simulator/scenarios/test_scenario_001.json\"\n", f);
+    fputs(body, f);
+    fputs("receivers:\n"
+          "  - receiver_id: 0\n"
+          "    rest_bind_host: \"127.0.0.1\"\n"
+          "    rest_port: 8100\n"
+          "    udp_output_host: \"127.0.0.1\"\n"
+          "    frequency_start_hz: 9960000000\n"
+          "    frequency_stop_hz: 10040000000\n"
+          "    udp_80mhz_output_port: 50000\n"
+          "    ddc:\n"
+          "      - ddc_id: 0\n        center_frequency_hz: 10000000000\n        udp_output_port: 50001\n"
+          "      - ddc_id: 1\n        center_frequency_hz: 10001000000\n        udp_output_port: 50002\n"
+          "      - ddc_id: 2\n        center_frequency_hz: 10002000000\n        udp_output_port: 50003\n"
+          "      - ddc_id: 3\n        center_frequency_hz: 10003000000\n        udp_output_port: 50004\n",
+          f);
+    fclose(f);
+    return path;
+}
 
 static receiver_config_t valid_receiver(uint32_t id, uint16_t rest_port, uint16_t udp_base)
 {
@@ -45,6 +77,7 @@ START_TEST(loads_instance_config)
     ck_assert_uint_eq(config.receivers[0].ddc[3].udp_output.port, 50004);
     ck_assert_uint_eq(config.stream_block_samples, 1024);
     ck_assert_int_eq(config.stream_cpu, -1);
+    ck_assert_uint_eq(config.stream_cpu_count, 0); /* absent -> no pinning */
     ck_assert_uint_eq(config.asset_cache_max_bytes, 0);
     ck_assert_uint_eq(config.receivers[0].bandwidth_hz, 80000000ULL);
     ck_assert_uint_eq(config.receivers[0].sample_rate_hz, 98304000U);
@@ -94,6 +127,46 @@ START_TEST(rejects_invalid_sample_rate_or_bandwidth)
     config.receivers[0].ddc[1].bandwidth_hz = 0;
     ck_assert(!receiver_validate(&config.receivers[0], error, sizeof(error)));
     ck_assert_str_eq(error, "invalid_ddc");
+}
+END_TEST
+
+START_TEST(parses_stream_cpus_range)
+{
+    const char *path = write_temp_config("stream_cpus: \"2-5\"\n");
+    ck_assert_ptr_nonnull(path);
+    simulator_config_t config;
+    char error[128];
+    ck_assert_msg(config_load_yaml(path, &config, error, sizeof(error)), "%s", error);
+    ck_assert_uint_eq(config.stream_cpu_count, 4);
+    ck_assert_int_eq(config.stream_cpus[0], 2);
+    ck_assert_int_eq(config.stream_cpus[3], 5);
+}
+END_TEST
+
+START_TEST(parses_stream_cpus_list)
+{
+    const char *path = write_temp_config("stream_cpus: \"0,2,4-6\"\n");
+    ck_assert_ptr_nonnull(path);
+    simulator_config_t config;
+    char error[128];
+    ck_assert_msg(config_load_yaml(path, &config, error, sizeof(error)), "%s", error);
+    ck_assert_uint_eq(config.stream_cpu_count, 5);
+    const int expected[] = {0, 2, 4, 5, 6};
+    for (size_t i = 0; i < 5; i++) {
+        ck_assert_int_eq(config.stream_cpus[i], expected[i]);
+    }
+}
+END_TEST
+
+START_TEST(legacy_stream_cpu_maps_to_single_element_set)
+{
+    const char *path = write_temp_config("stream_cpu: 3\n");
+    ck_assert_ptr_nonnull(path);
+    simulator_config_t config;
+    char error[128];
+    ck_assert_msg(config_load_yaml(path, &config, error, sizeof(error)), "%s", error);
+    ck_assert_uint_eq(config.stream_cpu_count, 1);
+    ck_assert_int_eq(config.stream_cpus[0], 3);
 }
 END_TEST
 
@@ -188,6 +261,9 @@ Suite *config_suite(void)
     tcase_add_test(tc, loads_instance_config);
     tcase_add_test(tc, defaults_stream_block_samples);
     tcase_add_test(tc, rejects_invalid_sample_rate_or_bandwidth);
+    tcase_add_test(tc, parses_stream_cpus_range);
+    tcase_add_test(tc, parses_stream_cpus_list);
+    tcase_add_test(tc, legacy_stream_cpu_maps_to_single_element_set);
     tcase_add_test(tc, rejects_invalid_stream_block_samples);
     tcase_add_test(tc, rejects_invalid_stream_cpu);
     tcase_add_test(tc, rejects_duplicate_udp_port_within_receiver);

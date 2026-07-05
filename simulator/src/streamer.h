@@ -20,7 +20,8 @@ typedef struct {
     pthread_mutex_t *receiver_lock;
     receiver_metrics_t *metrics;
     size_t block_samples;
-    int stream_cpu;
+    const int *stream_cpus;   /* CPUs to spread stream threads across; NULL/empty = no pinning */
+    size_t stream_cpu_count;
 } streamer_config_t;
 
 bool streamer_manager_start(streamer_manager_t **manager, const streamer_config_t *config);

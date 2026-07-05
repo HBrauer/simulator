@@ -32,6 +32,46 @@ static bool parse_bool_value(const char *value)
     return strcmp(value, "true") == 0 || strcmp(value, "1") == 0 || strcmp(value, "yes") == 0;
 }
 
+/* Parse a CPU set written as a comma list and/or inclusive ranges, e.g. "2-7" or "0,2,4-6". */
+static void parse_cpu_list(const char *value, int *out, size_t max, size_t *count)
+{
+    *count = 0;
+    const char *p = value;
+    while (*p != '\0' && *count < max) {
+        while (*p == ' ' || *p == ',') {
+            p++;
+        }
+        if (*p == '\0') {
+            break;
+        }
+        char *end = NULL;
+        const long first = strtol(p, &end, 10);
+        if (end == p) {
+            break;
+        }
+        p = end;
+        long last = first;
+        if (*p == '-') {
+            p++;
+            last = strtol(p, &end, 10);
+            if (end == p) {
+                break;
+            }
+            p = end;
+        }
+        if (last < first) {
+            const long tmp = first;
+            last = first;
+            (void)tmp;
+        }
+        for (long c = first; c <= last && *count < max; c++) {
+            if (c >= 0) {
+                out[(*count)++] = (int)c;
+            }
+        }
+    }
+}
+
 static void apply_scalar(simulator_config_t *config, parse_state_t *state, const char *key, const char *value)
 {
     if (state->current_ddc != NULL) {
@@ -113,6 +153,8 @@ static void apply_scalar(simulator_config_t *config, parse_state_t *state, const
         config->stream_block_samples = (size_t)parse_u64(value);
     } else if (strcmp(key, "stream_cpu") == 0) {
         config->stream_cpu = parse_int_value(value);
+    } else if (strcmp(key, "stream_cpus") == 0) {
+        parse_cpu_list(value, config->stream_cpus, SIM_MAX_STREAM_CPUS, &config->stream_cpu_count);
     } else if (strcmp(key, "asset_cache_max_bytes") == 0) {
         config->asset_cache_max_bytes = (size_t)parse_u64(value);
     }
@@ -203,6 +245,11 @@ bool config_load_yaml(const char *path, simulator_config_t *config, char *error,
     fclose(file);
     if (!ok) {
         return false;
+    }
+    /* Legacy single-CPU key maps to a one-element set when no stream_cpus list was given. */
+    if (config->stream_cpu_count == 0 && config->stream_cpu >= 0) {
+        config->stream_cpus[0] = config->stream_cpu;
+        config->stream_cpu_count = 1;
     }
     return config_validate(config, error, error_size);
 }

@@ -70,13 +70,17 @@ typedef struct {
     ddc_config_t ddc[SIM_DDC_COUNT];
 } receiver_config_t;
 
+#define SIM_MAX_STREAM_CPUS 64
+
 typedef struct {
     int schema_version;
     char instance_id[SIM_MAX_ID];
     char scenario_file[SIM_MAX_PATH];
     char log_path[SIM_MAX_PATH];
     size_t stream_block_samples;
-    int stream_cpu;
+    int stream_cpu;                          /* legacy single-CPU alias; -1 = unset */
+    int stream_cpus[SIM_MAX_STREAM_CPUS];    /* CPUs the stream threads are spread across */
+    size_t stream_cpu_count;                 /* 0 = no pinning */
     size_t asset_cache_max_bytes;
     size_t receiver_count;
     receiver_config_t receivers[SIM_MAX_RECEIVERS];
