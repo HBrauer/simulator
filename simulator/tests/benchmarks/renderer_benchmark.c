@@ -48,6 +48,8 @@ int main(int argc, char **argv)
     size_t blocks = 1000;
     size_t samples_per_block = 4096;
     size_t receivers = 1;
+    bool with_ddc = false;
+    double assert_realtime = 0.0;
     const char *config_path = "simulator/configs/instance_001.yaml";
     const char *scenario_path = "simulator/scenarios/test_scenario_001.json";
     const char *json_path = NULL;
@@ -57,19 +59,19 @@ int main(int argc, char **argv)
     if (argc > 2) {
         samples_per_block = (size_t)strtoull(argv[2], NULL, 10);
     }
-    for (int i = 3; i + 1 < argc; i++) {
-        if (strcmp(argv[i], "--json") == 0) {
-            json_path = argv[i + 1];
-            i++;
-        } else if (strcmp(argv[i], "--receivers") == 0) {
-            receivers = (size_t)strtoull(argv[i + 1], NULL, 10);
-            i++;
-        } else if (strcmp(argv[i], "--config") == 0) {
-            config_path = argv[i + 1];
-            i++;
-        } else if (strcmp(argv[i], "--scenario") == 0) {
-            scenario_path = argv[i + 1];
-            i++;
+    for (int i = 3; i < argc; i++) {
+        if (strcmp(argv[i], "--with-ddc") == 0) {
+            with_ddc = true;
+        } else if (i + 1 < argc && strcmp(argv[i], "--json") == 0) {
+            json_path = argv[++i];
+        } else if (i + 1 < argc && strcmp(argv[i], "--receivers") == 0) {
+            receivers = (size_t)strtoull(argv[++i], NULL, 10);
+        } else if (i + 1 < argc && strcmp(argv[i], "--config") == 0) {
+            config_path = argv[++i];
+        } else if (i + 1 < argc && strcmp(argv[i], "--scenario") == 0) {
+            scenario_path = argv[++i];
+        } else if (i + 1 < argc && strcmp(argv[i], "--assert-realtime") == 0) {
+            assert_realtime = strtod(argv[++i], NULL);
         }
     }
     if (receivers == 0 || receivers > SIM_MAX_RECEIVERS) {
@@ -106,16 +108,29 @@ int main(int argc, char **argv)
     }
 
     for (size_t i = 0; i < blocks; i++) {
+        const uint64_t t = 450000ULL + (uint64_t)i * 1000000ULL;
         for (size_t receiver_index = 0; receiver_index < receivers; receiver_index++) {
-            renderer_render_80mhz_block(&scenario, &cache, &benchmark_receivers[receiver_index], 450000ULL, buffer, samples_per_block, &stats);
+            renderer_render_80mhz_block(&scenario, &cache, &benchmark_receivers[receiver_index], t, buffer, samples_per_block, &stats);
+            if (with_ddc) {
+                for (size_t d = 0; d < SIM_DDC_COUNT; d++) {
+                    renderer_render_ddc_block(&scenario, &cache, &benchmark_receivers[receiver_index].ddc[d], t, buffer, samples_per_block, &stats);
+                }
+            }
         }
     }
     clock_gettime(CLOCK_MONOTONIC, &stop);
 
     const double seconds = elapsed_seconds(start, stop);
-    const double samples = (double)blocks * (double)samples_per_block * (double)receivers;
+    const size_t streams_per_receiver = with_ddc ? (size_t)(1 + SIM_DDC_COUNT) : 1;
+    const double samples = (double)blocks * (double)samples_per_block * (double)receivers * (double)streams_per_receiver;
     const double samples_per_second = seconds > 0.0 ? samples / seconds : 0.0;
-    printf("blocks=%zu samples_per_block=%zu receivers=%zu seconds=%.6f samples_per_second=%.3f\n", blocks, samples_per_block, receivers, seconds, samples_per_second);
+    /* Wall-clock time these blocks represent for the wideband stream. If the machine renders the
+     * whole configured load (all receivers, wideband + DDCs) in less than this, one core sustains
+     * it in real time; the ratio is the headroom (>=1.3 == the P9 target of 30% headroom). */
+    const double represented_seconds = (double)blocks * (double)samples_per_block / (double)config.receivers[0].sample_rate_hz;
+    const double realtime_ratio = seconds > 0.0 ? represented_seconds / seconds : 0.0;
+    printf("blocks=%zu samples_per_block=%zu receivers=%zu ddc=%s seconds=%.6f samples_per_second=%.3f realtime_ratio=%.2f\n",
+           blocks, samples_per_block, receivers, with_ddc ? "yes" : "no", seconds, samples_per_second, realtime_ratio);
     if (json_path != NULL && !write_json_report(json_path, blocks, samples_per_block, receivers, seconds, samples_per_second)) {
         fprintf(stderr, "failed to write benchmark report: %s\n", json_path);
         free(buffer);
@@ -125,5 +140,9 @@ int main(int argc, char **argv)
 
     free(buffer);
     asset_cache_free(&cache);
+    if (assert_realtime > 0.0 && realtime_ratio < assert_realtime) {
+        fprintf(stderr, "realtime_ratio %.2f below required %.2f\n", realtime_ratio, assert_realtime);
+        return 5;
+    }
     return 0;
 }

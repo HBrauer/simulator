@@ -46,16 +46,24 @@ common_args = [
   '-Wconversion',
   '-Wstrict-prototypes',
   '-Wmissing-prototypes',
+  # Safe everywhere (unlike -ffast-math) and lets the compiler inline lrintf/sqrtf on the
+  # hot render path instead of emitting errno-setting library calls.
+  '-fno-math-errno',
 ]
 add_project_arguments(common_args, language: 'c')
+
+# Hot DSP path: always build at -O3 regardless of the buildtype so the render loop stays fast
+# even in the default (unoptimised) developer build the benchmark runs against.
+sim_render_sources = files(
+  'simulator/src/nco.c',
+  'simulator/src/renderer.c',
+)
 
 sim_sources = files(
   'simulator/src/asset_cache.c',
   'simulator/src/config.c',
   'simulator/src/iq_file_reader.c',
-  'simulator/src/nco.c',
   'simulator/src/receiver.c',
-  'simulator/src/renderer.c',
   'simulator/src/rest_server.c',
   'simulator/src/ringbuffer.c',
   'simulator/src/scenario.c',
@@ -77,7 +85,8 @@ endif
 sim_includes = include_directories('simulator/src', '.')
 test_includes = include_directories('simulator/tests/unit')
 
-sim_lib = static_library('simcore', sim_sources, dependencies: sim_deps, include_directories: sim_includes)
+sim_render_lib = static_library('simrender', sim_render_sources, dependencies: sim_deps, include_directories: sim_includes, override_options: ['optimization=3'])
+sim_lib = static_library('simcore', sim_sources, dependencies: sim_deps, include_directories: sim_includes, link_with: sim_render_lib)
 
 receiver_sources = files(
   'receiver/src/history.c',
@@ -140,6 +149,9 @@ renderer_benchmark = executable(
 benchmark('renderer_80mhz_scalar_1_receiver', renderer_benchmark, args: ['1000', '4096', '--receivers', '1'], workdir: meson.project_source_root(), timeout: 60)
 benchmark('renderer_80mhz_scalar_4_receivers', renderer_benchmark, args: ['1000', '4096', '--receivers', '4'], workdir: meson.project_source_root(), timeout: 60)
 benchmark('renderer_80mhz_scalar_12_receivers', renderer_benchmark, args: ['1000', '4096', '--receivers', '12'], workdir: meson.project_source_root(), timeout: 60)
+# Realistic P9 load: one receiver, wideband + all DDCs, noise plus mixed IQ and audio signals.
+# The realtime_ratio it prints is the headroom on a single core; run against a -O3/native build.
+benchmark('renderer_realistic_load', renderer_benchmark, args: ['500', '4096', '--receivers', '1', '--with-ddc', '--scenario', 'simulator/scenarios/benchmark_load.json'], workdir: meson.project_source_root(), timeout: 120)
 
 pytest = find_program('pytest', required: false)
 if pytest.found()

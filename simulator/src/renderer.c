@@ -330,8 +330,7 @@ static void render_audio_modulated(
         if (signal->modulation == SCENARIO_MODULATION_WBFM) {
             const double integral = audio_integral_at(asset, audio_position);
             const double fm_phase = 2.0 * M_PI * signal->fm_deviation_hz * integral / (double)source->sample_rate_hz;
-            base_i = cos(fm_phase);
-            base_q = sin(fm_phase);
+            sincos(fm_phase, &base_q, &base_i); /* one call for both, vs separate cos()+sin() */
         } else if (signal->modulation == SCENARIO_MODULATION_AM) {
             const double audio = audio_linear_at(asset->audio_samples, asset->sample_count, audio_position);
             /* Normalise by (1 + depth) so the modulation peak reaches full scale instead of 2x,
