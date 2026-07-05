@@ -57,8 +57,9 @@ static bool parse_wav_header(FILE *file, wav_header_t *out, char *error, size_t 
         }
 
         if (memcmp(chunk_header, "fmt ", 4U) == 0) {
-            uint8_t fmt[16];
-            if (chunk_size < sizeof(fmt) || !read_exact(file, fmt, sizeof(fmt))) {
+            uint8_t fmt[40] = {0};
+            const size_t want = chunk_size < sizeof(fmt) ? (size_t)chunk_size : sizeof(fmt);
+            if (chunk_size < 16U || !read_exact(file, fmt, want)) {
                 snprintf(error, error_size, "wav_invalid_fmt");
                 return false;
             }
@@ -66,11 +67,31 @@ static bool parse_wav_header(FILE *file, wav_header_t *out, char *error, size_t 
             out->channels = read_le16(fmt + 2U);
             out->sample_rate = read_le32(fmt + 4U);
             out->bits_per_sample = read_le16(fmt + 14U);
+            /* WAVE_FORMAT_EXTENSIBLE wraps the real format tag in the first two bytes of the
+             * SubFormat GUID at offset 24 of the fmt chunk (many editors emit this for plain PCM). */
+            if (audio_format == 0xFFFEU && chunk_size >= 40U && want >= 26U) {
+                audio_format = read_le16(fmt + 24U);
+            }
             have_fmt = true;
         } else if (memcmp(chunk_header, "data", 4U) == 0) {
             out->data_offset = chunk_data_offset;
-            out->data_bytes = chunk_size;
+            if (chunk_size == 0xFFFFFFFFU) {
+                /* Streamed WAV with an unknown data size: take everything to end of file. */
+                if (fseek(file, 0, SEEK_END) != 0) {
+                    snprintf(error, error_size, "wav_seek_failed");
+                    return false;
+                }
+                const long file_end = ftell(file);
+                if (file_end < 0 || file_end < chunk_data_offset) {
+                    snprintf(error, error_size, "wav_invalid_data_size");
+                    return false;
+                }
+                out->data_bytes = (uint32_t)(file_end - chunk_data_offset);
+            } else {
+                out->data_bytes = chunk_size;
+            }
             have_data = true;
+            break;
         }
 
         const long next_offset = chunk_data_offset + (long)chunk_size + (long)(chunk_size & 1U);
@@ -80,9 +101,25 @@ static bool parse_wav_header(FILE *file, wav_header_t *out, char *error, size_t 
         }
     }
 
-    if (!have_fmt || !have_data || audio_format != 1U || (out->channels != 1U && out->channels != 2U) ||
-        out->sample_rate == 0U || out->bits_per_sample != 16U) {
-        snprintf(error, error_size, "wav_unsupported: need PCM16 mono/stereo");
+    if (!have_fmt || !have_data) {
+        snprintf(error, error_size, "wav_missing_fmt_or_data");
+        return false;
+    }
+    if (audio_format != 1U) {
+        /* 3 = IEEE float, others = ADPCM/etc. Report the code so the failure is diagnosable. */
+        snprintf(error, error_size, "wav_unsupported_format:%u (need PCM)", (unsigned)audio_format);
+        return false;
+    }
+    if (out->bits_per_sample != 16U) {
+        snprintf(error, error_size, "wav_unsupported_bits:%u (need 16)", (unsigned)out->bits_per_sample);
+        return false;
+    }
+    if (out->channels != 1U && out->channels != 2U) {
+        snprintf(error, error_size, "wav_unsupported_channels:%u (need mono/stereo)", (unsigned)out->channels);
+        return false;
+    }
+    if (out->sample_rate == 0U) {
+        snprintf(error, error_size, "wav_invalid_sample_rate");
         return false;
     }
 

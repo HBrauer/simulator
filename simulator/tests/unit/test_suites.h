@@ -12,6 +12,7 @@ Suite *renderer_suite(void);
 Suite *ringbuffer_suite(void);
 Suite *streamer_suite(void);
 Suite *vita49_packet_suite(void);
+Suite *wav_reader_suite(void);
 Suite *receiver_c_suite(void);
 
 #endif

@@ -128,6 +128,7 @@ unit_tests = executable(
     'simulator/tests/unit/test_streamer.c',
     'simulator/tests/unit/test_timebase.c',
     'simulator/tests/unit/test_vita49_packet.c',
+    'simulator/tests/unit/test_wav_reader.c',
     'receiver/tests/test_receiver_c.c',
     'simulator/tests/unit/test_main.c'
   ),

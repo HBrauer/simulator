@@ -14,6 +14,7 @@ int main(void)
         ringbuffer_suite(),
         streamer_suite(),
         vita49_packet_suite(),
+        wav_reader_suite(),
         receiver_c_suite(),
     };
     SRunner *runner = srunner_create(suites[0]);
