@@ -224,6 +224,7 @@ def _assert_metrics_shape(metrics):
             "ringbuffer_overruns",
             "ringbuffer_underruns",
             "samples_dropped",
+            "worker_errors",
             "streams",
         },
     )
@@ -251,6 +252,7 @@ def _assert_metrics_shape(metrics):
                 "ringbuffer_overruns",
                 "ringbuffer_underruns",
                 "samples_dropped",
+                "worker_errors",
             },
         )
 

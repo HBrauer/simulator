@@ -11,6 +11,7 @@
 #include <errno.h>
 #include <pthread.h>
 #include <stdatomic.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -190,6 +191,17 @@ static void render_one_block(const stream_worker_t *worker, iq_ci16_t *buffer, c
     }
 }
 
+static void record_worker_error(stream_worker_t *worker, const char *reason)
+{
+    atomic_fetch_add(&worker->metrics->worker_errors, 1);
+    atomic_fetch_add(&worker->stream_metrics->worker_errors, 1);
+    if (worker->kind == STREAM_KIND_80MHZ) {
+        fprintf(stderr, "error: stream worker (receiver %u, 80mhz) failed: %s\n", worker->receiver->id, reason);
+    } else {
+        fprintf(stderr, "error: stream worker (receiver %u, ddc %zu) failed: %s\n", worker->receiver->id, worker->ddc_index, reason);
+    }
+}
+
 static void record_overrun(stream_worker_t *worker)
 {
     atomic_fetch_add(&worker->metrics->ringbuffer_overruns, 1);
@@ -260,6 +272,7 @@ static void *stream_render_thread_main(void *arg)
     apply_stream_affinity(worker->render_cpu);
     iq_ci16_t *buffer = calloc(worker->block_samples, sizeof(*buffer));
     if (buffer == NULL) {
+        record_worker_error(worker, "render buffer allocation failed");
         return NULL;
     }
 
@@ -327,17 +340,20 @@ static void *stream_udp_thread_main(void *arg)
 
     udp_output_t udp = {.fd = -1};
     if (!udp_output_open(&udp, host, port, receiver_snapshot.udp_multicast_interface)) {
+        record_worker_error(worker, "UDP socket open failed");
         return NULL;
     }
 
     const size_t send_capacity = vita49_if_data_packet_size(worker->block_samples);
     uint8_t *packets = calloc(STREAM_SEND_BATCH_SIZE, send_capacity);
     if (packets == NULL) {
+        record_worker_error(worker, "packet buffer allocation failed");
         udp_output_close(&udp);
         return NULL;
     }
     uint8_t *payloads = calloc(STREAM_SEND_BATCH_SIZE, worker->packet_bytes);
     if (payloads == NULL) {
+        record_worker_error(worker, "payload buffer allocation failed");
         free(packets);
         udp_output_close(&udp);
         return NULL;
