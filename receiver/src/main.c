@@ -2,7 +2,9 @@
 #define _GNU_SOURCE
 #endif
 
+#include "control_client.h"
 #include "history.h"
+#include "ui_text.h"
 #include "vita49_rx.h"
 #include "waterfall.h"
 
@@ -32,6 +34,13 @@
 #define UI_SPECTRUM_MIN_HEIGHT 56
 #define UI_BUTTON_SIZE 32
 #define UI_BUTTON_MARGIN 8
+#define UI_TEXT_SCALE 2
+#define UI_CHANNEL_COMBO_WIDTH 76
+#define UI_FREQ_FIELD_WIDTH 176
+#define UI_BANDWIDTH_COMBO_WIDTH 110
+#define UI_DROPDOWN_ITEM_HEIGHT 26
+#define UI_DROPDOWN_WIDTH 280
+#define UI_FREQ_EDIT_MAX 16
 #define AUTO_LEVEL_DYNAMIC_RANGE_DB 150.0f
 #define AUTO_LEVEL_HEADROOM_DB 4.0f
 #define AUTO_LEVEL_ATTACK 0.35f
@@ -59,6 +68,8 @@ typedef struct {
     bool auto_level;
     bool log_iq_stats;
     bool headless;
+    const char *control_url;
+    uint32_t channel_id;
 } app_config_t;
 
 typedef struct {
@@ -67,12 +78,34 @@ typedef struct {
     uint64_t payload_samples;
     uint64_t frames;
     uint64_t bad_packets;
+    uint64_t context_packets;
     uint64_t sequence_gaps;
     bool have_sequence;
     uint8_t last_sequence;
     uint32_t last_stream_id;
     uint64_t last_timestamp_ns;
+    /* Last in-band stream configuration seen in a VITA context packet. */
+    uint64_t stream_center_hz;
+    uint64_t stream_bandwidth_hz;
+    /* Rate measurement window, restarted on channel/rate changes so the title shows the
+     * current stream rate instead of a lifetime average. */
+    uint64_t rate_window_samples;
+    uint64_t rate_window_start_ns;
+    /* Settle window after a rate change: in-flight packets rendered at the old rate keep
+     * arriving briefly and must not be folded into the first waterfall rows. */
+    uint64_t discard_until_ns;
 } rx_stats_t;
+
+/* REST control state (--control-url). The channel selection, retunes, and bandwidth
+ * changes go through the simulator's channel API; sample-rate changes are then picked
+ * up from the in-band VITA context packets. */
+typedef struct {
+    bool enabled;
+    control_client_t client;
+    uint32_t channel;
+    char multicast_host[CONTROL_MAX_HOST];
+    uint64_t last_refresh_attempt_ns; /* throttles cache refreshes on in-band mismatches */
+} control_state_t;
 
 typedef struct {
     int16_t *iq;
@@ -158,7 +191,16 @@ static void usage(const char *argv0)
             "  --max-db DB                 Manual waterfall ceiling, default 0\n"
             "  --no-auto-level             Disable dynamic waterfall levels\n"
             "  --log-iq-stats              Log periodic received CI16 payload min/max/nonzero counts\n"
-            "  --headless                  Receive/process without opening SDL window\n",
+            "  --headless                  Receive/process without opening SDL window\n"
+            "  --control-url URL           Simulator REST API, e.g. http://127.0.0.1:8100.\n"
+            "                              Discovers port/sample rate and enables channel controls;\n"
+            "                              --port and --sample-rate-hz are then not needed.\n"
+            "  --channel N                 Initial channel to receive (with --control-url), default 0\n"
+            "\n"
+            "Controls (with --control-url): channel and bandwidth combo boxes in the toolbar,\n"
+            "and a center-frequency field (click, type MHz, Enter commits, Esc cancels).\n"
+            "Keys: PgUp/PgDn or 0-7 select channel, Left/Right retune (Shift = x10),\n"
+            "B cycles the bandwidth profile.\n",
             argv0);
 }
 
@@ -183,6 +225,8 @@ static bool parse_args(int argc, char **argv, app_config_t *config)
         .auto_level = true,
         .log_iq_stats = false,
         .headless = false,
+        .control_url = 0,
+        .channel_id = 0,
     };
     const char *host = arg_value(argc, argv, "--host");
     if (host != 0) {
@@ -212,7 +256,13 @@ static bool parse_args(int argc, char **argv, app_config_t *config)
     config->auto_level = !arg_present(argc, argv, "--no-auto-level");
     config->log_iq_stats = arg_present(argc, argv, "--log-iq-stats");
     config->headless = arg_present(argc, argv, "--headless");
-    if (config->port == 0 || config->sample_rate_hz == 0 || !waterfall_fft_size_valid(config->fft_size) || config->rows == 0) {
+    config->control_url = arg_value(argc, argv, "--control-url");
+    config->channel_id = (uint32_t)parse_u64_default(arg_value(argc, argv, "--channel"), 0);
+    /* With --control-url the port and sample rate come from the REST API. */
+    if (config->control_url == 0 && (config->port == 0 || config->sample_rate_hz == 0)) {
+        return false;
+    }
+    if (!waterfall_fft_size_valid(config->fft_size) || config->rows == 0) {
         return false;
     }
     if (config->width <= 0 || config->height <= 0) {
@@ -308,6 +358,21 @@ static double elapsed_seconds(struct timespec start, struct timespec stop)
     return (double)(stop.tv_sec - start.tv_sec) + (double)(stop.tv_nsec - start.tv_nsec) / 1000000000.0;
 }
 
+static uint64_t monotonic_ns(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
+static void rate_window_reset(rx_stats_t *stats)
+{
+    if (stats != 0) {
+        stats->rate_window_samples = 0;
+        stats->rate_window_start_ns = 0;
+    }
+}
+
 static void update_sequence_stats(rx_stats_t *stats, const vita49_rx_packet_t *packet)
 {
     if (stats->have_sequence) {
@@ -401,6 +466,206 @@ static void set_history_seconds(app_config_t *config, double seconds, frame_samp
     fprintf(stderr, "waterfall history %.1fs stride=%zu samples\n", config->history_seconds, config->frame_stride_samples);
 }
 
+/* Apply a new stream sample rate: recompute the frame stride for the current history
+ * target, restart frame collection, and clear the waterfall history (old rows cover a
+ * different frequency span, so keeping them would be misleading). */
+static void apply_sample_rate(app_config_t *config, waterfall_t *wf, frame_sampler_t *sampler, rx_stats_t *stats, uint32_t sample_rate_hz)
+{
+    if (sample_rate_hz == 0U || sample_rate_hz == config->sample_rate_hz) {
+        return;
+    }
+    rate_window_reset(stats);
+    config->sample_rate_hz = sample_rate_hz;
+    config->frame_stride_samples = waterfall_stride_for_history(config->rows, config->sample_rate_hz, config->history_seconds, config->fft_size);
+    config->history_seconds = waterfall_history_for_stride(config->rows, config->sample_rate_hz, config->frame_stride_samples);
+    if (stats != 0) {
+        stats->discard_until_ns = monotonic_ns() + 150000000ULL;
+    }
+    if (sampler != 0) {
+        frame_sampler_reset(sampler);
+    }
+    if (wf != 0) {
+        waterfall_t next;
+        if (waterfall_init(&next, wf->fft_size, wf->rows)) {
+            waterfall_free(wf);
+            *wf = next;
+        }
+    }
+    fprintf(stderr,
+            "stream sample rate %.3f MS/s history=%.1fs stride=%zu samples\n",
+            (double)config->sample_rate_hz / 1000000.0,
+            config->history_seconds,
+            config->frame_stride_samples);
+}
+
+static const control_channel_t *control_current(const control_state_t *control)
+{
+    return &control->client.channels[control->channel];
+}
+
+/* Select a channel: re-read the channel list, enable its stream if needed, retarget the
+ * UDP socket at its port, and adopt its sample rate. fd/wf/sampler/stats may be NULL for
+ * the initial pre-socket selection. */
+static bool control_select_channel(
+    app_config_t *config,
+    control_state_t *control,
+    int *fd,
+    waterfall_t *wf,
+    frame_sampler_t *sampler,
+    rx_stats_t *stats,
+    uint32_t channel_id)
+{
+    char error[CONTROL_MAX_ERROR];
+    if (!control_client_refresh(&control->client, error, sizeof(error))) {
+        fprintf(stderr, "control: %s\n", error);
+        return false;
+    }
+    if (channel_id >= control->client.channel_count) {
+        fprintf(stderr, "control: channel %u does not exist (0..%zu)\n", channel_id, control->client.channel_count - 1U);
+        return false;
+    }
+    control->channel = channel_id;
+    const control_channel_t *channel = control_current(control);
+    if (!channel->stream_enabled &&
+        !control_client_set_stream(&control->client, channel_id, true, error, sizeof(error))) {
+        fprintf(stderr, "control: %s\n", error);
+    }
+    config->port = channel->udp_port;
+    apply_sample_rate(config, wf, sampler, stats, channel->sample_rate_hz);
+    if (stats != 0) {
+        stats->stream_center_hz = channel->center_frequency_hz;
+        stats->stream_bandwidth_hz = channel->bandwidth_hz;
+        stats->have_sequence = false;
+        rate_window_reset(stats);
+    }
+    if (fd != 0 && *fd >= 0) {
+        close(*fd);
+        *fd = open_udp_socket(config);
+        if (*fd < 0) {
+            fprintf(stderr, "failed to bind UDP %s:%u: %s\n", config->host, config->port, strerror(errno));
+            return false;
+        }
+    }
+    fprintf(stderr,
+            "channel %u: port=%u center=%.6f MHz bw=%.3f MHz rate=%.3f MS/s%s%s\n",
+            channel->channel_id,
+            channel->udp_port,
+            (double)channel->center_frequency_hz / 1000000.0,
+            (double)channel->bandwidth_hz / 1000000.0,
+            (double)channel->sample_rate_hz / 1000000.0,
+            channel->track_tuner ? " (tracks tuner)" : "",
+            channel->in_frontend_window ? "" : " (outside front-end window)");
+    return true;
+}
+
+static uint64_t control_frequency_step_hz(const control_channel_t *channel)
+{
+    const uint64_t step = channel->bandwidth_hz / 10U;
+    return step < 100000ULL ? 100000ULL : step;
+}
+
+/* Set the selected channel's center frequency (clamped to the receiver's limits). */
+static void control_set_center(control_state_t *control, rx_stats_t *stats, uint64_t center_hz)
+{
+    const control_channel_t *channel = control_current(control);
+    if (channel->track_tuner) {
+        fprintf(stderr, "control: channel %u follows the receiver tuner; it cannot be retuned directly\n", channel->channel_id);
+        return;
+    }
+    if (control->client.frequency_max_hz > 0U && center_hz > control->client.frequency_max_hz) {
+        center_hz = control->client.frequency_max_hz;
+    }
+    char error[CONTROL_MAX_ERROR];
+    if (!control_client_set_channel(&control->client, control->channel, &center_hz, 0, error, sizeof(error))) {
+        fprintf(stderr, "control: %s\n", error);
+        return;
+    }
+    const control_channel_t *updated = control_current(control);
+    if (stats != 0) {
+        stats->stream_center_hz = updated->center_frequency_hz;
+    }
+    fprintf(stderr,
+            "channel %u center %.6f MHz%s\n",
+            updated->channel_id,
+            (double)updated->center_frequency_hz / 1000000.0,
+            updated->in_frontend_window ? "" : " (outside front-end window: stream is empty)");
+}
+
+static void control_step_frequency(control_state_t *control, rx_stats_t *stats, int direction, bool big_step)
+{
+    const control_channel_t *channel = control_current(control);
+    if (channel->track_tuner) {
+        fprintf(stderr, "control: channel %u follows the receiver tuner; it cannot be retuned directly\n", channel->channel_id);
+        return;
+    }
+    const uint64_t step = control_frequency_step_hz(channel) * (big_step ? 10U : 1U);
+    uint64_t center = channel->center_frequency_hz;
+    if (direction < 0) {
+        center = center > step ? center - step : 0U;
+    } else {
+        center += step;
+    }
+    control_set_center(control, stats, center);
+}
+
+/* Switch the channel to a supported bandwidth profile. The paired sample rate is
+ * applied by the server; the waterfall follows it. */
+static void control_set_bandwidth(app_config_t *config, control_state_t *control, waterfall_t *wf, frame_sampler_t *sampler, rx_stats_t *stats, uint32_t bandwidth_hz)
+{
+    const control_channel_t *channel = control_current(control);
+    if (bandwidth_hz == channel->bandwidth_hz) {
+        return;
+    }
+    char error[CONTROL_MAX_ERROR];
+    if (!control_client_set_channel(&control->client, control->channel, 0, &bandwidth_hz, error, sizeof(error))) {
+        fprintf(stderr, "control: %s\n", error);
+        return;
+    }
+    const control_channel_t *updated = control_current(control);
+    if (stats != 0) {
+        stats->stream_bandwidth_hz = updated->bandwidth_hz;
+    }
+    apply_sample_rate(config, wf, sampler, stats, updated->sample_rate_hz);
+    fprintf(stderr,
+            "channel %u bandwidth %.3f MHz rate %.3f MS/s%s\n",
+            updated->channel_id,
+            (double)updated->bandwidth_hz / 1000000.0,
+            (double)updated->sample_rate_hz / 1000000.0,
+            updated->in_frontend_window ? "" : " (outside front-end window: stream is empty)");
+}
+
+/* Bandwidth profiles that fit the front end, in capability order. */
+static size_t control_bandwidth_options(const control_state_t *control, uint32_t *out, size_t max)
+{
+    const control_client_t *client = &control->client;
+    size_t count = 0;
+    for (size_t i = 0; i < client->profile_count && count < max; i++) {
+        if ((uint64_t)client->profiles[i].bandwidth_hz <= client->frontend_bandwidth_hz) {
+            out[count++] = client->profiles[i].bandwidth_hz;
+        }
+    }
+    return count;
+}
+
+/* Cycle to the next supported bandwidth profile that fits the front end (keyboard `B`). */
+static void control_cycle_bandwidth(app_config_t *config, control_state_t *control, waterfall_t *wf, frame_sampler_t *sampler, rx_stats_t *stats)
+{
+    uint32_t options[CONTROL_MAX_PROFILES];
+    const size_t count = control_bandwidth_options(control, options, CONTROL_MAX_PROFILES);
+    if (count < 2U) {
+        return;
+    }
+    const control_channel_t *channel = control_current(control);
+    size_t current = 0;
+    for (size_t i = 0; i < count; i++) {
+        if (options[i] == channel->bandwidth_hz) {
+            current = i;
+            break;
+        }
+    }
+    control_set_bandwidth(config, control, wf, sampler, stats, options[(current + 1U) % count]);
+}
+
 static void maybe_log_iq_stats(const app_config_t *config, const rx_stats_t *stats, const vita49_rx_packet_t *packet)
 {
     if (!config->log_iq_stats || packet->payload_bytes < 4U) {
@@ -438,7 +703,7 @@ static void maybe_log_iq_stats(const app_config_t *config, const rx_stats_t *sta
 }
 
 static bool handle_received_packet(
-    const app_config_t *config,
+    app_config_t *config,
     waterfall_t *waterfall,
     rx_stats_t *stats,
     frame_sampler_t *sampler,
@@ -446,15 +711,42 @@ static bool handle_received_packet(
     size_t packet_bytes,
     bool *frame_ready)
 {
+    if (vita49_rx_packet_type(packet_data, packet_bytes) == VITA49_RX_PACKET_TYPE_CONTEXT) {
+        vita49_rx_context_t context;
+        if (!vita49_rx_parse_context(packet_data, packet_bytes, &context)) {
+            stats->bad_packets++;
+            return false;
+        }
+        /* In-band stream configuration: follow retunes and rate changes made by any
+         * client without polling the REST API. */
+        stats->context_packets++;
+        stats->bytes += (uint64_t)packet_bytes;
+        stats->stream_center_hz = context.rf_reference_frequency_hz;
+        stats->stream_bandwidth_hz = context.bandwidth_hz;
+        apply_sample_rate(config, waterfall, sampler, stats, (uint32_t)context.sample_rate_hz);
+        return false;
+    }
     vita49_rx_packet_t packet;
     if (!vita49_rx_parse_if_data(packet_data, packet_bytes, &packet)) {
         stats->bad_packets++;
         return false;
     }
+    if (stats->discard_until_ns != 0U) {
+        if (monotonic_ns() < stats->discard_until_ns) {
+            return false; /* stale-rate payloads from before the reconfiguration */
+        }
+        stats->discard_until_ns = 0U;
+        stats->have_sequence = false;
+        frame_sampler_reset(sampler);
+    }
     update_sequence_stats(stats, &packet);
     stats->packets++;
     stats->bytes += (uint64_t)packet_bytes;
     stats->payload_samples += (uint64_t)(packet.payload_bytes / 4U);
+    if (stats->rate_window_start_ns == 0U) {
+        stats->rate_window_start_ns = monotonic_ns();
+    }
+    stats->rate_window_samples += (uint64_t)(packet.payload_bytes / 4U);
     maybe_log_iq_stats(config, stats, &packet);
 
     const size_t frames = maybe_push_frames(waterfall, &packet, sampler, config->frame_stride_samples);
@@ -477,7 +769,18 @@ typedef struct {
     float display_max_db;
     SDL_Rect history_minus_button;
     SDL_Rect history_plus_button;
+    /* Control widgets (drawn and hit-tested only with --control-url). */
+    SDL_Rect channel_combo;
+    SDL_Rect freq_field;
+    SDL_Rect bandwidth_combo;
+    int open_combo; /* 0 = none, 1 = channel, 2 = bandwidth */
+    bool freq_editing;
+    char freq_edit[UI_FREQ_EDIT_MAX];
 } ui_t;
+
+#define UI_COMBO_NONE 0
+#define UI_COMBO_CHANNEL 1
+#define UI_COMBO_BANDWIDTH 2
 
 #ifdef __linux__
 typedef struct {
@@ -714,6 +1017,15 @@ static void ui_layout(ui_t *ui, int window_width)
         .w = UI_BUTTON_SIZE,
         .h = UI_BUTTON_SIZE,
     };
+
+    /* Control group on the left: channel combo, frequency input field + MHz label,
+     * bandwidth combo. */
+    int x = UI_BUTTON_MARGIN;
+    ui->channel_combo = (SDL_Rect){.x = x, .y = button_y, .w = UI_CHANNEL_COMBO_WIDTH, .h = UI_BUTTON_SIZE};
+    x += UI_CHANNEL_COMBO_WIDTH + 2 * UI_BUTTON_MARGIN;
+    ui->freq_field = (SDL_Rect){.x = x, .y = button_y, .w = UI_FREQ_FIELD_WIDTH, .h = UI_BUTTON_SIZE};
+    x += UI_FREQ_FIELD_WIDTH + 4 + ui_text_width(UI_TEXT_SCALE, "MHZ") + 2 * UI_BUTTON_MARGIN;
+    ui->bandwidth_combo = (SDL_Rect){.x = x, .y = button_y, .w = UI_BANDWIDTH_COMBO_WIDTH, .h = UI_BUTTON_SIZE};
 }
 
 static bool ui_point_in_rect(int x, int y, const SDL_Rect *rect)
@@ -746,7 +1058,234 @@ static void ui_draw_button(SDL_Renderer *renderer, SDL_Rect rect, bool enabled, 
     }
 }
 
-static void ui_draw_toolbar(ui_t *ui, const app_config_t *config, int window_width)
+static void ui_draw_button_frame(SDL_Renderer *renderer, SDL_Rect rect, bool enabled)
+{
+    if (enabled) {
+        SDL_SetRenderDrawColor(renderer, 48, 55, 64, 255);
+    } else {
+        SDL_SetRenderDrawColor(renderer, 28, 32, 38, 255);
+    }
+    SDL_RenderFillRect(renderer, &rect);
+    SDL_SetRenderDrawColor(renderer, 104, 116, 132, 255);
+    SDL_RenderDrawRect(renderer, &rect);
+    if (enabled) {
+        SDL_SetRenderDrawColor(renderer, 230, 236, 244, 255);
+    } else {
+        SDL_SetRenderDrawColor(renderer, 110, 118, 128, 255);
+    }
+}
+
+/* Vertically centered widget text baseline. */
+static int ui_widget_text_y(SDL_Rect rect)
+{
+    return rect.y + (rect.h - ui_text_height(UI_TEXT_SCALE)) / 2;
+}
+
+/* Combo box: label plus a small down-triangle on the right. */
+static void ui_draw_combo(SDL_Renderer *renderer, SDL_Rect rect, const char *label, bool open)
+{
+    ui_draw_button_frame(renderer, rect, true);
+    if (open) {
+        SDL_SetRenderDrawColor(renderer, 79, 190, 160, 255);
+        SDL_RenderDrawRect(renderer, &rect);
+        SDL_SetRenderDrawColor(renderer, 230, 236, 244, 255);
+    }
+    ui_text_draw(renderer, rect.x + 6, ui_widget_text_y(rect), UI_TEXT_SCALE, label);
+    const int arrow_x = rect.x + rect.w - 14;
+    const int arrow_y = rect.y + rect.h / 2 - 2;
+    for (int row = 0; row < 4; row++) {
+        SDL_RenderDrawLine(renderer, arrow_x - (3 - row), arrow_y + row, arrow_x + (3 - row), arrow_y + row);
+    }
+}
+
+/* Frequency input field. While editing it shows the typed text with a caret and a
+ * highlighted border; disabled (tuner-tracking channel) renders greyed out. */
+static void ui_draw_freq_field(SDL_Renderer *renderer, SDL_Rect rect, const char *text, bool editing, bool enabled)
+{
+    SDL_SetRenderDrawColor(renderer, editing ? 10 : 24, editing ? 14 : 28, editing ? 18 : 34, 255);
+    SDL_RenderFillRect(renderer, &rect);
+    if (editing) {
+        SDL_SetRenderDrawColor(renderer, 79, 190, 160, 255);
+    } else {
+        SDL_SetRenderDrawColor(renderer, 104, 116, 132, 255);
+    }
+    SDL_RenderDrawRect(renderer, &rect);
+    if (enabled) {
+        SDL_SetRenderDrawColor(renderer, 230, 236, 244, 255);
+    } else {
+        SDL_SetRenderDrawColor(renderer, 110, 118, 128, 255);
+    }
+    char shown[UI_FREQ_EDIT_MAX + 2];
+    snprintf(shown, sizeof(shown), "%s%s", text, editing ? "_" : "");
+    ui_text_draw(renderer, rect.x + 6, ui_widget_text_y(rect), UI_TEXT_SCALE, shown);
+}
+
+static SDL_Rect ui_dropdown_item_rect(int x, size_t index)
+{
+    return (SDL_Rect){
+        .x = x,
+        .y = UI_TOOLBAR_HEIGHT + (int)index * UI_DROPDOWN_ITEM_HEIGHT,
+        .w = UI_DROPDOWN_WIDTH,
+        .h = UI_DROPDOWN_ITEM_HEIGHT,
+    };
+}
+
+static void ui_channel_item_label(const control_channel_t *channel, char *out, size_t out_size)
+{
+    if (channel->track_tuner) {
+        snprintf(out, out_size, "CH%u TUNER %.0fM", channel->channel_id, (double)channel->bandwidth_hz / 1000000.0);
+    } else {
+        snprintf(out,
+                 out_size,
+                 "CH%u %.3f MHZ %.0fM",
+                 channel->channel_id,
+                 (double)channel->center_frequency_hz / 1000000.0,
+                 (double)channel->bandwidth_hz / 1000000.0);
+    }
+}
+
+static void ui_bandwidth_item_label(const control_state_t *control, uint32_t bandwidth_hz, char *out, size_t out_size)
+{
+    const control_client_t *client = &control->client;
+    for (size_t i = 0; i < client->profile_count; i++) {
+        if (client->profiles[i].bandwidth_hz == bandwidth_hz) {
+            snprintf(out,
+                     out_size,
+                     "%.3f MHZ / %.3f MSPS",
+                     (double)bandwidth_hz / 1000000.0,
+                     (double)client->profiles[i].sample_rate_hz / 1000000.0);
+            return;
+        }
+    }
+    snprintf(out, out_size, "%.3f MHZ", (double)bandwidth_hz / 1000000.0);
+}
+
+static void ui_draw_dropdown_item(SDL_Renderer *renderer, SDL_Rect rect, const char *label, bool selected)
+{
+    if (selected) {
+        SDL_SetRenderDrawColor(renderer, 34, 78, 66, 255);
+    } else {
+        SDL_SetRenderDrawColor(renderer, 24, 30, 37, 255);
+    }
+    SDL_RenderFillRect(renderer, &rect);
+    SDL_SetRenderDrawColor(renderer, 104, 116, 132, 255);
+    SDL_RenderDrawRect(renderer, &rect);
+    SDL_SetRenderDrawColor(renderer, 230, 236, 244, 255);
+    ui_text_draw(renderer, rect.x + 6, ui_widget_text_y(rect), UI_TEXT_SCALE, label);
+}
+
+/* Open dropdown lists, drawn last so they overlay the spectrum. */
+static void ui_draw_dropdowns(ui_t *ui, const control_state_t *control)
+{
+    if (!control->enabled || ui->open_combo == UI_COMBO_NONE) {
+        return;
+    }
+    if (ui->open_combo == UI_COMBO_CHANNEL) {
+        for (size_t i = 0; i < control->client.channel_count; i++) {
+            char label[64];
+            ui_channel_item_label(&control->client.channels[i], label, sizeof(label));
+            ui_draw_dropdown_item(ui->renderer, ui_dropdown_item_rect(ui->channel_combo.x, i), label, i == control->channel);
+        }
+    } else if (ui->open_combo == UI_COMBO_BANDWIDTH) {
+        uint32_t options[CONTROL_MAX_PROFILES];
+        const size_t count = control_bandwidth_options(control, options, CONTROL_MAX_PROFILES);
+        const control_channel_t *channel = control_current(control);
+        for (size_t i = 0; i < count; i++) {
+            char label[64];
+            ui_bandwidth_item_label(control, options[i], label, sizeof(label));
+            ui_draw_dropdown_item(ui->renderer, ui_dropdown_item_rect(ui->bandwidth_combo.x, i), label, options[i] == channel->bandwidth_hz);
+        }
+    }
+}
+
+/* Frequency-field edit lifecycle. SDL text input is only active while editing, so the
+ * single-key shortcuts (0-7, B) stay usable otherwise. */
+static void freq_edit_begin(ui_t *ui, const control_state_t *control, const rx_stats_t *stats)
+{
+    const control_channel_t *channel = control_current(control);
+    if (channel->track_tuner) {
+        fprintf(stderr, "control: channel %u follows the receiver tuner; it cannot be retuned directly\n", channel->channel_id);
+        return;
+    }
+    const uint64_t center = stats->stream_center_hz > 0U ? stats->stream_center_hz : channel->center_frequency_hz;
+    snprintf(ui->freq_edit, sizeof(ui->freq_edit), "%.6f", (double)center / 1000000.0);
+    ui->freq_editing = true;
+    ui->open_combo = UI_COMBO_NONE;
+    SDL_StartTextInput();
+}
+
+static void freq_edit_cancel(ui_t *ui)
+{
+    if (ui->freq_editing) {
+        ui->freq_editing = false;
+        SDL_StopTextInput();
+    }
+}
+
+static void freq_edit_commit(ui_t *ui, control_state_t *control, rx_stats_t *stats)
+{
+    const double mhz = strtod(ui->freq_edit, 0);
+    freq_edit_cancel(ui);
+    if (!(mhz > 0.0)) {
+        fprintf(stderr, "control: invalid frequency '%s'\n", ui->freq_edit);
+        return;
+    }
+    control_set_center(control, stats, (uint64_t)llround(mhz * 1000000.0));
+}
+
+static void freq_edit_append(ui_t *ui, const char *text)
+{
+    for (const char *p = text; *p != '\0'; p++) {
+        if ((*p < '0' || *p > '9') && *p != '.') {
+            continue;
+        }
+        const size_t len = strlen(ui->freq_edit);
+        if (len + 1U >= sizeof(ui->freq_edit)) {
+            return;
+        }
+        ui->freq_edit[len] = *p;
+        ui->freq_edit[len + 1U] = '\0';
+    }
+}
+
+static void freq_edit_backspace(ui_t *ui)
+{
+    const size_t len = strlen(ui->freq_edit);
+    if (len > 0U) {
+        ui->freq_edit[len - 1U] = '\0';
+    }
+}
+
+/* When the in-band VITA context reports a configuration that contradicts the cached REST
+ * channel state, another client changed the channel: re-read the channel list so the combo
+ * boxes, frequency field, and out-of-window flag follow. Throttled to avoid hammering the
+ * API while it is unreachable. */
+static bool control_sync_with_stream(control_state_t *control, const rx_stats_t *stats)
+{
+    if (!control->enabled) {
+        return false;
+    }
+    const control_channel_t *channel = control_current(control);
+    const bool bandwidth_mismatch = stats->stream_bandwidth_hz != 0U &&
+        stats->stream_bandwidth_hz != (uint64_t)channel->bandwidth_hz;
+    const bool center_mismatch = !channel->track_tuner && stats->stream_center_hz != 0U &&
+        stats->stream_center_hz != channel->center_frequency_hz;
+    if (!bandwidth_mismatch && !center_mismatch) {
+        return false;
+    }
+    const uint64_t now_ns = monotonic_ns();
+    if (now_ns - control->last_refresh_attempt_ns < 500000000ULL) {
+        return false;
+    }
+    control->last_refresh_attempt_ns = now_ns;
+    char error[CONTROL_MAX_ERROR];
+    if (!control_client_refresh(&control->client, error, sizeof(error))) {
+        return false;
+    }
+    return true;
+}
+
+static void ui_draw_toolbar(ui_t *ui, const app_config_t *config, const control_state_t *control, const rx_stats_t *stats, int window_width)
 {
     ui_layout(ui, window_width);
 
@@ -754,9 +1293,41 @@ static void ui_draw_toolbar(ui_t *ui, const app_config_t *config, int window_wid
     SDL_SetRenderDrawColor(ui->renderer, 17, 22, 28, 255);
     SDL_RenderFillRect(ui->renderer, &toolbar);
 
-    const int bar_x = UI_BUTTON_MARGIN;
+    if (control->enabled) {
+        const control_channel_t *channel = control_current(control);
+
+        char channel_label[16];
+        snprintf(channel_label, sizeof(channel_label), "CH%u", control->channel);
+        ui_draw_combo(ui->renderer, ui->channel_combo, channel_label, ui->open_combo == UI_COMBO_CHANNEL);
+
+        char freq_text[UI_FREQ_EDIT_MAX];
+        if (ui->freq_editing) {
+            snprintf(freq_text, sizeof(freq_text), "%s", ui->freq_edit);
+        } else {
+            const uint64_t center = stats->stream_center_hz > 0U ? stats->stream_center_hz : channel->center_frequency_hz;
+            snprintf(freq_text, sizeof(freq_text), "%.6f", (double)center / 1000000.0);
+        }
+        ui_draw_freq_field(ui->renderer, ui->freq_field, freq_text, ui->freq_editing, !channel->track_tuner);
+        SDL_SetRenderDrawColor(ui->renderer, 160, 172, 186, 255);
+        ui_text_draw(ui->renderer, ui->freq_field.x + ui->freq_field.w + 6, ui_widget_text_y(ui->freq_field), UI_TEXT_SCALE, "MHZ");
+
+        char bandwidth_label[16];
+        snprintf(bandwidth_label, sizeof(bandwidth_label), "%.0fM", (double)channel->bandwidth_hz / 1000000.0);
+        ui_draw_combo(ui->renderer, ui->bandwidth_combo, bandwidth_label, ui->open_combo == UI_COMBO_BANDWIDTH);
+    }
+
+    int bar_x = control->enabled
+        ? ui->bandwidth_combo.x + ui->bandwidth_combo.w + 2 * UI_BUTTON_MARGIN
+        : UI_BUTTON_MARGIN;
+    if (control->enabled && !control_current(control)->in_frontend_window) {
+        /* The channel span does not fit the front-end window: the stream is intentionally
+         * empty (like a hardware DDC tuned outside the digitised band). Say so. */
+        SDL_SetRenderDrawColor(ui->renderer, 255, 160, 60, 255);
+        ui_text_draw(ui->renderer, bar_x, ui_widget_text_y(ui->bandwidth_combo), UI_TEXT_SCALE, "OUT OF WINDOW");
+        bar_x += ui_text_width(UI_TEXT_SCALE, "OUT OF WINDOW") + 2 * UI_BUTTON_MARGIN;
+    }
     const int bar_y = UI_TOOLBAR_HEIGHT / 2 - 4;
-    const int bar_w = ui->history_minus_button.x - (2 * UI_BUTTON_MARGIN);
+    const int bar_w = ui->history_minus_button.x - bar_x - UI_BUTTON_MARGIN;
     if (bar_w > 20) {
         SDL_Rect bar = {.x = bar_x, .y = bar_y, .w = bar_w, .h = 8};
         SDL_SetRenderDrawColor(ui->renderer, 44, 52, 61, 255);
@@ -836,7 +1407,7 @@ static void ui_draw_spectrum(ui_t *ui, const waterfall_t *wf, SDL_Rect rect, flo
     SDL_RenderDrawLine(ui->renderer, zero_x, rect.y, zero_x, rect.y + rect.h - 1);
 }
 
-static void ui_update(ui_t *ui, const waterfall_t *wf, const app_config_t *config, const rx_stats_t *stats, struct timespec start)
+static void ui_update(ui_t *ui, const waterfall_t *wf, const app_config_t *config, const control_state_t *control, const rx_stats_t *stats, struct timespec start)
 {
     float min_db = config->min_db;
     float max_db = config->max_db;
@@ -871,17 +1442,37 @@ static void ui_update(ui_t *ui, const waterfall_t *wf, const app_config_t *confi
     };
     SDL_RenderCopy(ui->renderer, ui->texture, 0, &waterfall_rect);
     ui_draw_spectrum(ui, wf, spectrum_rect, min_db, max_db);
-    ui_draw_toolbar(ui, config, window_width);
+    ui_draw_toolbar(ui, config, control, stats, window_width);
+    ui_draw_dropdowns(ui, control);
     SDL_RenderPresent(ui->renderer);
 
     struct timespec now;
     clock_gettime(CLOCK_MONOTONIC, &now);
-    const double seconds = elapsed_seconds(start, now);
-    const double msps = seconds > 0.0 ? (double)stats->payload_samples / seconds / 1000000.0 : 0.0;
-    char title[320];
+    (void)start;
+    const uint64_t now_ns = monotonic_ns();
+    const double window_s = stats->rate_window_start_ns > 0U && now_ns > stats->rate_window_start_ns
+        ? (double)(now_ns - stats->rate_window_start_ns) / 1000000000.0
+        : 0.0;
+    const double msps = window_s > 0.0 ? (double)stats->rate_window_samples / window_s / 1000000.0 : 0.0;
+    char stream_info[96] = "";
+    if (stats->stream_center_hz > 0U) {
+        snprintf(stream_info,
+                 sizeof(stream_info),
+                 "f=%.6f MHz bw=%.3f MHz | ",
+                 (double)stats->stream_center_hz / 1000000.0,
+                 (double)stats->stream_bandwidth_hz / 1000000.0);
+    }
+    char channel_info[48] = "";
+    if (control->enabled) {
+        const bool in_window = control_current(control)->in_frontend_window;
+        snprintf(channel_info, sizeof(channel_info), "ch=%u | %s", control->channel, in_window ? "" : "OUT OF WINDOW | ");
+    }
+    char title[420];
     snprintf(title,
              sizeof(title),
-             "SDR Waterfall | %.2f MS/s | hist=%.1fs stride=%zu | packets=%llu frames=%llu gaps=%llu bad=%llu stream=0x%08x levels=%.1f..%.1f dB row=%.1f..%.1f dB",
+             "SDR Waterfall | %s%s%.2f MS/s | hist=%.1fs stride=%zu | packets=%llu frames=%llu gaps=%llu bad=%llu stream=0x%08x levels=%.1f..%.1f dB row=%.1f..%.1f dB",
+             channel_info,
+             stream_info,
              msps,
              config->history_seconds,
              config->frame_stride_samples,
@@ -907,12 +1498,39 @@ int main(int argc, char **argv)
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
 
+    control_state_t control;
+    memset(&control, 0, sizeof(control));
+    if (config.control_url != 0) {
+        char control_error[CONTROL_MAX_ERROR];
+        if (!control_client_init(&control.client, config.control_url, control_error, sizeof(control_error))) {
+            fprintf(stderr, "control: %s\n", control_error);
+            return 2;
+        }
+        control.enabled = true;
+        /* When the simulator publishes to a multicast group, receive on that group
+         * unless the user chose a bind host explicitly. */
+        struct in_addr group_addr;
+        if (strcmp(config.host, "0.0.0.0") == 0 &&
+            inet_pton(AF_INET, control.client.udp_output_host, &group_addr) == 1 &&
+            ipv4_is_multicast(group_addr)) {
+            snprintf(control.multicast_host, sizeof(control.multicast_host), "%s", control.client.udp_output_host);
+            config.host = control.multicast_host;
+        }
+        if (!control_select_channel(&config, &control, 0, 0, 0, 0, config.channel_id)) {
+            return 2;
+        }
+        /* The channel's rate may equal the default, in which case apply_sample_rate was a
+         * no-op; make sure the stride matches the discovered rate either way. */
+        config.frame_stride_samples = waterfall_stride_for_history(config.rows, config.sample_rate_hz, config.history_seconds, config.fft_size);
+        config.history_seconds = waterfall_history_for_stride(config.rows, config.sample_rate_hz, config.frame_stride_samples);
+    }
+
     waterfall_t waterfall;
     if (!waterfall_init(&waterfall, config.fft_size, config.rows)) {
         fprintf(stderr, "failed to allocate waterfall buffers\n");
         return 2;
     }
-    const int fd = open_udp_socket(&config);
+    int fd = open_udp_socket(&config);
     if (fd < 0) {
         fprintf(stderr, "failed to bind UDP %s:%u: %s\n", config.host, config.port, strerror(errno));
         waterfall_free(&waterfall);
@@ -968,6 +1586,10 @@ int main(int argc, char **argv)
 
     rx_stats_t stats;
     memset(&stats, 0, sizeof(stats));
+    if (control.enabled) {
+        stats.stream_center_hz = control_current(&control)->center_frequency_hz;
+        stats.stream_bandwidth_hz = control_current(&control)->bandwidth_hz;
+    }
     struct timespec start;
     clock_gettime(CLOCK_MONOTONIC, &start);
     const int receive_buffer_bytes = socket_receive_buffer_bytes(fd);
@@ -998,14 +1620,50 @@ int main(int argc, char **argv)
                         keep_running = 0;
                     }
                     ui_needs_redraw = true;
+                } else if (event.type == SDL_TEXTINPUT && ui.freq_editing) {
+                    freq_edit_append(&ui, event.text.text);
+                    ui_needs_redraw = true;
+                } else if (event.type == SDL_KEYDOWN && ui.freq_editing) {
+                    /* The frequency field swallows all keys while editing, so digits and
+                     * `B` do not double as channel/bandwidth shortcuts. */
+                    const SDL_Keycode sym = event.key.keysym.sym;
+                    if (sym == SDLK_RETURN || sym == SDLK_KP_ENTER) {
+                        freq_edit_commit(&ui, &control, &stats);
+                    } else if (sym == SDLK_ESCAPE) {
+                        freq_edit_cancel(&ui);
+                    } else if (sym == SDLK_BACKSPACE) {
+                        freq_edit_backspace(&ui);
+                    }
+                    ui_needs_redraw = true;
                 } else if (event.type == SDL_KEYDOWN) {
-                    if (event.key.keysym.sym == SDLK_LEFTBRACKET || event.key.keysym.sym == SDLK_MINUS) {
+                    const SDL_Keycode sym = event.key.keysym.sym;
+                    const bool shift = (event.key.keysym.mod & KMOD_SHIFT) != 0;
+                    if (sym == SDLK_LEFTBRACKET || sym == SDLK_MINUS) {
                         set_history_seconds(&config, config.history_seconds - 1.0, &sampler);
                         ui_needs_redraw = true;
-                    } else if (event.key.keysym.sym == SDLK_RIGHTBRACKET ||
-                               event.key.keysym.sym == SDLK_EQUALS ||
-                               event.key.keysym.sym == SDLK_PLUS) {
+                    } else if (sym == SDLK_RIGHTBRACKET || sym == SDLK_EQUALS || sym == SDLK_PLUS) {
                         set_history_seconds(&config, config.history_seconds + 1.0, &sampler);
+                        ui_needs_redraw = true;
+                    } else if (control.enabled && sym == SDLK_ESCAPE && ui.open_combo != UI_COMBO_NONE) {
+                        ui.open_combo = UI_COMBO_NONE;
+                        ui_needs_redraw = true;
+                    } else if (control.enabled && sym == SDLK_PAGEUP && control.channel > 0U) {
+                        control_select_channel(&config, &control, &fd, &waterfall, &sampler, &stats, control.channel - 1U);
+                        ui_needs_redraw = true;
+                    } else if (control.enabled && sym == SDLK_PAGEDOWN) {
+                        control_select_channel(&config, &control, &fd, &waterfall, &sampler, &stats, control.channel + 1U);
+                        ui_needs_redraw = true;
+                    } else if (control.enabled && sym >= SDLK_0 && sym <= SDLK_9) {
+                        control_select_channel(&config, &control, &fd, &waterfall, &sampler, &stats, (uint32_t)(sym - SDLK_0));
+                        ui_needs_redraw = true;
+                    } else if (control.enabled && sym == SDLK_LEFT) {
+                        control_step_frequency(&control, &stats, -1, shift);
+                        ui_needs_redraw = true;
+                    } else if (control.enabled && sym == SDLK_RIGHT) {
+                        control_step_frequency(&control, &stats, 1, shift);
+                        ui_needs_redraw = true;
+                    } else if (control.enabled && sym == SDLK_b) {
+                        control_cycle_bandwidth(&config, &control, &waterfall, &sampler, &stats);
                         ui_needs_redraw = true;
                     }
                 } else if (event.type == SDL_MOUSEBUTTONDOWN && event.button.button == SDL_BUTTON_LEFT) {
@@ -1014,12 +1672,46 @@ int main(int argc, char **argv)
                     SDL_GetRendererOutputSize(ui.renderer, &window_width, &window_height);
                     (void)window_height;
                     ui_layout(&ui, window_width);
-                    if (ui_point_in_rect(event.button.x, event.button.y, &ui.history_minus_button)) {
+                    const int mx = event.button.x;
+                    const int my = event.button.y;
+                    ui_needs_redraw = true;
+                    if (control.enabled && ui.open_combo == UI_COMBO_CHANNEL) {
+                        /* An open dropdown captures the click: select an item or close. */
+                        ui.open_combo = UI_COMBO_NONE;
+                        for (size_t i = 0; i < control.client.channel_count; i++) {
+                            const SDL_Rect item = ui_dropdown_item_rect(ui.channel_combo.x, i);
+                            if (ui_point_in_rect(mx, my, &item)) {
+                                control_select_channel(&config, &control, &fd, &waterfall, &sampler, &stats, (uint32_t)i);
+                                break;
+                            }
+                        }
+                    } else if (control.enabled && ui.open_combo == UI_COMBO_BANDWIDTH) {
+                        ui.open_combo = UI_COMBO_NONE;
+                        uint32_t options[CONTROL_MAX_PROFILES];
+                        const size_t count = control_bandwidth_options(&control, options, CONTROL_MAX_PROFILES);
+                        for (size_t i = 0; i < count; i++) {
+                            const SDL_Rect item = ui_dropdown_item_rect(ui.bandwidth_combo.x, i);
+                            if (ui_point_in_rect(mx, my, &item)) {
+                                control_set_bandwidth(&config, &control, &waterfall, &sampler, &stats, options[i]);
+                                break;
+                            }
+                        }
+                    } else if (control.enabled && ui.freq_editing && !ui_point_in_rect(mx, my, &ui.freq_field)) {
+                        freq_edit_cancel(&ui);
+                    } else if (ui_point_in_rect(mx, my, &ui.history_minus_button)) {
                         set_history_seconds(&config, config.history_seconds - 1.0, &sampler);
-                        ui_needs_redraw = true;
-                    } else if (ui_point_in_rect(event.button.x, event.button.y, &ui.history_plus_button)) {
+                    } else if (ui_point_in_rect(mx, my, &ui.history_plus_button)) {
                         set_history_seconds(&config, config.history_seconds + 1.0, &sampler);
-                        ui_needs_redraw = true;
+                    } else if (control.enabled && ui_point_in_rect(mx, my, &ui.channel_combo)) {
+                        freq_edit_cancel(&ui);
+                        ui.open_combo = UI_COMBO_CHANNEL;
+                    } else if (control.enabled && ui_point_in_rect(mx, my, &ui.bandwidth_combo)) {
+                        freq_edit_cancel(&ui);
+                        ui.open_combo = UI_COMBO_BANDWIDTH;
+                    } else if (control.enabled && ui_point_in_rect(mx, my, &ui.freq_field)) {
+                        if (!ui.freq_editing) {
+                            freq_edit_begin(&ui, &control, &stats);
+                        }
                     }
                 }
             }
@@ -1088,8 +1780,11 @@ int main(int argc, char **argv)
 #endif
         }
 
+        if (control_sync_with_stream(&control, &stats)) {
+            ui_needs_redraw = true;
+        }
         if (use_ui && (frame_ready || ui_needs_redraw)) {
-            ui_update(&ui, &waterfall, &config, &stats, start);
+            ui_update(&ui, &waterfall, &config, &control, &stats, start);
         } else if (!use_ui && frame_ready) {
             struct timespec now;
             clock_gettime(CLOCK_MONOTONIC, &now);

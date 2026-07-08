@@ -90,6 +90,23 @@ static bool parse_modulation(const char *name, scenario_modulation_t *out)
     return false;
 }
 
+static bool parse_replay_mode(const char *name, scenario_replay_mode_t *out)
+{
+    if (strcmp(name, "fixed") == 0) {
+        *out = SCENARIO_REPLAY_FIXED;
+        return true;
+    }
+    if (strcmp(name, "range") == 0) {
+        *out = SCENARIO_REPLAY_RANGE;
+        return true;
+    }
+    if (strcmp(name, "shift") == 0) {
+        *out = SCENARIO_REPLAY_SHIFT;
+        return true;
+    }
+    return false;
+}
+
 bool scenario_load_json(const char *path, scenario_t *scenario, char *error, size_t error_size)
 {
     memset(scenario, 0, sizeof(*scenario));
@@ -184,13 +201,64 @@ bool scenario_load_json(const char *path, scenario_t *scenario, char *error, siz
     for (size_t i = 0; i < scenario->signal_count; i++) {
         json_t *sig = json_array_get(signals, i);
         scenario_signal_t *out = &scenario->signals[i];
+        char replay_mode_name[16];
+        if (!get_json_string(sig, "replay_mode", replay_mode_name, sizeof(replay_mode_name))) {
+            sim_strlcpy(replay_mode_name, "fixed", sizeof(replay_mode_name));
+        }
+        if (!parse_replay_mode(replay_mode_name, &out->replay_mode)) {
+            json_decref(root);
+            snprintf(error, error_size, "signal_replay_mode_invalid");
+            return false;
+        }
+        json_t *range = json_object_get(sig, "frequency_range");
+        if (json_is_object(range)) {
+            if (!get_json_u64(range, "start_hz", &out->replay_range_start_hz) ||
+                !get_json_u64(range, "stop_hz", &out->replay_range_stop_hz)) {
+                json_decref(root);
+                snprintf(error, error_size, "signal_frequency_range_invalid");
+                return false;
+            }
+        } else if (range != NULL) {
+            json_decref(root);
+            snprintf(error, error_size, "signal_frequency_range_invalid");
+            return false;
+        }
+        json_t *loop = json_object_get(sig, "loop");
+        if (json_is_boolean(loop)) {
+            out->loop = json_is_true(loop);
+        } else {
+            out->loop = out->replay_mode != SCENARIO_REPLAY_FIXED;
+        }
+        json_t *passthrough = json_object_get(sig, "passthrough");
+        out->passthrough = json_is_boolean(passthrough) && json_is_true(passthrough);
         if (!get_json_string(sig, "signal_id", out->signal_id, sizeof(out->signal_id)) ||
             !get_json_string(sig, "source_reference", out->source_reference, sizeof(out->source_reference)) ||
-            !get_json_u64(sig, "center_frequency_hz", &out->center_frequency_hz) ||
             !get_json_u32(sig, "bandwidth_hz", &out->bandwidth_hz) ||
-            !get_json_double(sig, "power_dbm", &out->power_dbm) ||
-            !get_json_double(sig, "start_time_s", &out->start_time_s) ||
-            !get_json_double(sig, "repeat_interval_s", &out->repeat_interval_s)) {
+            !get_json_double(sig, "power_dbm", &out->power_dbm)) {
+            json_decref(root);
+            snprintf(error, error_size, "signal_invalid");
+            return false;
+        }
+        /* center_frequency_hz is ignored in range mode (content follows the tune) and may be
+         * omitted there; every other mode needs the absolute placement. */
+        if (!get_json_u64(sig, "center_frequency_hz", &out->center_frequency_hz) &&
+            out->replay_mode != SCENARIO_REPLAY_RANGE) {
+            json_decref(root);
+            snprintf(error, error_size, "signal_invalid");
+            return false;
+        }
+        if (!get_json_double(sig, "start_time_s", &out->start_time_s)) {
+            out->start_time_s = 0.0;
+        }
+        const bool has_repeat = get_json_double(sig, "repeat_interval_s", &out->repeat_interval_s);
+        if (out->loop && has_repeat) {
+            /* The two timing models cannot be mixed silently: a looping signal has no
+             * silent gap, so a repeat interval would be dead configuration. */
+            json_decref(root);
+            snprintf(error, error_size, "loop_repeat_conflict");
+            return false;
+        }
+        if (!out->loop && !has_repeat) {
             json_decref(root);
             snprintf(error, error_size, "signal_invalid");
             return false;
@@ -337,14 +405,55 @@ bool scenario_validate(scenario_t *scenario, const char *base_dir, char *error, 
         }
         const scenario_source_t *source = scenario_find_source(scenario, signal->source_reference);
         if (source == NULL || signal->center_frequency_hz > SIM_MAX_RF_HZ || signal->start_time_s < 0.0 ||
-            signal->start_time_s >= 86400.0 || signal->repeat_interval_s <= 0.0) {
+            signal->start_time_s >= 86400.0 || (!signal->loop && signal->repeat_interval_s <= 0.0)) {
             snprintf(error, error_size, source == NULL ? "missing_source_reference" : "signal_invalid");
             return false;
         }
-        const double duration = (double)source->sample_count / (double)source->sample_rate_hz;
-        if (duration > signal->repeat_interval_s) {
-            snprintf(error, error_size, "signal_repeat_too_short");
+        if (!signal->loop) {
+            const double duration = (double)source->sample_count / (double)source->sample_rate_hz;
+            if (duration > signal->repeat_interval_s) {
+                snprintf(error, error_size, "signal_repeat_too_short");
+                return false;
+            }
+        }
+        if (signal->replay_mode != SCENARIO_REPLAY_FIXED) {
+            if (signal->replay_range_start_hz >= signal->replay_range_stop_hz ||
+                signal->replay_range_stop_hz > SIM_MAX_RF_HZ) {
+                snprintf(error, error_size, "replay_range_invalid");
+                return false;
+            }
+            /* Range/shift replay bypasses the passband model and streams the file verbatim,
+             * which only makes sense for raw IQ recordings. */
+            if (source->source_kind != SCENARIO_SOURCE_IQ_FILE || signal->modulation != SCENARIO_MODULATION_IQ) {
+                snprintf(error, error_size, "replay_mode_source_mismatch");
+                return false;
+            }
+            if (signal->replay_mode == SCENARIO_REPLAY_SHIFT) {
+                if (signal->center_frequency_hz == 0) {
+                    snprintf(error, error_size, "replay_shift_missing_center");
+                    return false;
+                }
+                if (signal->center_frequency_hz < signal->replay_range_start_hz ||
+                    signal->center_frequency_hz > signal->replay_range_stop_hz) {
+                    fprintf(stderr,
+                            "warning: signal %s shift center %llu Hz lies outside its frequency range\n",
+                            signal->signal_id, (unsigned long long)signal->center_frequency_hz);
+                }
+            }
+        }
+        if (signal->loop && source->source_kind != SCENARIO_SOURCE_IQ_FILE) {
+            snprintf(error, error_size, "loop_source_unsupported");
             return false;
+        }
+        if (signal->passthrough) {
+            if (signal->replay_mode == SCENARIO_REPLAY_FIXED) {
+                snprintf(error, error_size, "passthrough_requires_replay_mode");
+                return false;
+            }
+            if (!signal->loop) {
+                snprintf(error, error_size, "passthrough_requires_loop");
+                return false;
+            }
         }
         if (source->source_kind == SCENARIO_SOURCE_IQ_FILE && signal->modulation != SCENARIO_MODULATION_IQ) {
             snprintf(error, error_size, "signal_modulation_source_mismatch");

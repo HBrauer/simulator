@@ -33,6 +33,12 @@
 
 #define RESAMPLER_RADIUS 4
 #define RESAMPLER_TAPS 8U
+/* Decimation needs a kernel that spans ~RESAMPLER_RADIUS lobes of the *cutoff-scaled* sinc,
+ * i.e. the radius grows with the decimation ratio. The fixed 8-tap kernel had so little
+ * stopband for ratios >= 2 that strong out-of-band signals folded back into the channel at
+ * visible strength. Capped so the widest kernel stays cheap relative to its (low) output rate. */
+#define RESAMPLER_MAX_RADIUS 128
+#define RESAMPLER_MAX_TAPS (2U * RESAMPLER_MAX_RADIUS)
 #define LOW_RATE_LINEAR_MAX_SOURCE_PER_OUTPUT 0.125
 
 static void resample_ci16(const iq_ci16_t *samples, size_t sample_count, double source_position, double cutoff, double *out_i, double *out_q);
@@ -47,6 +53,21 @@ static double resampler_cutoff(double source_per_output)
     return source_per_output > 1.0 ? 1.0 / source_per_output : 1.0;
 }
 
+/* Kernel radius in source samples for a given cutoff: RESAMPLER_RADIUS sinc lobes at the
+ * cutoff-scaled lobe width, so decimating kernels keep the same stopband shape as the
+ * upsampling one. */
+static int resampler_radius_for_cutoff(double cutoff)
+{
+    if (cutoff >= 1.0) {
+        return RESAMPLER_RADIUS;
+    }
+    /* Decimating kernels span twice the base lobe count: the extra lobes buy ~15 dB more
+     * stopband where shifted-out-of-window content would otherwise fold back, and the cost
+     * scales with the (low) output rate of the decimated stream. */
+    const double radius = ceil((double)(2 * RESAMPLER_RADIUS) / cutoff);
+    return radius > (double)RESAMPLER_MAX_RADIUS ? (int)RESAMPLER_MAX_RADIUS : (int)radius;
+}
+
 static double sinc_value(double x)
 {
     if (fabs(x) < 1e-12) {
@@ -55,9 +76,9 @@ static double sinc_value(double x)
     return sin(M_PI * x) / (M_PI * x);
 }
 
-static double hann_window(double distance)
+static double hann_window_radius(double distance, int radius)
 {
-    const double normalized = fabs(distance) / (double)RESAMPLER_RADIUS;
+    const double normalized = fabs(distance) / (double)radius;
     if (normalized >= 1.0) {
         return 0.0;
     }
@@ -75,24 +96,27 @@ static double hann_window(double distance)
 
 typedef struct {
     double cutoff;
-    float w[RESAMPLER_PHASES][RESAMPLER_TAPS];
+    int radius; /* taps = 2 * radius */
+    float w[RESAMPLER_PHASES][RESAMPLER_MAX_TAPS];
 } resampler_table_t;
 
 static void build_resampler_table(resampler_table_t *table, double cutoff)
 {
     table->cutoff = cutoff;
+    table->radius = resampler_radius_for_cutoff(cutoff);
+    const size_t taps = 2U * (size_t)table->radius;
     for (size_t phase = 0; phase < RESAMPLER_PHASES; phase++) {
         const double fraction = (double)phase / (double)RESAMPLER_PHASES;
         double weight_sum = 0.0;
-        for (size_t tap_index = 0; tap_index < RESAMPLER_TAPS; tap_index++) {
-            const int tap = (int)tap_index - RESAMPLER_RADIUS + 1;
+        for (size_t tap_index = 0; tap_index < taps; tap_index++) {
+            const int tap = (int)tap_index - table->radius + 1;
             const double distance = fraction - (double)tap;
-            const double weight = sinc_value(cutoff * distance) * hann_window(distance);
+            const double weight = sinc_value(cutoff * distance) * hann_window_radius(distance, table->radius);
             table->w[phase][tap_index] = (float)weight;
             weight_sum += weight;
         }
         if (fabs(weight_sum) >= 1e-12) {
-            for (size_t tap_index = 0; tap_index < RESAMPLER_TAPS; tap_index++) {
+            for (size_t tap_index = 0; tap_index < taps; tap_index++) {
                 table->w[phase][tap_index] = (float)((double)table->w[phase][tap_index] / weight_sum);
             }
         }
@@ -148,12 +172,14 @@ static void resample_table_ci16(const iq_ci16_t *samples, size_t sample_count, d
         center += 1;
     }
     const float *weights = table->w[phase];
-    if (center < RESAMPLER_RADIUS - 1 || (uint64_t)center + RESAMPLER_RADIUS >= sample_count) {
+    const int radius = table->radius;
+    const size_t taps = 2U * (size_t)radius;
+    if (center < radius - 1 || (uint64_t)center + (uint64_t)radius >= sample_count) {
         double acc_i = 0.0;
         double acc_q = 0.0;
         double weight_sum = 0.0;
-        for (size_t tap_index = 0; tap_index < RESAMPLER_TAPS; tap_index++) {
-            const int64_t index = center + (int64_t)tap_index - RESAMPLER_RADIUS + 1;
+        for (size_t tap_index = 0; tap_index < taps; tap_index++) {
+            const int64_t index = center + (int64_t)tap_index - radius + 1;
             if (index < 0 || (uint64_t)index >= sample_count) {
                 continue;
             }
@@ -173,8 +199,8 @@ static void resample_table_ci16(const iq_ci16_t *samples, size_t sample_count, d
     }
     double acc_i = 0.0;
     double acc_q = 0.0;
-    for (size_t tap_index = 0; tap_index < RESAMPLER_TAPS; tap_index++) {
-        const int64_t index = center + (int64_t)tap_index - RESAMPLER_RADIUS + 1;
+    for (size_t tap_index = 0; tap_index < taps; tap_index++) {
+        const int64_t index = center + (int64_t)tap_index - radius + 1;
         acc_i += (double)samples[index].i * (double)weights[tap_index];
         acc_q += (double)samples[index].q * (double)weights[tap_index];
     }
@@ -197,18 +223,19 @@ static int16_t clip_i16_f(float value)
 static void resample_sinc_ci16(const iq_ci16_t *samples, size_t sample_count, double source_position, double cutoff, double *out_i, double *out_q)
 {
     const int64_t center = (int64_t)floor(source_position);
+    const int radius = resampler_radius_for_cutoff(cutoff);
     double acc_i = 0.0;
     double acc_q = 0.0;
     double weight_sum = 0.0;
-    for (int tap = -RESAMPLER_RADIUS + 1; tap <= RESAMPLER_RADIUS; tap++) {
+    for (int tap = -radius + 1; tap <= radius; tap++) {
         const int64_t index = center + tap;
         if (index < 0 || (uint64_t)index >= sample_count) {
             continue;
         }
         const double distance = source_position - (double)index;
-        /* Kernel band-limited to `cutoff` (<=1). The window stays over the fixed tap radius;
+        /* Kernel band-limited to `cutoff` (<=1). The window spans the cutoff-scaled radius;
          * normalising by weight_sum keeps unity DC gain. */
-        const double weight = sinc_value(cutoff * distance) * hann_window(distance);
+        const double weight = sinc_value(cutoff * distance) * hann_window_radius(distance, radius);
         acc_i += (double)samples[index].i * weight;
         acc_q += (double)samples[index].q * weight;
         weight_sum += weight;
@@ -227,17 +254,18 @@ static void resample_sinc_ci16(const iq_ci16_t *samples, size_t sample_count, do
 static void resample_liquid_ci16(const iq_ci16_t *samples, size_t sample_count, double source_position, double cutoff, double *out_i, double *out_q)
 {
     const int64_t center = (int64_t)floor(source_position);
-    float weights[2 * RESAMPLER_RADIUS];
-    liquid_float_complex input[2 * RESAMPLER_RADIUS];
+    const int radius = resampler_radius_for_cutoff(cutoff);
+    float weights[RESAMPLER_MAX_TAPS];
+    liquid_float_complex input[RESAMPLER_MAX_TAPS];
     unsigned int tap_count = 0;
     double weight_sum = 0.0;
-    for (int tap = -RESAMPLER_RADIUS + 1; tap <= RESAMPLER_RADIUS; tap++) {
+    for (int tap = -radius + 1; tap <= radius; tap++) {
         const int64_t index = center + tap;
         if (index < 0 || (uint64_t)index >= sample_count) {
             continue;
         }
         const double distance = source_position - (double)index;
-        const double weight = sinc_value(cutoff * distance) * hann_window(distance);
+        const double weight = sinc_value(cutoff * distance) * hann_window_radius(distance, radius);
         weights[tap_count] = (float)weight;
         input[tap_count] = (float)samples[index].i + (float)samples[index].q * I;
         weight_sum += weight;
@@ -508,12 +536,14 @@ static size_t fill_scratch_polyphase(const iq_ci16_t *samples, size_t read_count
                 phase = 0;
                 center += 1;
             }
-            if (center >= (uint64_t)(RESAMPLER_RADIUS - 1) && center + RESAMPLER_RADIUS < read_count) {
+            const uint64_t radius = (uint64_t)table->radius;
+            if (center >= radius - 1U && center + radius < read_count) {
                 const float *weights = table->w[phase];
-                const iq_ci16_t *window = &samples[center - RESAMPLER_RADIUS + 1];
+                const iq_ci16_t *window = &samples[center - radius + 1U];
+                const size_t taps = 2U * (size_t)radius;
                 float acc_i = 0.0f;
                 float acc_q = 0.0f;
-                for (size_t tap_index = 0; tap_index < RESAMPLER_TAPS; tap_index++) {
+                for (size_t tap_index = 0; tap_index < taps; tap_index++) {
                     acc_i += (float)window[tap_index].i * weights[tap_index];
                     acc_q += (float)window[tap_index].q * weights[tap_index];
                 }
@@ -652,6 +682,122 @@ static void render_resampled_nco(const iq_ci16_t *source_samples, size_t read_co
     }
 }
 
+#define RESAMPLER_ROTATE_SCRATCH 66000U
+
+/* Mix before decimate. The resample-then-rotate order band-limits the source around its own
+ * centre and only then shifts it to the window offset, so any shifted content crossing the
+ * output Nyquist folds back into the window as ghost signals. Rotating the source first (still
+ * at the source rate) places the signal at its window offset before the decimating kernel
+ * applies its output-Nyquist cutoff, which removes everything that cannot be represented --
+ * the same order as a hardware DDC. The rotation phase is anchored so the block's first output
+ * sample carries exactly phase0, keeping the output phase-continuous across blocks and
+ * identical to the rotate-after path for in-band content. The rotated window is quantised to
+ * ci16 at half scale for per-component headroom; the gain doubles to compensate. */
+static bool render_resampled_nco_mix_first(const iq_ci16_t *source_samples, size_t read_count, float *bus, size_t count, double source_gain, double source_per_output, double offset_fraction, double offset_hz, double source_rate_hz, double phase0, bool allow_linear)
+{
+    static _Thread_local iq_ci16_t rotated[RESAMPLER_ROTATE_SCRATCH];
+    if (read_count > RESAMPLER_ROTATE_SCRATCH) {
+        return false; /* oversized one-shot render: caller falls back to rotate-after */
+    }
+    const double step = 2.0 * M_PI * offset_hz / source_rate_hz;
+    const double theta0 = phase0 - step * offset_fraction;
+    double osc_c = cos(theta0);
+    double osc_s = sin(theta0);
+    const double step_c = cos(step);
+    const double step_s = sin(step);
+    for (size_t k = 0; k < read_count; k++) {
+        const double sample_i = 0.5 * (double)source_samples[k].i;
+        const double sample_q = 0.5 * (double)source_samples[k].q;
+        rotated[k].i = clip_i16_f((float)(sample_i * osc_c - sample_q * osc_s));
+        rotated[k].q = clip_i16_f((float)(sample_i * osc_s + sample_q * osc_c));
+        const double next_c = osc_c * step_c - osc_s * step_s;
+        const double next_s = osc_s * step_c + osc_c * step_s;
+        osc_c = next_c;
+        osc_s = next_s;
+        if ((k & 0xffU) == 0xffU) {
+            const double inv = 1.0 / sqrt(osc_c * osc_c + osc_s * osc_s);
+            osc_c *= inv;
+            osc_s *= inv;
+        }
+    }
+    render_resampled_baseband(rotated, read_count, bus, count, 2.0 * source_gain, source_per_output, offset_fraction, allow_linear);
+    return true;
+}
+
+/* Render one contiguous stretch of a signal into the mix bus, starting at output sample
+ * `abs_start_sample` (absolute grid index) and bus position `out_offset`. This is the former
+ * tail of the per-signal loop, factored out so looping signals can render a block in segments
+ * split at the file seam: the NCO phase is anchored to the absolute index, so phase stays
+ * continuous across segments and blocks for free. force_rotate_after keeps shift-mode replay
+ * on the pure-rotation paths (never the band-limiting mix-first DDC), because spectral
+ * wrap-around is that mode's specified semantics. */
+static void render_signal_segment(
+    const iq_ci16_t *samples_base,
+    uint64_t total_samples,
+    uint32_t source_rate_hz,
+    bool allow_linear,
+    uint64_t sample_offset,
+    double offset_fraction,
+    double offset_hz,
+    double source_gain,
+    uint32_t output_sample_rate_hz,
+    uint64_t abs_start_sample,
+    bool force_rotate_after,
+    float *bus,
+    size_t out_offset,
+    size_t count)
+{
+    float *seg_bus = bus + 2U * out_offset;
+    const double source_per_output = (double)source_rate_hz / (double)output_sample_rate_hz;
+    const uint64_t kernel_radius = (uint64_t)resampler_radius_for_cutoff(resampler_cutoff(source_per_output));
+    const uint64_t needed_source_samples = (uint64_t)ceil((double)(count > 0 ? count - 1 : 0) * source_per_output) + kernel_radius + 2ULL;
+    const uint64_t available = sample_offset < total_samples ? total_samples - sample_offset : 0;
+    const size_t read_count = available < needed_source_samples ? (size_t)available : (size_t)needed_source_samples;
+    const iq_ci16_t *source_samples = &samples_base[sample_offset];
+    /* The resampler additionally sees up to RESAMPLER_RADIUS samples of history before the
+     * block's first source sample. Without it, the first output samples of every block were
+     * filtered with the edge-truncated kernel while the rest used the interior one -- a tiny
+     * filter discontinuity stamped onto every block boundary, which raised the FFT noise
+     * floor periodically (visible as row banding on every resampled channel). Only the true
+     * start of an asset still uses the edge kernel, once per repeat cycle. */
+    const uint64_t history_samples = sample_offset < kernel_radius ? sample_offset : kernel_radius;
+    const iq_ci16_t *resampler_samples = &samples_base[sample_offset - history_samples];
+    const double resampler_fraction = offset_fraction + (double)history_samples;
+    const uint64_t resampler_needed = needed_source_samples + history_samples;
+    const uint64_t resampler_available = available + history_samples;
+    const size_t resampler_read = resampler_available < resampler_needed ? (size_t)resampler_available : (size_t)resampler_needed;
+
+    const double phase_step = 2.0 * M_PI * offset_hz / (double)output_sample_rate_hz;
+    const double step_c = cos(phase_step);
+    const double step_s = sin(phase_step);
+    /* Continuous starting phase for this segment, from the absolute output-sample index. */
+    const uint64_t phase_step_q64 = nco_phase_step_q64(offset_hz, (double)output_sample_rate_hz);
+    const double phase0 = nco_phase_rad_at(phase_step_q64, abs_start_sample);
+    const double init_c = cos(phase0);
+    const double init_s = sin(phase0);
+    /* A nonzero fractional playback position means the segment does not start on an integer
+     * source sample, so the direct (integer-aligned) paths can't represent it -- fall back
+     * to the resampler, which starts at the exact fractional position. */
+    const bool integer_aligned = offset_fraction < 1e-9;
+    if (source_rate_hz == output_sample_rate_hz && offset_hz == 0.0 && integer_aligned) {
+        render_direct_baseband(source_samples, read_count, seg_bus, count, source_gain);
+    } else if (source_rate_hz == output_sample_rate_hz && integer_aligned) {
+        render_direct_nco(source_samples, read_count, seg_bus, count, source_gain, init_c, init_s, step_c, step_s);
+    } else if (offset_hz == 0.0) {
+        render_resampled_baseband(resampler_samples, resampler_read, seg_bus, count, source_gain, source_per_output, resampler_fraction, allow_linear);
+    } else {
+        /* Rotate-after only folds when the shifted source band can cross the output
+         * Nyquist; route those cases through the mix-first path. */
+        const bool shift_can_fold = !force_rotate_after &&
+            (source_per_output > 1.0 ||
+             fabs(offset_hz) + (double)source_rate_hz / 2.0 > (double)output_sample_rate_hz / 2.0);
+        if (!shift_can_fold ||
+            !render_resampled_nco_mix_first(resampler_samples, resampler_read, seg_bus, count, source_gain, source_per_output, resampler_fraction, offset_hz, (double)source_rate_hz, phase0, allow_linear)) {
+            render_resampled_nco(resampler_samples, resampler_read, seg_bus, count, source_gain, source_per_output, resampler_fraction, init_c, init_s, step_c, step_s, allow_linear);
+        }
+    }
+}
+
 static bool renderer_render_window_block(
     const scenario_t *scenario,
     const asset_cache_t *cache,
@@ -701,7 +847,6 @@ static bool renderer_render_window_block(
                        scenario_time_ns,
                        bus,
                        count);
-    const double day_s = timebase_day_seconds_from_ns(scenario_time_ns);
     /* Absolute output-sample index of the first sample in this block. The frequency-shift
      * phase of every signal is derived from it so the mixer stays phase-continuous across
      * block boundaries and identical across instances (scenario_time_ns is a grid time).
@@ -739,53 +884,80 @@ static bool renderer_render_window_block(
         active_source.sample_rate_hz = source_rate_hz;
         active_source.sample_count = total_samples;
 
-        const double passband_gain = signal_passband_gain(signal->center_frequency_hz, signal->bandwidth_hz, window_center_hz, window_bandwidth_hz);
+        double passband_gain;
+        double offset_hz;
         uint64_t sample_offset = 0;
         double offset_fraction = 0.0;
-        if (passband_gain <= 0.0 || !iq_signal_active(signal, &active_source, day_s, &sample_offset, &offset_fraction)) {
-            continue;
-        }
-
-        const double offset_hz = (double)((int64_t)signal->center_frequency_hz - (int64_t)window_center_hz);
-        /* If the whole signal band, once shifted to baseband, lies beyond the output Nyquist it
-         * cannot be represented and would only fold back as aliases -- skip it. signal_passband_gain
-         * only tests overlap with the window bandwidth, which can exceed the output rate, so this
-         * catches the case the passband gain does not. (The straddle case, where a band crosses the
-         * window/Nyquist edge, is still only attenuated -- a documented approximation.) */
-        if (fabs(offset_hz) - (double)signal->bandwidth_hz / 2.0 > (double)output_sample_rate_hz / 2.0) {
-            continue;
+        if (signal->replay_mode != SCENARIO_REPLAY_FIXED) {
+            /* Range/shift replay: active purely by tune position, file streamed verbatim
+             * (no passband weighting). Range mode follows the tune (offset 0, identical
+             * output anywhere in the range); shift mode keeps the content at its absolute
+             * RF position via a pure rotation by f0 - f_tune. */
+            if (window_center_hz < signal->replay_range_start_hz ||
+                window_center_hz > signal->replay_range_stop_hz) {
+                continue;
+            }
+            passband_gain = 1.0;
+            offset_hz = signal->replay_mode == SCENARIO_REPLAY_RANGE
+                ? 0.0
+                : (double)((int64_t)signal->center_frequency_hz - (int64_t)window_center_hz);
+            if (!iq_signal_loop_position(signal, &active_source, start_sample, output_sample_rate_hz, &sample_offset, &offset_fraction, NULL)) {
+                continue;
+            }
+        } else {
+            passband_gain = signal_passband_gain(signal->center_frequency_hz, signal->bandwidth_hz, window_center_hz, window_bandwidth_hz);
+            if (passband_gain <= 0.0) {
+                continue;
+            }
+            if (signal->loop
+                    ? !iq_signal_loop_position(signal, &active_source, start_sample, output_sample_rate_hz, &sample_offset, &offset_fraction, NULL)
+                    : !iq_signal_active(signal, &active_source, scenario_time_ns, &sample_offset, &offset_fraction)) {
+                continue;
+            }
+            offset_hz = (double)((int64_t)signal->center_frequency_hz - (int64_t)window_center_hz);
+            /* If the whole signal band, once shifted to baseband, lies beyond the output Nyquist it
+             * cannot be represented and would only fold back as aliases -- skip it. signal_passband_gain
+             * only tests overlap with the window bandwidth, which can exceed the output rate, so this
+             * catches the case the passband gain does not. (The straddle case, where a band crosses the
+             * window/Nyquist edge, is still only attenuated -- a documented approximation.) Shift-mode
+             * replay never gets here: its wrap-around is accepted semantics. */
+            if (fabs(offset_hz) - (double)signal->bandwidth_hz / 2.0 > (double)output_sample_rate_hz / 2.0) {
+                continue;
+            }
         }
         double source_gain = passband_gain * output_scale * pow(10.0, (signal->power_dbm - rf_reference_power_dbm) / 20.0);
         if (is_audio) {
             source_gain *= prerender->gain;
         }
 
-        const double source_per_output = (double)source_rate_hz / (double)output_sample_rate_hz;
-        const uint64_t needed_source_samples = (uint64_t)ceil((double)(count > 0 ? count - 1 : 0) * source_per_output) + (uint64_t)RESAMPLER_RADIUS + 2ULL;
-        const uint64_t available = sample_offset < total_samples ? total_samples - sample_offset : 0;
-        const size_t read_count = available < needed_source_samples ? (size_t)available : (size_t)needed_source_samples;
-        const iq_ci16_t *source_samples = &samples_base[sample_offset];
-
-        const double phase_step = 2.0 * M_PI * offset_hz / (double)output_sample_rate_hz;
-        const double step_c = cos(phase_step);
-        const double step_s = sin(phase_step);
-        /* Continuous starting phase for this block, from the absolute output-sample index. */
-        const uint64_t phase_step_q64 = nco_phase_step_q64(offset_hz, (double)output_sample_rate_hz);
-        const double phase0 = nco_phase_rad_at(phase_step_q64, start_sample);
-        const double init_c = cos(phase0);
-        const double init_s = sin(phase0);
-        /* A nonzero fractional playback position means the block does not start on an integer
-         * source sample, so the direct (integer-aligned) paths can't represent it -- fall back
-         * to the resampler, which starts at the exact fractional position. */
-        const bool integer_aligned = offset_fraction < 1e-9;
-        if (source_rate_hz == output_sample_rate_hz && offset_hz == 0.0 && integer_aligned) {
-            render_direct_baseband(source_samples, read_count, bus, count, source_gain);
-        } else if (source_rate_hz == output_sample_rate_hz && integer_aligned) {
-            render_direct_nco(source_samples, read_count, bus, count, source_gain, init_c, init_s, step_c, step_s);
-        } else if (offset_hz == 0.0) {
-            render_resampled_baseband(source_samples, read_count, bus, count, source_gain, source_per_output, offset_fraction, allow_linear);
+        const bool force_rotate_after = signal->replay_mode == SCENARIO_REPLAY_SHIFT;
+        if (!signal->loop) {
+            render_signal_segment(samples_base, total_samples, source_rate_hz, allow_linear,
+                                  sample_offset, offset_fraction, offset_hz, source_gain,
+                                  output_sample_rate_hz, start_sample, force_rotate_after,
+                                  bus, 0, count);
         } else {
-            render_resampled_nco(source_samples, read_count, bus, count, source_gain, source_per_output, offset_fraction, init_c, init_s, step_c, step_s, allow_linear);
+            /* Looping signals render in segments split at the file seam, so a block that
+             * straddles the loop boundary carries the end of the file immediately followed
+             * by its start instead of a truncated tail. Positions are recomputed from the
+             * absolute index each segment (exact, no drift); samples_until_wrap >= 1, so the
+             * walk always terminates. */
+            size_t out_done = 0;
+            while (out_done < count) {
+                uint64_t seg_offset = 0;
+                double seg_fraction = 0.0;
+                uint64_t until_wrap = 0;
+                if (!iq_signal_loop_position(signal, &active_source, start_sample + out_done, output_sample_rate_hz, &seg_offset, &seg_fraction, &until_wrap)) {
+                    break;
+                }
+                const size_t remaining = count - out_done;
+                const size_t seg_count = until_wrap < (uint64_t)remaining ? (size_t)until_wrap : remaining;
+                render_signal_segment(samples_base, total_samples, source_rate_hz, allow_linear,
+                                      seg_offset, seg_fraction, offset_hz, source_gain,
+                                      output_sample_rate_hz, start_sample + out_done, force_rotate_after,
+                                      bus, out_done, seg_count);
+                out_done += seg_count;
+            }
         }
         if (stats != NULL) {
             stats->active_signals++;
@@ -805,13 +977,142 @@ static bool renderer_render_window_block(
     return true;
 }
 
-bool renderer_render_80mhz_block(const scenario_t *scenario, const asset_cache_t *cache, const receiver_config_t *receiver, uint64_t scenario_time_ns, iq_ci16_t *out, size_t count, render_stats_t *stats)
+static void passthrough_copy_segment(const iq_ci16_t *src, iq_ci16_t *out, size_t count, double gain)
 {
-    const uint64_t center_hz = receiver_center_frequency_hz(receiver, scenario_time_ns);
-    return renderer_render_window_block(scenario, cache, center_hz, receiver->bandwidth_hz, receiver->sample_rate_hz, receiver->output_scale, receiver->rf_reference_power_dbm, scenario_time_ns, out, count, stats);
+    if (fabs(gain - 1.0) < 1e-9) {
+        /* Exact unit gain: literal file bytes, byte-for-byte -- the "just wrap VITA49 around
+         * the IQ data" case. */
+        memcpy(out, src, count * sizeof(*out));
+        return;
+    }
+    for (size_t i = 0; i < count; i++) {
+        out[i].i = clip_i16_f((float)(gain * (double)src[i].i));
+        out[i].q = clip_i16_f((float)(gain * (double)src[i].q));
+    }
 }
 
-bool renderer_render_ddc_block(const scenario_t *scenario, const asset_cache_t *cache, const ddc_config_t *ddc, uint64_t scenario_time_ns, iq_ci16_t *out, size_t count, render_stats_t *stats)
+static void passthrough_rotate_segment(const iq_ci16_t *src, iq_ci16_t *out, size_t count, double gain, double init_c, double init_s, double step_c, double step_s)
 {
-    return renderer_render_window_block(scenario, cache, ddc->center_frequency_hz, ddc->bandwidth_hz, ddc->sample_rate_hz, ddc->output_scale, ddc->rf_reference_power_dbm, scenario_time_ns, out, count, stats);
+#if SIM_HAVE_VOLK
+    if (count >= 16 && count <= SIM_MAX_STREAM_BLOCK_SAMPLES) {
+        _Alignas(64) lv_32fc_t input[SIM_MAX_STREAM_BLOCK_SAMPLES];
+        _Alignas(64) lv_32fc_t rotated[SIM_MAX_STREAM_BLOCK_SAMPLES];
+        for (size_t i = 0; i < count; i++) {
+            input[i] = (float)src[i].i + (float)src[i].q * I;
+        }
+        lv_32fc_t phase = (float)init_c + (float)init_s * I;
+        const lv_32fc_t phase_inc = (float)step_c + (float)step_s * I;
+        volk_32fc_s32fc_x2_rotator2_32fc(rotated, input, &phase_inc, &phase, (unsigned int)count);
+        const float gain_f = (float)gain;
+        for (size_t i = 0; i < count; i++) {
+            out[i].i = clip_i16_f(gain_f * crealf(rotated[i]));
+            out[i].q = clip_i16_f(gain_f * cimagf(rotated[i]));
+        }
+        return;
+    }
+#endif
+    double osc_c = init_c;
+    double osc_s = init_s;
+    for (size_t i = 0; i < count; i++) {
+        const double ii = gain * (double)src[i].i;
+        const double qq = gain * (double)src[i].q;
+        out[i].i = clip_i16_f((float)(ii * osc_c - qq * osc_s));
+        out[i].q = clip_i16_f((float)(ii * osc_s + qq * osc_c));
+        const double next_c = osc_c * step_c - osc_s * step_s;
+        const double next_s = osc_s * step_c + osc_c * step_s;
+        osc_c = next_c;
+        osc_s = next_s;
+        if ((i & 0xffU) == 0xffU) {
+            const double inv = 1.0 / sqrt(osc_c * osc_c + osc_s * osc_s);
+            osc_c *= inv;
+            osc_s *= inv;
+        }
+    }
+}
+
+/* Direct file-to-packet replay for a channel dedicated to one `passthrough: true` signal: no
+ * float mix bus, no noise floor, no other signals considered -- just this source's samples,
+ * optionally gain-scaled and/or rotated for shift mode, written straight to the output block.
+ * This is the "just wrap VITA49 around the IQ data" path the general mixer
+ * (renderer_render_window_block) cannot offer, because that one exists to combine an arbitrary
+ * number of overlapping signals plus noise into one window.
+ *
+ * Returns false whenever the fast criteria don't hold -- no active passthrough signal at this
+ * tune, or the source rate doesn't match the channel rate (no resampling is available on this
+ * path by design) -- so the caller falls back to the general mixer, which stays fully correct
+ * for every other case (and is itself still cheap on its direct-baseband/NCO paths). */
+static bool renderer_try_passthrough(const scenario_t *scenario, const asset_cache_t *cache, uint64_t window_center_hz, uint32_t output_sample_rate_hz, double output_scale, double rf_reference_power_dbm, uint64_t scenario_time_ns, iq_ci16_t *out, size_t count, render_stats_t *stats)
+{
+    for (size_t s = 0; s < scenario->signal_count; s++) {
+        const scenario_signal_t *signal = &scenario->signals[s];
+        if (!signal->passthrough) {
+            continue;
+        }
+        if (window_center_hz < signal->replay_range_start_hz || window_center_hz > signal->replay_range_stop_hz) {
+            continue;
+        }
+        const scenario_source_t *source = scenario_find_source(scenario, signal->source_reference);
+        const cached_asset_t *asset = asset_cache_find(cache, signal->source_reference);
+        if (source == NULL || asset == NULL || source->sample_rate_hz != output_sample_rate_hz) {
+            continue; /* rate mismatch: no resampling on this path, fall back to the mixer */
+        }
+
+        const double offset_hz = signal->replay_mode == SCENARIO_REPLAY_RANGE
+            ? 0.0
+            : (double)((int64_t)signal->center_frequency_hz - (int64_t)window_center_hz);
+        const double gain = output_scale * pow(10.0, (signal->power_dbm - rf_reference_power_dbm) / 20.0);
+        const uint64_t start_sample =
+            (uint64_t)(((__uint128_t)scenario_time_ns * (uint64_t)output_sample_rate_hz + 500000000ULL) / 1000000000ULL);
+
+        size_t out_done = 0;
+        while (out_done < count) {
+            uint64_t seg_offset = 0;
+            double seg_fraction = 0.0;
+            uint64_t until_wrap = 0;
+            if (!iq_signal_loop_position(signal, source, start_sample + out_done, output_sample_rate_hz, &seg_offset, &seg_fraction, &until_wrap)) {
+                memset(out + out_done, 0, (count - out_done) * sizeof(*out));
+                break;
+            }
+            /* Equal rates guarantee seg_fraction is always exactly 0 (iq_signal_loop_position's
+             * contract), so the copy/rotate below never needs sub-sample interpolation. */
+            const size_t remaining = count - out_done;
+            const size_t seg_count = until_wrap < (uint64_t)remaining ? (size_t)until_wrap : remaining;
+            const iq_ci16_t *src = &asset->samples[seg_offset];
+            if (offset_hz == 0.0) {
+                passthrough_copy_segment(src, out + out_done, seg_count, gain);
+            } else {
+                const double phase_step = 2.0 * M_PI * offset_hz / (double)output_sample_rate_hz;
+                const uint64_t phase_step_q64 = nco_phase_step_q64(offset_hz, (double)output_sample_rate_hz);
+                const double phase0 = nco_phase_rad_at(phase_step_q64, start_sample + out_done);
+                passthrough_rotate_segment(src, out + out_done, seg_count, gain, cos(phase0), sin(phase0), cos(phase_step), sin(phase_step));
+            }
+            out_done += seg_count;
+        }
+        if (stats != NULL) {
+            memset(stats, 0, sizeof(*stats));
+            stats->samples_rendered = count;
+            stats->active_signals = 1;
+        }
+        return true;
+    }
+    return false;
+}
+
+bool renderer_render_channel_block(const scenario_t *scenario, const asset_cache_t *cache, const receiver_config_t *receiver, const channel_config_t *channel, uint64_t scenario_time_ns, iq_ci16_t *out, size_t count, render_stats_t *stats)
+{
+    /* A channel whose span leaves the front-end (ADC) window carries no signal, matching a
+     * hardware DDC tuned outside the digitised band: the stream keeps flowing, but empty. */
+    if (!receiver_channel_in_window(receiver, channel, scenario_time_ns)) {
+        memset(out, 0, count * sizeof(*out));
+        if (stats != NULL) {
+            memset(stats, 0, sizeof(*stats));
+            stats->samples_rendered = count;
+        }
+        return true;
+    }
+    const uint64_t center_hz = receiver_channel_center_hz(receiver, channel, scenario_time_ns);
+    if (renderer_try_passthrough(scenario, cache, center_hz, channel->sample_rate_hz, channel->output_scale, channel->rf_reference_power_dbm, scenario_time_ns, out, count, stats)) {
+        return true;
+    }
+    return renderer_render_window_block(scenario, cache, center_hz, channel->bandwidth_hz, channel->sample_rate_hz, channel->output_scale, channel->rf_reference_power_dbm, scenario_time_ns, out, count, stats);
 }

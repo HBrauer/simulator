@@ -1,8 +1,10 @@
 # VITA 49.2 UDP Output
 
-The simulator sends one VITA 49.2 IF-data packet per UDP datagram for each enabled stream.
+The simulator sends one VITA 49.2 IF-data packet per UDP datagram for each enabled
+channel, plus periodic IF-context packets on the same port that announce the channel
+configuration in-band.
 
-## Packet Layout
+## IF Data Packet Layout
 
 The simulator's current packet subset is:
 
@@ -28,10 +30,34 @@ Header fields:
 Stream IDs use this layout:
 
 ```text
-0x53440000 | (receiver_id << 8) | stream_index
+0x53440000 | (receiver_id << 8) | channel_id
 ```
 
-`stream_index` is `0` for the receiver bandwidth stream and `1..4` for DDC IDs `0..3`.
+Channel IDs map 1:1 onto the historical stream numbering: channel `0` is the former
+receiver-bandwidth stream (`stream_index 0`) and channels `1..N` are the former DDC
+streams (`1 + ddc_id`), so existing consumers see unchanged stream IDs with the default
+configuration.
+
+## IF Context Packets
+
+Each channel stream also carries VITA 49.2 IF-context packets (packet type `4`, 48
+bytes) so UDP consumers can follow retunes and sample-rate changes without polling the
+REST API. One is sent when a stream (re)starts, immediately after every configuration
+change (with the CIF0 change indicator set), and as a ~1 s heartbeat otherwise.
+
+| Offset | Size | Field |
+| --- | --- | --- |
+| 0 | 4 | VRT/VITA context header (type `4`, TSI `1`, TSF `2`, own 4-bit sequence). |
+| 4 | 4 | Stream ID (same as the channel's data stream). |
+| 8 | 4 | Integer timestamp seconds. |
+| 12 | 8 | Fractional timestamp in picoseconds. |
+| 20 | 4 | CIF0 indicator: change (bit 31), bandwidth (bit 29), RF reference frequency (bit 27), sample rate (bit 21). |
+| 24 | 8 | Bandwidth in Hz, 64-bit fixed point, radix point after bit 20 (`value_hz << 20`). |
+| 32 | 8 | RF reference frequency in Hz, same format. For a tuner-tracking channel this is the instantaneous tuner center. |
+| 40 | 8 | Sample rate in Hz, same format. |
+
+The waterfall receiver parses these to retarget its FFT stride when the sample rate
+changes and to display the current center frequency and bandwidth.
 
 ## IQ Payload
 
@@ -49,4 +75,4 @@ little-endian int16 I, little-endian int16 Q
 
 ## GNU Radio Note
 
-A plain GNU Radio UDP Source can receive the datagrams as bytes, but downstream flowgraphs must parse and remove the VITA 49.2 header before reinterpreting the payload as CI16 IQ.
+A plain GNU Radio UDP Source can receive the datagrams as bytes, but downstream flowgraphs must parse and remove the VITA 49.2 headers before reinterpreting the payload as CI16 IQ, and should discard (or use) the interleaved type-4 context packets.

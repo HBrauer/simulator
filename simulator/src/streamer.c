@@ -20,11 +20,7 @@
 #define RENDER_BACKPRESSURE_NS 50000L
 #define RINGBUFFER_PACKET_CAPACITY 8U
 #define STREAM_SEND_BATCH_SIZE 16U
-
-typedef enum {
-    STREAM_KIND_80MHZ,
-    STREAM_KIND_DDC
-} stream_kind_t;
+#define CONTEXT_PACKET_INTERVAL_NS 1000000000ULL
 
 typedef struct {
     atomic_bool *running;
@@ -34,9 +30,8 @@ typedef struct {
     receiver_config_t *receiver;
     receiver_metrics_t *metrics;
     stream_metrics_t *stream_metrics;
-    size_t ddc_index;
+    size_t channel_index;
     pthread_mutex_t *receiver_lock;
-    stream_kind_t kind;
     size_t block_samples;
     size_t packet_bytes;
     ringbuffer_t ringbuffer;
@@ -48,12 +43,13 @@ typedef struct {
     int render_cpu;
     int udp_cpu;
     uint8_t vita_sequence;
+    uint8_t context_sequence;
 } stream_worker_t;
 
 struct streamer_manager {
     atomic_bool running;
     size_t worker_count;
-    stream_worker_t workers[SIM_MAX_RECEIVERS * (1 + SIM_DDC_COUNT)];
+    stream_worker_t workers[SIM_MAX_RECEIVERS * SIM_MAX_CHANNELS];
 };
 
 uint64_t streamer_block_duration_ns(size_t block_samples, uint32_t sample_rate_hz)
@@ -134,11 +130,6 @@ static void sleep_until_monotonic_ns(uint64_t deadline_ns)
     nanosleep(&ts, NULL);
 }
 
-static uint32_t stream_sample_rate(const stream_worker_t *worker, const receiver_config_t *receiver, const ddc_config_t *ddc)
-{
-    return worker->kind == STREAM_KIND_80MHZ ? receiver->sample_rate_hz : ddc->sample_rate_hz;
-}
-
 static void apply_stream_affinity(int stream_cpu)
 {
 #ifdef __linux__
@@ -152,11 +143,6 @@ static void apply_stream_affinity(int stream_cpu)
 #else
     (void)stream_cpu;
 #endif
-}
-
-static bool stream_enabled(const stream_worker_t *worker, const receiver_config_t *receiver, const ddc_config_t *ddc)
-{
-    return worker->kind == STREAM_KIND_80MHZ ? receiver->stream_enabled : ddc->stream_enabled;
 }
 
 static int next_stream_cpu(const streamer_config_t *config, size_t *index)
@@ -177,29 +163,11 @@ static void stream_worker_set_active(stream_worker_t *worker, bool active)
     }
 }
 
-static void render_one_block(const stream_worker_t *worker, iq_ci16_t *buffer, const receiver_config_t *receiver, const ddc_config_t *ddc, uint64_t scenario_time_ns)
-{
-    render_stats_t stats;
-    if (worker->kind == STREAM_KIND_80MHZ) {
-        renderer_render_80mhz_block(worker->scenario, worker->asset_cache, receiver, scenario_time_ns, buffer, worker->block_samples, &stats);
-    } else {
-        if (receiver_ddc_in_window(receiver, ddc, scenario_time_ns)) {
-            renderer_render_ddc_block(worker->scenario, worker->asset_cache, ddc, scenario_time_ns, buffer, worker->block_samples, &stats);
-        } else {
-            memset(buffer, 0, worker->packet_bytes);
-        }
-    }
-}
-
 static void record_worker_error(stream_worker_t *worker, const char *reason)
 {
     atomic_fetch_add(&worker->metrics->worker_errors, 1);
     atomic_fetch_add(&worker->stream_metrics->worker_errors, 1);
-    if (worker->kind == STREAM_KIND_80MHZ) {
-        fprintf(stderr, "error: stream worker (receiver %u, 80mhz) failed: %s\n", worker->receiver->id, reason);
-    } else {
-        fprintf(stderr, "error: stream worker (receiver %u, ddc %zu) failed: %s\n", worker->receiver->id, worker->ddc_index, reason);
-    }
+    fprintf(stderr, "error: stream worker (receiver %u, channel %zu) failed: %s\n", worker->receiver->id, worker->channel_index, reason);
 }
 
 static void record_overrun(stream_worker_t *worker)
@@ -266,6 +234,14 @@ static void pace_or_record_late(stream_worker_t *worker, uint64_t *next_send_ns,
     }
 }
 
+static void snapshot_worker_config(stream_worker_t *worker, receiver_config_t *receiver, channel_config_t *channel)
+{
+    pthread_mutex_lock(worker->receiver_lock);
+    *receiver = *worker->receiver;
+    pthread_mutex_unlock(worker->receiver_lock);
+    *channel = receiver->channels[worker->channel_index];
+}
+
 static void *stream_render_thread_main(void *arg)
 {
     stream_worker_t *worker = arg;
@@ -281,13 +257,12 @@ static void *stream_render_thread_main(void *arg)
     bool grid_initialized = false;
 
     while (atomic_load(worker->running)) {
-        pthread_mutex_lock(worker->receiver_lock);
-        receiver_config_t receiver_snapshot = *worker->receiver;
-        ddc_config_t ddc_snapshot = receiver_snapshot.ddc[worker->ddc_index];
-        pthread_mutex_unlock(worker->receiver_lock);
-        const uint32_t sample_rate_hz = stream_sample_rate(worker, &receiver_snapshot, &ddc_snapshot);
+        receiver_config_t receiver_snapshot;
+        channel_config_t channel_snapshot;
+        snapshot_worker_config(worker, &receiver_snapshot, &channel_snapshot);
+        const uint32_t sample_rate_hz = channel_snapshot.sample_rate_hz;
 
-        if (!stream_enabled(worker, &receiver_snapshot, &ddc_snapshot)) {
+        if (!channel_snapshot.stream_enabled) {
             stream_worker_set_active(worker, false);
             grid_initialized = false;
             sleep_for_block(worker->block_samples, sample_rate_hz);
@@ -311,7 +286,8 @@ static void *stream_render_thread_main(void *arg)
         }
 
         const uint64_t render_time_ns = streamer_block_start_ns(block_index, worker->block_samples, sample_rate_hz);
-        render_one_block(worker, buffer, &receiver_snapshot, &ddc_snapshot, render_time_ns);
+        render_stats_t stats;
+        renderer_render_channel_block(worker->scenario, worker->asset_cache, &receiver_snapshot, &channel_snapshot, render_time_ns, buffer, worker->block_samples, &stats);
 
         if (!ringbuffer_try_push(&worker->ringbuffer, render_time_ns, buffer)) {
             record_overrun(worker);
@@ -324,19 +300,79 @@ static void *stream_render_thread_main(void *arg)
     return NULL;
 }
 
+/* Context packets announce {rf reference frequency, bandwidth, sample rate} in-band: once
+ * when a stream (re)starts, immediately when the channel configuration changes, and at a
+ * ~1 s heartbeat otherwise. Change detection compares the configured fields, not the
+ * instantaneous scan-swept center, so a scanning tuner does not spam a packet per block. */
+typedef struct {
+    bool sent;
+    uint32_t bandwidth_hz;
+    uint32_t sample_rate_hz;
+    bool track_tuner;
+    uint64_t center_frequency_hz;
+    uint64_t sent_at_monotonic_ns;
+} context_state_t;
+
+static bool context_config_changed(const context_state_t *state, const channel_config_t *channel)
+{
+    return state->bandwidth_hz != channel->bandwidth_hz ||
+        state->sample_rate_hz != channel->sample_rate_hz ||
+        state->track_tuner != channel->track_tuner ||
+        (!channel->track_tuner && state->center_frequency_hz != channel->center_frequency_hz);
+}
+
+static void maybe_send_context_packet(stream_worker_t *worker, udp_output_t *udp, const receiver_config_t *receiver, const channel_config_t *channel, context_state_t *state)
+{
+    const uint64_t now_ns = monotonic_now_ns();
+    const bool changed = state->sent && context_config_changed(state, channel);
+    const bool due = !state->sent || changed ||
+        now_ns - state->sent_at_monotonic_ns >= CONTEXT_PACKET_INTERVAL_NS;
+    if (!due) {
+        return;
+    }
+    const uint64_t scenario_time_ns = timebase_now_ns(worker->timebase);
+    const vita49_context_packet_t context = {
+        .stream_id = vita49_stream_id(receiver->id, channel->id),
+        .sequence = (uint8_t)(worker->context_sequence & 0x0fU),
+        .timestamp_ns = scenario_time_ns,
+        .changed = changed,
+        .rf_reference_frequency_hz = receiver_channel_center_hz(receiver, channel, scenario_time_ns),
+        .bandwidth_hz = channel->bandwidth_hz,
+        .sample_rate_hz = channel->sample_rate_hz,
+    };
+    uint8_t packet[64];
+    size_t packet_bytes = 0;
+    if (!vita49_write_context_packet(&context, packet, sizeof(packet), &packet_bytes)) {
+        return;
+    }
+    size_t sent_bytes = 0;
+    int error_code = 0;
+    if (udp_output_send(udp, packet, packet_bytes, &sent_bytes, &error_code)) {
+        worker->context_sequence = (uint8_t)((worker->context_sequence + 1U) & 0x0fU);
+        atomic_fetch_add(&worker->metrics->udp_packets_sent, 1);
+        atomic_fetch_add(&worker->metrics->udp_bytes_sent, sent_bytes);
+        atomic_fetch_add(&worker->stream_metrics->udp_packets_sent, 1);
+        atomic_fetch_add(&worker->stream_metrics->udp_bytes_sent, sent_bytes);
+    }
+    /* A dropped context packet is recovered by the heartbeat; do not skew sample metrics. */
+    state->sent = true;
+    state->bandwidth_hz = channel->bandwidth_hz;
+    state->sample_rate_hz = channel->sample_rate_hz;
+    state->track_tuner = channel->track_tuner;
+    state->center_frequency_hz = channel->center_frequency_hz;
+    state->sent_at_monotonic_ns = now_ns;
+}
+
 static void *stream_udp_thread_main(void *arg)
 {
     stream_worker_t *worker = arg;
     apply_stream_affinity(worker->udp_cpu);
-    pthread_mutex_lock(worker->receiver_lock);
-    receiver_config_t receiver_snapshot = *worker->receiver;
-    ddc_config_t ddc_snapshot = receiver_snapshot.ddc[worker->ddc_index];
-    pthread_mutex_unlock(worker->receiver_lock);
+    receiver_config_t receiver_snapshot;
+    channel_config_t channel_snapshot;
+    snapshot_worker_config(worker, &receiver_snapshot, &channel_snapshot);
 
     const char *host = receiver_snapshot.udp_output_host;
-    const uint16_t port = worker->kind == STREAM_KIND_80MHZ
-        ? receiver_snapshot.udp_80mhz_output.port
-        : ddc_snapshot.udp_output.port;
+    const uint16_t port = channel_snapshot.udp_output.port;
 
     udp_output_t udp = {.fd = -1};
     if (!udp_output_open(&udp, host, port, receiver_snapshot.udp_multicast_interface)) {
@@ -360,20 +396,21 @@ static void *stream_udp_thread_main(void *arg)
     }
     uint64_t payload_timestamps[STREAM_SEND_BATCH_SIZE];
     uint64_t next_send_ns = monotonic_now_ns();
+    context_state_t context_state = {0};
 
     while (atomic_load(worker->running)) {
-        pthread_mutex_lock(worker->receiver_lock);
-        receiver_snapshot = *worker->receiver;
-        ddc_snapshot = receiver_snapshot.ddc[worker->ddc_index];
-        pthread_mutex_unlock(worker->receiver_lock);
+        snapshot_worker_config(worker, &receiver_snapshot, &channel_snapshot);
 
-        if (!stream_enabled(worker, &receiver_snapshot, &ddc_snapshot)) {
+        if (!channel_snapshot.stream_enabled) {
             ringbuffer_drain(&worker->ringbuffer);
             next_send_ns = monotonic_now_ns();
-            sleep_for_block(worker->block_samples, stream_sample_rate(worker, &receiver_snapshot, &ddc_snapshot));
+            context_state.sent = false; /* re-announce the configuration on re-enable */
+            sleep_for_block(worker->block_samples, channel_snapshot.sample_rate_hz);
             continue;
         }
-        const uint64_t block_duration_ns = streamer_block_duration_ns(worker->block_samples, stream_sample_rate(worker, &receiver_snapshot, &ddc_snapshot));
+        const uint64_t block_duration_ns = streamer_block_duration_ns(worker->block_samples, channel_snapshot.sample_rate_hz);
+
+        maybe_send_context_packet(worker, &udp, &receiver_snapshot, &channel_snapshot, &context_state);
 
         size_t batch_count = 0;
         while (batch_count < STREAM_SEND_BATCH_SIZE) {
@@ -396,7 +433,7 @@ static void *stream_udp_thread_main(void *arg)
         size_t sent_bytes = 0;
         int send_error = 0;
         size_t prepared_count = 0;
-        const uint32_t stream_id = vita49_stream_id(receiver_snapshot.id, worker->kind == STREAM_KIND_DDC, (uint32_t)worker->ddc_index);
+        const uint32_t stream_id = vita49_stream_id(receiver_snapshot.id, channel_snapshot.id);
         for (size_t i = 0; i < batch_count; i++) {
             uint8_t *packet = packets + i * send_capacity;
             const uint8_t *payload = payloads + i * worker->packet_bytes;
@@ -502,54 +539,31 @@ bool streamer_manager_start(streamer_manager_t **manager, const streamer_config_
 
     /* Spread the render and UDP threads across the configured CPU set (round-robin, render and
      * UDP threads of a worker on distinct CPUs) instead of pinning every thread to one core,
-     * which serialised them. Empty set -> no pinning. Wideband render threads are assigned first
-     * per receiver so they tend to land on their own core. */
+     * which serialised them. Empty set -> no pinning. Channel 0 (conventionally the widest) is
+     * assigned first per receiver so it tends to land on its own core. */
     size_t next_cpu = 0;
 
     for (size_t i = 0; i < config->config->receiver_count; i++) {
         receiver_config_t *receiver = &config->config->receivers[i];
-        stream_worker_t *worker = &m->workers[m->worker_count++];
-        const int wb_render_cpu = next_stream_cpu(config, &next_cpu);
-        const int wb_udp_cpu = next_stream_cpu(config, &next_cpu);
-        *worker = (stream_worker_t){
-            .running = &m->running,
-            .scenario = config->scenario,
-            .asset_cache = config->asset_cache,
-            .timebase = config->timebase,
-            .receiver = receiver,
-            .metrics = &config->metrics[i],
-            .stream_metrics = &config->metrics[i].streams[0],
-            .receiver_lock = config->receiver_lock,
-            .kind = STREAM_KIND_80MHZ,
-            .block_samples = config->block_samples,
-            .render_cpu = wb_render_cpu,
-            .udp_cpu = wb_udp_cpu,
-        };
-        if (!stream_worker_start(worker)) {
-            streamer_manager_stop(m);
-            return false;
-        }
-
-        for (size_t d = 0; d < SIM_DDC_COUNT; d++) {
-            stream_worker_t *ddc_worker = &m->workers[m->worker_count++];
-            const int ddc_render_cpu = next_stream_cpu(config, &next_cpu);
-            const int ddc_udp_cpu = next_stream_cpu(config, &next_cpu);
-            *ddc_worker = (stream_worker_t){
+        for (size_t c = 0; c < receiver->channel_count; c++) {
+            stream_worker_t *worker = &m->workers[m->worker_count++];
+            const int render_cpu = next_stream_cpu(config, &next_cpu);
+            const int udp_cpu = next_stream_cpu(config, &next_cpu);
+            *worker = (stream_worker_t){
                 .running = &m->running,
                 .scenario = config->scenario,
                 .asset_cache = config->asset_cache,
                 .timebase = config->timebase,
                 .receiver = receiver,
                 .metrics = &config->metrics[i],
-                .stream_metrics = &config->metrics[i].streams[1 + d],
-                .ddc_index = d,
+                .stream_metrics = &config->metrics[i].streams[c],
+                .channel_index = c,
                 .receiver_lock = config->receiver_lock,
-                .kind = STREAM_KIND_DDC,
                 .block_samples = config->block_samples,
-                .render_cpu = ddc_render_cpu,
-                .udp_cpu = ddc_udp_cpu,
+                .render_cpu = render_cpu,
+                .udp_cpu = udp_cpu,
             };
-            if (!stream_worker_start(ddc_worker)) {
+            if (!stream_worker_start(worker)) {
                 streamer_manager_stop(m);
                 return false;
             }

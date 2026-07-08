@@ -2,6 +2,7 @@
 #include "receiver.h"
 #include "util.h"
 
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -9,7 +10,11 @@
 
 typedef struct {
     receiver_config_t *current_receiver;
-    ddc_config_t *current_ddc;
+    channel_profile_t *current_profile;
+    channel_config_t *current_channel;
+    bool in_receivers_seq;
+    bool in_profiles_seq;
+    bool in_channels_seq;
 } parse_state_t;
 
 static uint64_t parse_u64(const char *value)
@@ -72,37 +77,79 @@ static void parse_cpu_list(const char *value, int *out, size_t max, size_t *coun
     }
 }
 
-static void apply_scalar(simulator_config_t *config, parse_state_t *state, const char *key, const char *value)
+static bool set_error(char *error, size_t error_size, const char *code)
 {
-    if (state->current_ddc != NULL) {
-        if (strcmp(key, "ddc_id") == 0) {
-            state->current_ddc->id = (uint32_t)parse_u64(value);
-        } else if (strcmp(key, "center_frequency_hz") == 0) {
-            state->current_ddc->center_frequency_hz = parse_u64(value);
-        } else if (strcmp(key, "bandwidth_hz") == 0) {
-            state->current_ddc->bandwidth_hz = (uint32_t)parse_u64(value);
+    snprintf(error, error_size, "%s", code);
+    return false;
+}
+
+/* The pre-channel config format is rejected with an error naming the replacement key so a
+ * stale YAML fails loudly instead of being silently misread. */
+static const char *legacy_receiver_key_error(const char *key)
+{
+    if (strcmp(key, "bandwidth_hz") == 0) {
+        return "legacy_key_bandwidth_hz_use_frontend_bandwidth_hz";
+    }
+    if (strcmp(key, "sample_rate_hz") == 0) {
+        return "legacy_key_sample_rate_hz_use_channel_profiles";
+    }
+    if (strcmp(key, "udp_80mhz_output_port") == 0) {
+        return "legacy_key_udp_80mhz_output_port_use_channels";
+    }
+    if (strcmp(key, "stream_enabled") == 0) {
+        return "legacy_key_stream_enabled_use_channels";
+    }
+    if (strcmp(key, "ddc_id") == 0) {
+        return "legacy_key_ddc_use_channels";
+    }
+    return NULL;
+}
+
+static bool apply_scalar(simulator_config_t *config, parse_state_t *state, const char *key, const char *value, char *error, size_t error_size)
+{
+    if (state->current_profile != NULL) {
+        if (strcmp(key, "bandwidth_hz") == 0) {
+            state->current_profile->bandwidth_hz = (uint32_t)parse_u64(value);
         } else if (strcmp(key, "sample_rate_hz") == 0) {
-            state->current_ddc->sample_rate_hz = (uint32_t)parse_u64(value);
+            state->current_profile->sample_rate_hz = (uint32_t)parse_u64(value);
+        } else if (strcmp(key, "name") == 0) {
+            sim_strlcpy(state->current_profile->name, value, sizeof(state->current_profile->name));
+        }
+        return true;
+    }
+
+    if (state->current_channel != NULL) {
+        if (strcmp(key, "channel_id") == 0) {
+            state->current_channel->id = (uint32_t)parse_u64(value);
+        } else if (strcmp(key, "track_tuner") == 0) {
+            state->current_channel->track_tuner = parse_bool_value(value);
+        } else if (strcmp(key, "center_frequency_hz") == 0) {
+            state->current_channel->center_frequency_hz = parse_u64(value);
+        } else if (strcmp(key, "bandwidth_hz") == 0) {
+            state->current_channel->bandwidth_hz = (uint32_t)parse_u64(value);
+        } else if (strcmp(key, "sample_rate_hz") == 0) {
+            /* The rate always comes from the profile selected by bandwidth_hz. */
+            return set_error(error, error_size, "channel_sample_rate_comes_from_profile");
         } else if (strcmp(key, "output_scale") == 0) {
-            state->current_ddc->output_scale = parse_double_value(value);
+            state->current_channel->output_scale = parse_double_value(value);
         } else if (strcmp(key, "rf_reference_power_dbm") == 0) {
-            state->current_ddc->rf_reference_power_dbm = parse_double_value(value);
+            state->current_channel->rf_reference_power_dbm = parse_double_value(value);
         } else if (strcmp(key, "stream_enabled") == 0) {
-            state->current_ddc->stream_enabled = parse_bool_value(value);
+            state->current_channel->stream_enabled = parse_bool_value(value);
         } else if (strcmp(key, "udp_output_port") == 0) {
-            state->current_ddc->udp_output.port = (uint16_t)parse_u64(value);
+            state->current_channel->udp_output.port = (uint16_t)parse_u64(value);
+        } else if (strcmp(key, "ddc_id") == 0) {
+            return set_error(error, error_size, "legacy_key_ddc_use_channels");
         }
-        if (state->current_ddc->bandwidth_hz == 0U) {
-            state->current_ddc->bandwidth_hz = SIM_DDC_BANDWIDTH_HZ;
-        }
-        if (state->current_ddc->sample_rate_hz == 0U) {
-            state->current_ddc->sample_rate_hz = SIM_DDC_SAMPLE_RATE_HZ;
-        }
-        return;
+        return true;
     }
 
     if (state->current_receiver != NULL) {
         receiver_config_t *r = state->current_receiver;
+        const char *legacy = legacy_receiver_key_error(key);
+        if (legacy != NULL) {
+            return set_error(error, error_size, legacy);
+        }
         if (strcmp(key, "receiver_id") == 0) {
             r->id = (uint32_t)parse_u64(value);
         } else if (strcmp(key, "rest_bind_host") == 0) {
@@ -117,28 +164,16 @@ static void apply_scalar(simulator_config_t *config, parse_state_t *state, const
             r->frequency_start_hz = parse_u64(value);
         } else if (strcmp(key, "frequency_stop_hz") == 0) {
             r->frequency_stop_hz = parse_u64(value);
-        } else if (strcmp(key, "bandwidth_hz") == 0) {
-            r->bandwidth_hz = parse_u64(value);
-        } else if (strcmp(key, "sample_rate_hz") == 0) {
-            r->sample_rate_hz = (uint32_t)parse_u64(value);
+        } else if (strcmp(key, "frontend_bandwidth_hz") == 0) {
+            r->frontend_bandwidth_hz = parse_u64(value);
         } else if (strcmp(key, "scan_rate_hz_per_s") == 0) {
             r->scan_rate_hz_per_s = parse_double_value(value);
         } else if (strcmp(key, "output_scale") == 0) {
             r->output_scale = parse_double_value(value);
         } else if (strcmp(key, "rf_reference_power_dbm") == 0) {
             r->rf_reference_power_dbm = parse_double_value(value);
-        } else if (strcmp(key, "stream_enabled") == 0) {
-            r->stream_enabled = parse_bool_value(value);
-        } else if (strcmp(key, "udp_80mhz_output_port") == 0) {
-            r->udp_80mhz_output.port = (uint16_t)parse_u64(value);
         }
-        if (r->bandwidth_hz == 0ULL) {
-            r->bandwidth_hz = SIM_RECEIVER_BANDWIDTH_HZ;
-        }
-        if (r->sample_rate_hz == 0U) {
-            r->sample_rate_hz = SIM_RECEIVER_SAMPLE_RATE_HZ;
-        }
-        return;
+        return true;
     }
 
     if (strcmp(key, "schema_version") == 0) {
@@ -162,12 +197,75 @@ static void apply_scalar(simulator_config_t *config, parse_state_t *state, const
     } else if (strcmp(key, "audio_prerender_max_rate_hz") == 0) {
         config->audio_prerender_max_rate_hz = (uint32_t)parse_u64(value);
     }
+    return true;
+}
+
+static bool enter_sequence(simulator_config_t *config, parse_state_t *state, const char *key, char *error, size_t error_size)
+{
+    (void)config;
+    if (strcmp(key, "receivers") == 0 && state->current_receiver == NULL) {
+        state->in_receivers_seq = true;
+    } else if (strcmp(key, "profiles") == 0 && state->current_receiver != NULL) {
+        state->in_profiles_seq = true;
+    } else if (strcmp(key, "channels") == 0 && state->current_receiver != NULL) {
+        state->in_channels_seq = true;
+    } else if (strcmp(key, "ddc") == 0) {
+        return set_error(error, error_size, "legacy_key_ddc_use_channels");
+    }
+    return true;
+}
+
+static bool enter_mapping(simulator_config_t *config, parse_state_t *state, char *error, size_t error_size)
+{
+    if (state->in_profiles_seq && state->current_profile == NULL) {
+        receiver_config_t *r = state->current_receiver;
+        if (r->profile_count >= SIM_MAX_PROFILES) {
+            return set_error(error, error_size, "too_many_profiles");
+        }
+        state->current_profile = &r->profiles[r->profile_count++];
+    } else if (state->in_channels_seq && state->current_channel == NULL) {
+        receiver_config_t *r = state->current_receiver;
+        if (r->channel_count >= SIM_MAX_CHANNELS) {
+            return set_error(error, error_size, "too_many_channels");
+        }
+        state->current_channel = &r->channels[r->channel_count++];
+        state->current_channel->stream_enabled = true;
+    } else if (state->in_receivers_seq && state->current_receiver == NULL) {
+        if (config->receiver_count >= SIM_MAX_RECEIVERS) {
+            return set_error(error, error_size, "too_many_receivers");
+        }
+        state->current_receiver = &config->receivers[config->receiver_count++];
+    }
+    return true;
+}
+
+static void leave_mapping(parse_state_t *state)
+{
+    if (state->current_profile != NULL) {
+        state->current_profile = NULL;
+    } else if (state->current_channel != NULL) {
+        state->current_channel = NULL;
+    } else if (!state->in_profiles_seq && !state->in_channels_seq && state->current_receiver != NULL) {
+        state->current_receiver = NULL;
+    }
+}
+
+static void leave_sequence(parse_state_t *state)
+{
+    if (state->in_profiles_seq) {
+        state->in_profiles_seq = false;
+    } else if (state->in_channels_seq) {
+        state->in_channels_seq = false;
+    } else if (state->in_receivers_seq) {
+        state->in_receivers_seq = false;
+    }
 }
 
 bool config_load_yaml(const char *path, simulator_config_t *config, char *error, size_t error_size)
 {
     memset(config, 0, sizeof(*config));
     config->stream_cpu = -1;
+    config->asset_cache_max_bytes = SIZE_MAX; /* unset sentinel; config_validate applies the default */
     FILE *file = fopen(path, "rb");
     if (file == NULL) {
         snprintf(error, error_size, "config_not_found");
@@ -200,18 +298,16 @@ bool config_load_yaml(const char *path, simulator_config_t *config, char *error,
             break;
         }
         if (event.type == YAML_MAPPING_START_EVENT) {
+            ok = enter_mapping(config, &state, error, error_size);
             expect_key = true;
         } else if (event.type == YAML_MAPPING_END_EVENT) {
-            if (state.current_ddc != NULL) {
-                state.current_ddc = NULL;
-            } else {
-                state.current_receiver = NULL;
-            }
+            leave_mapping(&state);
             expect_key = true;
         } else if (event.type == YAML_SEQUENCE_START_EVENT) {
+            ok = enter_sequence(config, &state, pending_key, error, error_size);
             expect_key = false;
         } else if (event.type == YAML_SEQUENCE_END_EVENT) {
-            state.current_ddc = NULL;
+            leave_sequence(&state);
             expect_key = true;
         } else if (event.type == YAML_SCALAR_EVENT) {
             const char *value = (const char *)event.data.scalar.value;
@@ -219,26 +315,7 @@ bool config_load_yaml(const char *path, simulator_config_t *config, char *error,
                 sim_strlcpy(pending_key, value, sizeof(pending_key));
                 expect_key = false;
             } else {
-                if (strcmp(pending_key, "receiver_id") == 0) {
-                    if (config->receiver_count >= SIM_MAX_RECEIVERS) {
-                        snprintf(error, error_size, "too_many_receivers");
-                        ok = false;
-                    } else {
-                        state.current_receiver = &config->receivers[config->receiver_count++];
-                        state.current_receiver->stream_enabled = true;
-                        for (size_t i = 0; i < SIM_DDC_COUNT; i++) {
-                            state.current_receiver->ddc[i].stream_enabled = true;
-                        }
-                    }
-                } else if (strcmp(pending_key, "ddc_id") == 0 && state.current_receiver != NULL) {
-                    const uint32_t id = (uint32_t)parse_u64(value);
-                    if (id < SIM_DDC_COUNT) {
-                        state.current_ddc = &state.current_receiver->ddc[id];
-                    }
-                }
-                if (ok) {
-                    apply_scalar(config, &state, pending_key, value);
-                }
+                ok = apply_scalar(config, &state, pending_key, value, error, error_size);
                 expect_key = true;
             }
         }
@@ -286,68 +363,73 @@ bool config_validate(simulator_config_t *config, char *error, size_t error_size)
     if (config->audio_prerender_max_rate_hz == 0U) {
         config->audio_prerender_max_rate_hz = 4000000U;
     }
+    /* Default asset budget: 16 GiB. IQ files beyond it are mmap-backed rather than copied
+     * (see asset_cache_load_limited); an explicit 0 keeps the legacy unlimited-RAM meaning. */
+    if (config->asset_cache_max_bytes == SIZE_MAX) {
+#if SIZE_MAX > 0xFFFFFFFFULL
+        config->asset_cache_max_bytes = 16ULL << 30;
+#else
+        config->asset_cache_max_bytes = SIZE_MAX / 2;
+#endif
+    }
     for (size_t i = 0; i < config->receiver_count; i++) {
-        if (config->receivers[i].output_scale == 0.0) {
-            config->receivers[i].output_scale = 1.0;
+        receiver_config_t *receiver = &config->receivers[i];
+        if (receiver->output_scale == 0.0) {
+            receiver->output_scale = 1.0;
         }
-        if (config->receivers[i].rf_reference_power_dbm == 0.0) {
-            config->receivers[i].rf_reference_power_dbm = -55.0;
+        if (receiver->rf_reference_power_dbm == 0.0) {
+            receiver->rf_reference_power_dbm = -55.0;
         }
-        if (config->receivers[i].bandwidth_hz == 0ULL) {
-            config->receivers[i].bandwidth_hz = SIM_RECEIVER_BANDWIDTH_HZ;
+        if (receiver->frontend_bandwidth_hz == 0ULL) {
+            receiver->frontend_bandwidth_hz = SIM_RECEIVER_BANDWIDTH_HZ;
         }
-        if (config->receivers[i].sample_rate_hz == 0U) {
-            config->receivers[i].sample_rate_hz = SIM_RECEIVER_SAMPLE_RATE_HZ;
+        if (receiver->profile_count == 0) {
+            receiver_default_profiles(receiver);
         }
-        for (size_t d = 0; d < SIM_DDC_COUNT; d++) {
-            if (config->receivers[i].ddc[d].bandwidth_hz == 0U) {
-                config->receivers[i].ddc[d].bandwidth_hz = SIM_DDC_BANDWIDTH_HZ;
+        for (size_t c = 0; c < receiver->channel_count; c++) {
+            channel_config_t *channel = &receiver->channels[c];
+            if (channel->bandwidth_hz == 0U) {
+                snprintf(error, error_size, "channel_bandwidth_required");
+                return false;
             }
-            if (config->receivers[i].ddc[d].sample_rate_hz == 0U) {
-                config->receivers[i].ddc[d].sample_rate_hz = SIM_DDC_SAMPLE_RATE_HZ;
+            /* The sample rate is always the profile partner of the selected bandwidth. */
+            const channel_profile_t *profile = receiver_find_profile(receiver, channel->bandwidth_hz);
+            if (profile == NULL) {
+                snprintf(error, error_size, "unsupported_channel_bandwidth");
+                return false;
             }
-            if (config->receivers[i].ddc[d].output_scale == 0.0) {
-                config->receivers[i].ddc[d].output_scale = config->receivers[i].output_scale;
+            channel->sample_rate_hz = profile->sample_rate_hz;
+            if (channel->output_scale == 0.0) {
+                channel->output_scale = receiver->output_scale;
             }
-            if (config->receivers[i].ddc[d].rf_reference_power_dbm == 0.0) {
-                config->receivers[i].ddc[d].rf_reference_power_dbm = config->receivers[i].rf_reference_power_dbm;
+            if (channel->rf_reference_power_dbm == 0.0) {
+                channel->rf_reference_power_dbm = receiver->rf_reference_power_dbm;
             }
         }
-        if (!receiver_validate(&config->receivers[i], error, error_size)) {
+        if (!receiver_validate(receiver, error, error_size)) {
             return false;
         }
-        const receiver_config_t *receiver = &config->receivers[i];
-        uint16_t ports[1 + SIM_DDC_COUNT];
-        ports[0] = receiver->udp_80mhz_output.port;
-        for (size_t d = 0; d < SIM_DDC_COUNT; d++) {
-            ports[1 + d] = receiver->ddc[d].udp_output.port;
-        }
-        for (size_t p = 0; p < 1 + SIM_DDC_COUNT; p++) {
-            for (size_t q = p + 1; q < 1 + SIM_DDC_COUNT; q++) {
-                if (ports[p] == ports[q]) {
+        for (size_t p = 0; p < receiver->channel_count; p++) {
+            for (size_t q = p + 1; q < receiver->channel_count; q++) {
+                if (receiver->channels[p].udp_output.port == receiver->channels[q].udp_output.port) {
                     snprintf(error, error_size, "duplicate_udp_port");
                     return false;
                 }
             }
         }
         for (size_t j = i + 1; j < config->receiver_count; j++) {
-            if (config->receivers[i].id == config->receivers[j].id) {
+            const receiver_config_t *other = &config->receivers[j];
+            if (receiver->id == other->id) {
                 snprintf(error, error_size, "duplicate_receiver");
                 return false;
             }
-            if (config->receivers[i].rest_port == config->receivers[j].rest_port) {
+            if (receiver->rest_port == other->rest_port) {
                 snprintf(error, error_size, "duplicate_rest_port");
                 return false;
             }
-            const receiver_config_t *other = &config->receivers[j];
-            uint16_t other_ports[1 + SIM_DDC_COUNT];
-            other_ports[0] = other->udp_80mhz_output.port;
-            for (size_t d = 0; d < SIM_DDC_COUNT; d++) {
-                other_ports[1 + d] = other->ddc[d].udp_output.port;
-            }
-            for (size_t p = 0; p < 1 + SIM_DDC_COUNT; p++) {
-                for (size_t q = 0; q < 1 + SIM_DDC_COUNT; q++) {
-                    if (ports[p] == other_ports[q]) {
+            for (size_t p = 0; p < receiver->channel_count; p++) {
+                for (size_t q = 0; q < other->channel_count; q++) {
+                    if (receiver->channels[p].udp_output.port == other->channels[q].udp_output.port) {
                         snprintf(error, error_size, "duplicate_udp_port");
                         return false;
                     }

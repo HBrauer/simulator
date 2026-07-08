@@ -89,13 +89,14 @@ sim_render_lib = static_library('simrender', sim_render_sources, dependencies: s
 sim_lib = static_library('simcore', sim_sources, dependencies: sim_deps, include_directories: sim_includes, link_with: sim_render_lib)
 
 receiver_sources = files(
+  'receiver/src/control_client.c',
   'receiver/src/history.c',
   'receiver/src/vita49_rx.c',
   'receiver/src/waterfall.c'
 )
 
 receiver_includes = include_directories('receiver/src')
-receiver_deps = [m_dep, fftw3f_dep]
+receiver_deps = [m_dep, fftw3f_dep, jansson_dep]
 receiver_lib = static_library('receivercore', receiver_sources, dependencies: receiver_deps, include_directories: receiver_includes)
 
 simulator = executable(
@@ -109,7 +110,7 @@ simulator = executable(
 
 waterfall_receiver = executable(
   'sdr-waterfall-receiver',
-  'receiver/src/main.c',
+  ['receiver/src/main.c', 'receiver/src/ui_text.c'],
   link_with: receiver_lib,
   dependencies: receiver_deps + [sdl2_dep],
   include_directories: receiver_includes,
@@ -150,9 +151,10 @@ renderer_benchmark = executable(
 benchmark('renderer_80mhz_scalar_1_receiver', renderer_benchmark, args: ['1000', '4096', '--receivers', '1'], workdir: meson.project_source_root(), timeout: 60)
 benchmark('renderer_80mhz_scalar_4_receivers', renderer_benchmark, args: ['1000', '4096', '--receivers', '4'], workdir: meson.project_source_root(), timeout: 60)
 benchmark('renderer_80mhz_scalar_12_receivers', renderer_benchmark, args: ['1000', '4096', '--receivers', '12'], workdir: meson.project_source_root(), timeout: 60)
-# Realistic P9 load: one receiver, wideband + all DDCs, noise plus mixed IQ and audio signals.
-# The realtime_ratio it prints is the headroom on a single core; run against a -O3/native build.
-benchmark('renderer_realistic_load', renderer_benchmark, args: ['500', '4096', '--receivers', '1', '--with-ddc', '--scenario', 'simulator/scenarios/benchmark_load.json'], workdir: meson.project_source_root(), timeout: 120)
+# Realistic P9 load: one receiver, all channels (wideband + narrowband), noise plus mixed IQ
+# and audio signals. The realtime_ratio it prints is the headroom on a single core; run against
+# a -O3/native build.
+benchmark('renderer_realistic_load', renderer_benchmark, args: ['500', '4096', '--receivers', '1', '--all-channels', '--scenario', 'simulator/scenarios/benchmark_load.json'], workdir: meson.project_source_root(), timeout: 120)
 
 pytest = find_program('pytest', required: false)
 if pytest.found()

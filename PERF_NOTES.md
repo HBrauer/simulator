@@ -3,7 +3,7 @@
 Measured with `renderer_benchmark` on the dev machine, `--buildtype=release
 -Dnative_optimizations=true`, VOLK enabled, one core (`taskset -c 0`), best of three runs. The
 printed `realtime_ratio` is how much faster than real time a **single core** renders the given
-load (the wideband stream defines the real-time span; with `--with-ddc` the four DDCs are rendered
+load (the wideband stream defines the real-time span; with `--all-channels` the remaining channels are rendered
 per block but only the wideband duration is credited, so those rows are ~5x lower structurally).
 `>= 1.3` is the P9 target of 30% headroom.
 
@@ -76,3 +76,47 @@ streams rather than by the audio synthesis the plan targeted.
 Pre-rendering the four-station `audio_radio_demo` (a 7.67 s, 48 kHz clip) takes ~0.18 s total at
 startup (WBFM 396 kHz ~0.12 s, AM 96 kHz ~0.03 s, USB/LSB 48 kHz ~0.016 s each) — well under the
 2 s budget.
+
+## File replay (range/shift modes) and mmap-backed assets
+
+Range/shift replay reuses the existing dispatch (direct baseband / VOLK rotator for equal-rate
+sources), so an 80 MHz capture at 98.304 MS/s renders on the cheap direct path; the loop seam
+splits a block into two segments with the NCO phase anchored to the absolute sample index, so
+there is no per-wrap cost beyond a second dispatch call.
+
+IQ files over the `asset_cache_max_bytes` budget (default 16 GiB) are mmap-backed
+(`PROT_READ`/`MAP_SHARED` + `MADV_WILLNEED`). Measured on the 393 MB / 1 s / 98.304 MS/s check
+scenario: mmap and full-RAM loads pace identically (~78 MS/s on the dev machine in both debug and
+release, the same ceiling the pre-existing wideband UDP path shows), i.e. no measurable mmap
+penalty once the page cache is warm — the file is re-read every loop, which keeps it warm.
+Cold-cache first passes fault pages in on the render thread (~96k faults/s at full rate);
+`MADV_WILLNEED` at load hides most of this, and sustained misses only occur if the replayed file
+set exceeds RAM (observable as `samples_late` growth). No per-block touch-ahead is implemented.
+
+## Passthrough replay (bypassing the mixer for a dedicated single-file channel)
+
+A channel whose only job is to replay one capture pays for the general mixer's float mix bus,
+per-signal gain/passband machinery, and noise-floor pass on every block, even on the mixer's
+already-cheapest direct-copy dispatch. `signal.passthrough: true` (range/shift replay modes only)
+adds a check ahead of the mixer (`renderer_try_passthrough` in `renderer.c`) that, when the
+channel's sample rate exactly matches the source's, writes the file's samples straight to the
+output block -- a literal `memcpy` at unit gain, a scaled copy otherwise, or a rotated copy for
+shift mode away from its nominal center -- with no float bus, no noise floor, and no other-signal
+bookkeeping. When the rate doesn't match (e.g. a wideband channel spanning many signals), it
+silently declines and the general renderer runs as usual for that channel/block, so scenario
+correctness never depends on which channels happen to get the fast path.
+
+Measured with a standalone harness driving `renderer_render_channel_block` directly (no UDP/pacing
+noise) on a 1024-sample block at 1.536 MS/s, single-thread, `-O3`, comparing `passthrough: true`
+against the identical scenario with `passthrough: false` (both take the mixer's direct-baseband
+dispatch, i.e. the *best case* for the general path):
+
+| Path | ns/block | Msamples/s (single thread) |
+| --- | --- | --- |
+| passthrough | ~110-140 | ~7500-9100 |
+| general mixer (direct-baseband path) | ~1880-2020 | ~530-545 |
+
+Roughly a 14-17x reduction in render time for the dedicated-channel case. The gap is the mix-bus
+zero/accumulate/saturate round trip (int16->float->int16 per sample) and per-block signal-loop
+bookkeeping the mixer always performs, none of which passthrough needs when it's simply copying
+(or rotating) one file's bytes into the packet payload.

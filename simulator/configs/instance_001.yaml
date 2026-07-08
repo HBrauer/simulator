@@ -12,34 +12,39 @@ receivers:
     udp_output_host: "127.0.0.1"
     frequency_start_hz: 9960000000
     frequency_stop_hz: 10040000000
-    bandwidth_hz: 80000000
-    sample_rate_hz: 98304000
+    frontend_bandwidth_hz: 80000000
     scan_rate_hz_per_s: 100000000000
     rf_reference_power_dbm: -55.0
-    stream_enabled: true
-    udp_80mhz_output_port: 50000
-    ddc:
-      - ddc_id: 0
+    profiles:
+      - { bandwidth_hz: 80000000, sample_rate_hz: 98304000, name: "80M" }
+      - { bandwidth_hz: 40000000, sample_rate_hz: 49152000, name: "40M" }
+      - { bandwidth_hz: 20000000, sample_rate_hz: 24576000, name: "20M" }
+      - { bandwidth_hz: 10000000, sample_rate_hz: 12288000, name: "10M" }
+      - { bandwidth_hz: 5000000, sample_rate_hz: 6144000, name: "5M" }
+      - { bandwidth_hz: 1000000, sample_rate_hz: 1536000, name: "1M" }
+    channels:
+      - channel_id: 0
+        track_tuner: true
+        bandwidth_hz: 80000000
+        stream_enabled: true
+        udp_output_port: 50000
+      - channel_id: 1
         center_frequency_hz: 10005000000
         bandwidth_hz: 20000000
-        sample_rate_hz: 24576000
         stream_enabled: true
         udp_output_port: 50001
-      - ddc_id: 1
+      - channel_id: 2
         center_frequency_hz: 10010000000
         bandwidth_hz: 20000000
-        sample_rate_hz: 24576000
         stream_enabled: true
         udp_output_port: 50002
-      - ddc_id: 2
+      - channel_id: 3
         center_frequency_hz: 9995000000
         bandwidth_hz: 20000000
-        sample_rate_hz: 24576000
         stream_enabled: true
         udp_output_port: 50003
-      - ddc_id: 3
+      - channel_id: 4
         center_frequency_hz: 10030000000
         bandwidth_hz: 20000000
-        sample_rate_hz: 24576000
         stream_enabled: true
         udp_output_port: 50004

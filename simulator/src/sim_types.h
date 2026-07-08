@@ -6,7 +6,9 @@
 #include <stdint.h>
 
 #define SIM_MAX_RECEIVERS 12
-#define SIM_DDC_COUNT 4
+#define SIM_MAX_CHANNELS 8
+#define SIM_MAX_PROFILES 16
+#define SIM_MAX_PROFILE_NAME 24
 #define SIM_MAX_SOURCES 64
 #define SIM_MAX_SIGNALS 256
 #define SIM_MAX_PATH 256
@@ -29,6 +31,18 @@ typedef enum {
     SCENARIO_SOURCE_AUDIO_FILE
 } scenario_source_kind_t;
 
+/* How a signal is placed against the channel tune (see docs/schemas.md):
+ * FIXED  - at its own center_frequency_hz whenever the passband overlaps (legacy behaviour).
+ * RANGE  - centered at the tuned frequency while the tune is inside [range_start, range_stop];
+ *          output is identical anywhere in the range, silent outside it.
+ * SHIFT  - stays at its absolute RF position: IQ rotated by f0 - f_tune while the tune is
+ *          inside the range (pure rotation; spectral wrap-around is accepted semantics). */
+typedef enum {
+    SCENARIO_REPLAY_FIXED,
+    SCENARIO_REPLAY_RANGE,
+    SCENARIO_REPLAY_SHIFT
+} scenario_replay_mode_t;
+
 typedef enum {
     SCENARIO_MODULATION_IQ,
     SCENARIO_MODULATION_WBFM,
@@ -41,16 +55,29 @@ typedef struct {
     uint16_t port;
 } udp_output_config_t;
 
+/* A supported {bandwidth, sample rate} pair, modelled after fixed DDC decimation stages:
+ * selecting a bandwidth (via YAML or REST) always selects its paired sample rate. */
+typedef struct {
+    uint32_t bandwidth_hz;
+    uint32_t sample_rate_hz;
+    char name[SIM_MAX_PROFILE_NAME];
+} channel_profile_t;
+
+/* One output channel of a receiver. Every stream is a channel; the former wideband stream
+ * is just a channel with track_tuner=true and the widest profile. bandwidth_hz and
+ * sample_rate_hz are denormalised from the selected profile (validation enforces that the
+ * pair matches one of the receiver's profiles). */
 typedef struct {
     uint32_t id;
-    uint64_t center_frequency_hz;
+    bool track_tuner;             /* center follows the receiver tuner (scan or fixed) */
+    uint64_t center_frequency_hz; /* used when !track_tuner */
     uint32_t bandwidth_hz;
     uint32_t sample_rate_hz;
     double output_scale;
     double rf_reference_power_dbm;
     bool stream_enabled;
     udp_output_config_t udp_output;
-} ddc_config_t;
+} channel_config_t;
 
 typedef struct {
     uint32_t id;
@@ -58,16 +85,17 @@ typedef struct {
     uint16_t rest_port;
     uint64_t frequency_start_hz;
     uint64_t frequency_stop_hz;
-    uint64_t bandwidth_hz;
-    uint32_t sample_rate_hz;
+    uint64_t frontend_bandwidth_hz; /* instantaneous analog (ADC) window all channels extract from */
     double scan_rate_hz_per_s;
     double output_scale;
     double rf_reference_power_dbm;
-    bool stream_enabled;
     char udp_output_host[64];
     char udp_multicast_interface[64];
-    udp_output_config_t udp_80mhz_output;
-    ddc_config_t ddc[SIM_DDC_COUNT];
+    uint64_t config_epoch; /* bumped under the receiver lock on every runtime change */
+    size_t profile_count;
+    channel_profile_t profiles[SIM_MAX_PROFILES];
+    size_t channel_count;
+    channel_config_t channels[SIM_MAX_CHANNELS];
 } receiver_config_t;
 
 #define SIM_MAX_STREAM_CPUS 64
@@ -115,6 +143,16 @@ typedef struct {
     double am_depth;
     double start_time_s;
     double repeat_interval_s;
+    scenario_replay_mode_t replay_mode;
+    uint64_t replay_range_start_hz;
+    uint64_t replay_range_stop_hz;
+    bool loop; /* continuous epoch-anchored looping instead of the start/repeat burst model */
+    /* When active, this channel bypasses the mixer entirely for the block: no float mix bus,
+     * no noise floor, no other signals -- just this source's samples (optionally gain-scaled
+     * and/or frequency-rotated for shift mode) written straight to the output. Requires
+     * replay_mode range/shift and loop true; only engages on a per-block basis when the
+     * channel's sample rate exactly matches the source's (no resampling on this path). */
+    bool passthrough;
 } scenario_signal_t;
 
 typedef struct {

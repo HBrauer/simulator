@@ -71,8 +71,11 @@ def test_80mhz_resampler_matches_python_windowed_sinc_reference():
     )
     actual = _unpack_ci16(rendered)
     asset = _read_ci16(ROOT / "simulator/assets/fsk_20mhz.c16")
+    # The renderer filters with RESAMPLER_RADIUS (4) samples of history before the block's
+    # first source sample, so the reference sees the same interior kernel window.
     offset = 11059
-    source = asset[offset : offset + 8]
+    history = 4
+    source = asset[offset - history : offset + 12]
 
     # The mixer phase now derives from the absolute output-sample index (phase-continuous across
     # blocks), computed in Q0.64 fixed point. Mirror that exactly here.
@@ -94,7 +97,7 @@ def test_80mhz_resampler_matches_python_windowed_sinc_reference():
     phase_step = 2.0 * math.pi * offset_hz / sample_rate
     expected = []
     for index in range(8):
-        ii, qq = _resample(source, fraction + index * source_per_output)
+        ii, qq = _resample(source, history + fraction + index * source_per_output)
         phase = phase0 + phase_step * index
         rotated_i = ii * math.cos(phase) - qq * math.sin(phase)
         rotated_q = ii * math.sin(phase) + qq * math.cos(phase)

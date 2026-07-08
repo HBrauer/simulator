@@ -84,7 +84,7 @@ int main(int argc, char **argv)
             return 4;
         }
         render_stats_t stats;
-        renderer_render_80mhz_block(&scenario, &asset_cache, &config.receivers[0], timebase_now_ns(&timebase), buffer, samples, &stats);
+        renderer_render_channel_block(&scenario, &asset_cache, &config.receivers[0], &config.receivers[0].channels[0], timebase_now_ns(&timebase), buffer, samples, &stats);
         fwrite(buffer, sizeof(*buffer), samples, stdout);
         free(buffer);
         asset_cache_free(&asset_cache);

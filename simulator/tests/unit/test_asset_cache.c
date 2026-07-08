@@ -4,6 +4,7 @@
 
 #include <check.h>
 #include <math.h>
+#include <string.h>
 
 START_TEST(loads_scenario_assets_into_memory)
 {
@@ -38,13 +39,39 @@ START_TEST(loads_assets_in_small_batches)
 }
 END_TEST
 
-START_TEST(rejects_asset_cache_memory_limit)
+START_TEST(mmaps_iq_asset_over_memory_limit)
+{
+    scenario_t scenario;
+    asset_cache_t cache;
+    asset_cache_t reference;
+    char error[128];
+    ck_assert_msg(scenario_load_json("simulator/scenarios/test_scenario_001.json", &scenario, error, sizeof(error)), "%s", error);
+    ck_assert_msg(scenario_validate(&scenario, ".", error, sizeof(error)), "%s", error);
+    /* An IQ file over the budget is memory-mapped instead of rejected... */
+    ck_assert_msg(asset_cache_load_limited(&cache, &scenario, 16, 4096, NULL, error, sizeof(error)), "%s", error);
+    const cached_asset_t *asset = asset_cache_find(&cache, "asset_fsk_001");
+    ck_assert_ptr_nonnull(asset);
+    ck_assert(asset->mmapped);
+    ck_assert_uint_eq(asset->sample_count, 24576);
+    /* ...and the mapping is byte-identical to the RAM-loaded copy. */
+    ck_assert_msg(asset_cache_load(&reference, &scenario, error, sizeof(error)), "%s", error);
+    const cached_asset_t *ram = asset_cache_find(&reference, "asset_fsk_001");
+    ck_assert_ptr_nonnull(ram);
+    ck_assert(!ram->mmapped);
+    ck_assert_int_eq(memcmp(asset->samples, ram->samples, (size_t)asset->sample_count * sizeof(*asset->samples)), 0);
+    asset_cache_free(&reference);
+    asset_cache_free(&cache);
+}
+END_TEST
+
+START_TEST(rejects_audio_asset_over_memory_limit)
 {
     scenario_t scenario;
     asset_cache_t cache;
     char error[128];
-    ck_assert_msg(scenario_load_json("simulator/scenarios/test_scenario_001.json", &scenario, error, sizeof(error)), "%s", error);
+    ck_assert_msg(scenario_load_json("simulator/scenarios/audio_radio_demo.json", &scenario, error, sizeof(error)), "%s", error);
     ck_assert_msg(scenario_validate(&scenario, ".", error, sizeof(error)), "%s", error);
+    /* Audio has no mmap fallback (buffers are rewritten in place at load). */
     ck_assert(!asset_cache_load_limited(&cache, &scenario, 16, 4096, NULL, error, sizeof(error)));
     ck_assert_str_eq(error, "asset_cache_limit_exceeded");
 }
@@ -184,7 +211,8 @@ Suite *asset_cache_suite(void)
     TCase *tc = tcase_create("core");
     tcase_add_test(tc, loads_scenario_assets_into_memory);
     tcase_add_test(tc, loads_assets_in_small_batches);
-    tcase_add_test(tc, rejects_asset_cache_memory_limit);
+    tcase_add_test(tc, mmaps_iq_asset_over_memory_limit);
+    tcase_add_test(tc, rejects_audio_asset_over_memory_limit);
     tcase_add_test(tc, normalizes_audio_asset_to_target_rms);
     tcase_add_test(tc, prerenders_audio_signals_at_content_bandwidth_rate);
     tcase_add_test(tc, prerender_gain_reconstructs_direct_am_amplitude);

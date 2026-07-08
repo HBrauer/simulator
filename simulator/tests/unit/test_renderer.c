@@ -83,6 +83,61 @@ static double dft_bin_mag(const iq_ci16_t *x, size_t n, double f, double fs)
     return hypot(re, im) / (double)n;
 }
 
+/* The old tests configured windows directly on receiver_config_t / ddc_config_t. The channel
+ * model expresses the same windows as a receiver wrapping a single channel. */
+static receiver_config_t window_receiver(uint64_t f_start, uint64_t f_stop, uint64_t bandwidth_hz, uint32_t sample_rate_hz, double scan_rate, double output_scale, double ref_dbm)
+{
+    receiver_config_t rx = {
+        .id = 0,
+        .frequency_start_hz = f_start,
+        .frequency_stop_hz = f_stop,
+        .frontend_bandwidth_hz = bandwidth_hz,
+        .scan_rate_hz_per_s = scan_rate,
+        .output_scale = output_scale,
+        .rf_reference_power_dbm = ref_dbm,
+        .channel_count = 1,
+    };
+    rx.channels[0] = (channel_config_t){
+        .id = 0,
+        .track_tuner = true,
+        .bandwidth_hz = (uint32_t)bandwidth_hz,
+        .sample_rate_hz = sample_rate_hz,
+        .output_scale = output_scale,
+        .rf_reference_power_dbm = ref_dbm,
+        .stream_enabled = true,
+    };
+    return rx;
+}
+
+/* Fixed-centre channel (the old ddc_config_t) inside a front end centred on it. */
+static receiver_config_t fixed_channel_receiver(uint64_t center_hz, uint32_t bandwidth_hz, uint32_t sample_rate_hz, double output_scale, double ref_dbm)
+{
+    receiver_config_t rx = {
+        .id = 0,
+        .frequency_start_hz = center_hz - SIM_RECEIVER_BANDWIDTH_HZ / 2ULL,
+        .frequency_stop_hz = center_hz + SIM_RECEIVER_BANDWIDTH_HZ / 2ULL,
+        .frontend_bandwidth_hz = SIM_RECEIVER_BANDWIDTH_HZ,
+        .output_scale = output_scale,
+        .rf_reference_power_dbm = ref_dbm,
+        .channel_count = 1,
+    };
+    rx.channels[0] = (channel_config_t){
+        .id = 0,
+        .center_frequency_hz = center_hz,
+        .bandwidth_hz = bandwidth_hz,
+        .sample_rate_hz = sample_rate_hz,
+        .output_scale = output_scale,
+        .rf_reference_power_dbm = ref_dbm,
+        .stream_enabled = true,
+    };
+    return rx;
+}
+
+static bool render_rx_block(const scenario_t *scenario, const asset_cache_t *cache, const receiver_config_t *rx, uint64_t scenario_time_ns, iq_ci16_t *out, size_t count, render_stats_t *stats)
+{
+    return renderer_render_channel_block(scenario, cache, rx, &rx->channels[0], scenario_time_ns, out, count, stats);
+}
+
 /* Set up a single audio signal, pre-render it with `pp`, and render one output block at out_rate
  * (signal at window centre, offset 0). Frees the pre-render buffer before returning. */
 static void render_audio_once(scenario_modulation_t mod, uint32_t audio_rate, const float *audio, size_t an,
@@ -122,17 +177,9 @@ static void render_audio_once(scenario_modulation_t mod, uint32_t audio_rate, co
     ck_assert_msg(asset_cache_prerender_from_audio(&pr, audio, an, audio_rate, g, pp, err, sizeof(err)), "%s", err);
     cache.prerenders[0] = pr;
 
-    const receiver_config_t rx = {
-        .id = 0,
-        .frequency_start_hz = 10000000000ULL - out_rate / 2,
-        .frequency_stop_hz = 10000000000ULL + out_rate / 2,
-        .bandwidth_hz = out_rate,
-        .sample_rate_hz = out_rate,
-        .output_scale = 1.0,
-        .rf_reference_power_dbm = -40.0,
-    };
+    const receiver_config_t rx = window_receiver(10000000000ULL - out_rate / 2, 10000000000ULL + out_rate / 2, out_rate, out_rate, 0.0, 1.0, -40.0);
     render_stats_t st;
-    ck_assert(renderer_render_80mhz_block(&sc, &cache, &rx, 0, out, n, &st));
+    ck_assert(render_rx_block(&sc, &cache, &rx, 0, out, n, &st));
     ck_assert_uint_eq(st.active_signals, 1);
     free(pr.samples);
 }
@@ -186,15 +233,7 @@ static void setup_two_signal_mix(scenario_t *scenario, asset_cache_t *cache, iq_
 
 static receiver_config_t fixed_center_receiver(void)
 {
-    return (receiver_config_t){
-        .id = 0,
-        .frequency_start_hz = 9960000000ULL,
-        .frequency_stop_hz = 10040000000ULL,
-        .bandwidth_hz = SIM_RECEIVER_BANDWIDTH_HZ,
-        .sample_rate_hz = SIM_RECEIVER_SAMPLE_RATE_HZ,
-        .output_scale = 1.0,
-        .rf_reference_power_dbm = -40.0,
-    };
+    return window_receiver(9960000000ULL, 10040000000ULL, SIM_RECEIVER_BANDWIDTH_HZ, SIM_RECEIVER_SAMPLE_RATE_HZ, 0.0, 1.0, -40.0);
 }
 
 static void setup_constant_signal(scenario_t *scenario, asset_cache_t *cache, iq_ci16_t *asset_samples, uint64_t signal_center_hz)
@@ -237,16 +276,7 @@ static void setup_constant_signal(scenario_t *scenario, asset_cache_t *cache, iq
 
 static receiver_config_t scanner_receiver(void)
 {
-    return (receiver_config_t){
-        .id = 0,
-        .frequency_start_hz = 9960000000ULL,
-        .frequency_stop_hz = 10060000000ULL,
-        .bandwidth_hz = SIM_RECEIVER_BANDWIDTH_HZ,
-        .sample_rate_hz = SIM_RECEIVER_SAMPLE_RATE_HZ,
-        .scan_rate_hz_per_s = 100000000000.0,
-        .output_scale = 1.0,
-        .rf_reference_power_dbm = -40.0,
-    };
+    return window_receiver(9960000000ULL, 10060000000ULL, SIM_RECEIVER_BANDWIDTH_HZ, SIM_RECEIVER_SAMPLE_RATE_HZ, 100000000000.0, 1.0, -40.0);
 }
 
 START_TEST(renders_nonzero_visible_signal)
@@ -262,7 +292,7 @@ START_TEST(renders_nonzero_visible_signal)
 
     iq_ci16_t out[128];
     render_stats_t stats;
-    ck_assert(renderer_render_80mhz_block(&scenario, &cache, &config.receivers[0], 450000ULL, out, 128, &stats));
+    ck_assert(render_rx_block(&scenario, &cache, &config.receivers[0], 450000ULL, out, 128, &stats));
     ck_assert_uint_eq(stats.samples_rendered, 128);
     ck_assert_uint_eq(stats.active_signals, 1);
     ck_assert_int_ne(out[0].i, 0);
@@ -285,7 +315,7 @@ START_TEST(renderer_80mhz_sinc_resamples_24576_source_to_98304_output)
 
     iq_ci16_t out[8];
     render_stats_t stats;
-    ck_assert(renderer_render_80mhz_block(&scenario, &cache, &config.receivers[0], 450000ULL, out, 8, &stats));
+    ck_assert(render_rx_block(&scenario, &cache, &config.receivers[0], 450000ULL, out, 8, &stats));
     const cached_asset_t *asset = asset_cache_find(&cache, "asset_fsk_001");
     ck_assert_ptr_nonnull(asset);
     const double gain = 1.0;
@@ -296,10 +326,12 @@ START_TEST(renderer_80mhz_sinc_resamples_24576_source_to_98304_output)
     const double exact = base_s * 24576000.0;
     const double fraction = exact - floor(exact);
     const double source_per_output = 24576000.0 / 98304000.0;
+    /* The renderer now filters with RESAMPLER_RADIUS samples of history before the block's
+     * first source sample (interior kernel), so mirror that in the reference. */
     for (size_t i = 0; i < 5; i++) {
-        const double pos = fraction + (double)i * source_per_output;
-        ck_assert_int_le(abs(out[i].i - sinc_scaled_i16(&asset->samples[offset], 8, pos, false, gain)), 2);
-        ck_assert_int_le(abs(out[i].q - sinc_scaled_i16(&asset->samples[offset], 8, pos, true, gain)), 2);
+        const double pos = 4.0 + fraction + (double)i * source_per_output;
+        ck_assert_int_le(abs(out[i].i - sinc_scaled_i16(&asset->samples[offset - 4], 16, pos, false, gain)), 2);
+        ck_assert_int_le(abs(out[i].q - sinc_scaled_i16(&asset->samples[offset - 4], 16, pos, true, gain)), 2);
     }
     asset_cache_free(&cache);
 }
@@ -343,18 +375,10 @@ START_TEST(renderer_low_rate_upsample_uses_linear_path)
     cache.assets[0].sample_count = 4;
     cache.assets[0].samples = asset_samples;
 
-    const receiver_config_t receiver = {
-        .id = 0,
-        .frequency_start_hz = 9999999500ULL,
-        .frequency_stop_hz = 10000000500ULL,
-        .bandwidth_hz = 1000,
-        .sample_rate_hz = 16000,
-        .output_scale = 1.0,
-        .rf_reference_power_dbm = -40.0,
-    };
+    const receiver_config_t receiver = window_receiver(9999999500ULL, 10000000500ULL, 1000, 16000, 0.0, 1.0, -40.0);
     iq_ci16_t out[16];
     render_stats_t stats;
-    ck_assert(renderer_render_80mhz_block(&scenario, &cache, &receiver, 0, out, 16, &stats));
+    ck_assert(render_rx_block(&scenario, &cache, &receiver, 0, out, 16, &stats));
     ck_assert_uint_eq(stats.active_signals, 1);
     for (size_t i = 0; i < 16; i++) {
         const double fraction = (double)i / 16.0;
@@ -373,7 +397,7 @@ START_TEST(renderer_applies_rf_power_relative_to_reference)
     ck_assert_msg(scenario_load_json("simulator/scenarios/test_scenario_001.json", &scenario, error, sizeof(error)), "%s", error);
     ck_assert_msg(scenario_validate(&scenario, ".", error, sizeof(error)), "%s", error);
     scenario.signals[0].power_dbm = -49.0;
-    config.receivers[0].rf_reference_power_dbm = -55.0;
+    config.receivers[0].channels[0].rf_reference_power_dbm = -55.0;
     config.receivers[0].frequency_start_hz = 9965000000ULL;
     config.receivers[0].frequency_stop_hz = 10045000000ULL;
 
@@ -381,7 +405,7 @@ START_TEST(renderer_applies_rf_power_relative_to_reference)
     ck_assert_msg(asset_cache_load(&cache, &scenario, error, sizeof(error)), "%s", error);
     iq_ci16_t out[4];
     render_stats_t stats;
-    ck_assert(renderer_render_80mhz_block(&scenario, &cache, &config.receivers[0], 450000ULL, out, 4, &stats));
+    ck_assert(render_rx_block(&scenario, &cache, &config.receivers[0], 450000ULL, out, 4, &stats));
     const cached_asset_t *asset = asset_cache_find(&cache, "asset_fsk_001");
     ck_assert_ptr_nonnull(asset);
     const double gain = pow(10.0, 6.0 / 20.0);
@@ -389,7 +413,7 @@ START_TEST(renderer_applies_rf_power_relative_to_reference)
     const double base_s = 450000.0 / 1000000000.0;
     const double exact = base_s * 24576000.0;
     const double fraction = exact - floor(exact);
-    ck_assert_int_le(abs(out[0].i - sinc_scaled_i16(&asset->samples[11059], 8, fraction, false, gain)), 2);
+    ck_assert_int_le(abs(out[0].i - sinc_scaled_i16(&asset->samples[11055], 16, 4.0 + fraction, false, gain)), 2);
     asset_cache_free(&cache);
 }
 END_TEST
@@ -405,7 +429,7 @@ START_TEST(renderer_mixes_two_signals_without_clipping)
     const receiver_config_t receiver = fixed_center_receiver();
     iq_ci16_t out[4];
     render_stats_t stats;
-    ck_assert(renderer_render_80mhz_block(&scenario, &cache, &receiver, 0, out, 4, &stats));
+    ck_assert(render_rx_block(&scenario, &cache, &receiver, 0, out, 4, &stats));
 
     ck_assert_uint_eq(stats.samples_rendered, 4);
     ck_assert_uint_eq(stats.active_signals, 2);
@@ -427,7 +451,7 @@ START_TEST(renderer_clips_after_mixing_two_signals)
     const receiver_config_t receiver = fixed_center_receiver();
     iq_ci16_t out[4];
     render_stats_t stats;
-    ck_assert(renderer_render_80mhz_block(&scenario, &cache, &receiver, 0, out, 4, &stats));
+    ck_assert(render_rx_block(&scenario, &cache, &receiver, 0, out, 4, &stats));
 
     ck_assert_uint_eq(stats.samples_rendered, 4);
     ck_assert_uint_eq(stats.active_signals, 2);
@@ -484,7 +508,7 @@ START_TEST(renderer_mix_bus_clips_once_not_per_signal)
     const receiver_config_t receiver = fixed_center_receiver();
     iq_ci16_t out[4];
     render_stats_t stats;
-    ck_assert(renderer_render_80mhz_block(&scenario, &cache, &receiver, 0, out, 4, &stats));
+    ck_assert(render_rx_block(&scenario, &cache, &receiver, 0, out, 4, &stats));
     ck_assert_uint_eq(stats.active_signals, 3);
     for (size_t i = 0; i < 4; i++) {
         ck_assert_int_eq(out[i].i, 30000);
@@ -506,11 +530,11 @@ START_TEST(scanner_moves_fixed_rf_signal_through_baseband)
     iq_ci16_t negative_offset[4];
     render_stats_t stats;
 
-    ck_assert(renderer_render_80mhz_block(&scenario, &cache, &receiver, 0, positive_offset, 4, &stats));
+    ck_assert(render_rx_block(&scenario, &cache, &receiver, 0, positive_offset, 4, &stats));
     ck_assert_uint_eq(stats.active_signals, 1);
-    ck_assert(renderer_render_80mhz_block(&scenario, &cache, &receiver, 200000ULL, zero_offset, 4, &stats));
+    ck_assert(render_rx_block(&scenario, &cache, &receiver, 200000ULL, zero_offset, 4, &stats));
     ck_assert_uint_eq(stats.active_signals, 1);
-    ck_assert(renderer_render_80mhz_block(&scenario, &cache, &receiver, 400000ULL, negative_offset, 4, &stats));
+    ck_assert(render_rx_block(&scenario, &cache, &receiver, 400000ULL, negative_offset, 4, &stats));
     ck_assert_uint_eq(stats.active_signals, 1);
 
     /* The mixer phase now derives from absolute time, so a single sample's sign depends on the
@@ -536,14 +560,14 @@ START_TEST(scanner_same_time_is_deterministic_across_instances)
     receiver_config_t receiver_b = scanner_receiver();
     receiver_b.id = 7;
     receiver_b.rest_port = 9100;
-    receiver_b.udp_80mhz_output.port = 55000;
+    receiver_b.channels[0].udp_output.port = 55000;
 
     iq_ci16_t out_a[8];
     iq_ci16_t out_b[8];
     render_stats_t stats_a;
     render_stats_t stats_b;
-    ck_assert(renderer_render_80mhz_block(&scenario, &cache, &receiver_a, 400000ULL, out_a, 8, &stats_a));
-    ck_assert(renderer_render_80mhz_block(&scenario, &cache, &receiver_b, 400000ULL, out_b, 8, &stats_b));
+    ck_assert(render_rx_block(&scenario, &cache, &receiver_a, 400000ULL, out_a, 8, &stats_a));
+    ck_assert(render_rx_block(&scenario, &cache, &receiver_b, 400000ULL, out_b, 8, &stats_b));
 
     ck_assert_uint_eq(stats_a.active_signals, 1);
     ck_assert_uint_eq(stats_b.active_signals, 1);
@@ -560,17 +584,10 @@ START_TEST(renders_ddc_nonzero_visible_signal)
     asset_cache_t cache;
     ck_assert_msg(asset_cache_load(&cache, &scenario, error, sizeof(error)), "%s", error);
 
-    ddc_config_t ddc = {
-        .id = 0,
-        .center_frequency_hz = 10005000000ULL,
-        .bandwidth_hz = SIM_DDC_BANDWIDTH_HZ,
-        .sample_rate_hz = SIM_DDC_SAMPLE_RATE_HZ,
-        .output_scale = 1.0,
-        .rf_reference_power_dbm = -55.0,
-    };
+    const receiver_config_t rx = fixed_channel_receiver(10005000000ULL, SIM_DDC_BANDWIDTH_HZ, SIM_DDC_SAMPLE_RATE_HZ, 1.0, -55.0);
     iq_ci16_t out[128];
     render_stats_t stats;
-    ck_assert(renderer_render_ddc_block(&scenario, &cache, &ddc, 450000ULL, out, 128, &stats));
+    ck_assert(render_rx_block(&scenario, &cache, &rx, 450000ULL, out, 128, &stats));
     ck_assert_uint_eq(stats.samples_rendered, 128);
     ck_assert_uint_eq(stats.active_signals, 1);
     ck_assert_int_ne(out[0].i, 0);
@@ -587,17 +604,10 @@ START_TEST(renders_ddc_4096_sample_block_for_waterfall)
     asset_cache_t cache;
     ck_assert_msg(asset_cache_load(&cache, &scenario, error, sizeof(error)), "%s", error);
 
-    ddc_config_t ddc = {
-        .id = 0,
-        .center_frequency_hz = 10005000000ULL,
-        .bandwidth_hz = SIM_DDC_BANDWIDTH_HZ,
-        .sample_rate_hz = SIM_DDC_SAMPLE_RATE_HZ,
-        .output_scale = 1.0,
-        .rf_reference_power_dbm = -55.0,
-    };
+    const receiver_config_t rx = fixed_channel_receiver(10005000000ULL, SIM_DDC_BANDWIDTH_HZ, SIM_DDC_SAMPLE_RATE_HZ, 1.0, -55.0);
     iq_ci16_t out[4096];
     render_stats_t stats;
-    ck_assert(renderer_render_ddc_block(&scenario, &cache, &ddc, 450000ULL, out, 4096, &stats));
+    ck_assert(render_rx_block(&scenario, &cache, &rx, 450000ULL, out, 4096, &stats));
     ck_assert_uint_eq(stats.samples_rendered, 4096);
     ck_assert_uint_eq(stats.active_signals, 1);
 
@@ -626,22 +636,22 @@ START_TEST(renderer_adds_deterministic_noise_floor_without_active_signals)
     asset_cache_t cache;
     memset(&cache, 0, sizeof(cache));
     receiver_config_t receiver = fixed_center_receiver();
-    receiver.rf_reference_power_dbm = -85.0;
+    receiver.channels[0].rf_reference_power_dbm = -85.0;
 
     iq_ci16_t out_a[32];
     iq_ci16_t out_b[32];
     iq_ci16_t out_c[32];
     render_stats_t stats;
 
-    ck_assert(renderer_render_80mhz_block(&scenario, &cache, &receiver, 1000000ULL, out_a, 32, &stats));
+    ck_assert(render_rx_block(&scenario, &cache, &receiver, 1000000ULL, out_a, 32, &stats));
     ck_assert_uint_eq(stats.active_signals, 0);
     ck_assert_uint_eq(stats.samples_rendered, 32);
     ck_assert(samples_have_energy(out_a, 32));
 
-    ck_assert(renderer_render_80mhz_block(&scenario, &cache, &receiver, 1000000ULL, out_b, 32, &stats));
+    ck_assert(render_rx_block(&scenario, &cache, &receiver, 1000000ULL, out_b, 32, &stats));
     ck_assert_mem_eq(out_a, out_b, sizeof(out_a));
 
-    ck_assert(renderer_render_80mhz_block(&scenario, &cache, &receiver, 2000000ULL, out_c, 32, &stats));
+    ck_assert(render_rx_block(&scenario, &cache, &receiver, 2000000ULL, out_c, 32, &stats));
     ck_assert(memcmp(out_a, out_c, sizeof(out_a)) != 0);
 }
 END_TEST
@@ -658,14 +668,7 @@ static double measure_noise_rms(uint64_t window_bw_hz, double density_dbm_per_hz
     asset_cache_t cache;
     memset(&cache, 0, sizeof(cache));
 
-    ddc_config_t ddc = {
-        .id = 0,
-        .center_frequency_hz = 10000000000ULL,
-        .bandwidth_hz = (uint32_t)window_bw_hz,
-        .sample_rate_hz = 4000000U,
-        .output_scale = 1.0,
-        .rf_reference_power_dbm = ref_dbm,
-    };
+    const receiver_config_t rx = fixed_channel_receiver(10000000000ULL, (uint32_t)window_bw_hz, 4000000U, 1.0, ref_dbm);
     /* Average power over several blocks (different pool slices) to shrink statistical error. */
     double power = 0.0;
     size_t total = 0;
@@ -673,7 +676,7 @@ static double measure_noise_rms(uint64_t window_bw_hz, double density_dbm_per_hz
     render_stats_t stats;
     for (uint64_t b = 0; b < 16; b++) {
         const uint64_t t = 1000000ULL + b * 700000ULL;
-        ck_assert(renderer_render_ddc_block(&scenario, &cache, &ddc, t, out, 2048, &stats));
+        ck_assert(render_rx_block(&scenario, &cache, &rx, t, out, 2048, &stats));
         for (size_t i = 0; i < 2048; i++) {
             power += (double)out[i].i * out[i].i + (double)out[i].q * out[i].q;
             total++;
@@ -745,7 +748,7 @@ START_TEST(renderer_renders_audio_modulation_modes)
     cache.assets[0].audio_samples = audio;
 
     receiver_config_t receiver = fixed_center_receiver();
-    receiver.rf_reference_power_dbm = -40.0;
+    receiver.channels[0].rf_reference_power_dbm = -40.0;
     iq_ci16_t out[64];
     render_stats_t stats;
     char error[128];
@@ -761,7 +764,7 @@ START_TEST(renderer_renders_audio_modulation_modes)
         cached_prerender_t pr;
         ck_assert_msg(asset_cache_prerender_from_audio(&pr, audio, 512, 48000, &scenario.signals[0], NULL, error, sizeof(error)), "%s", error);
         cache.prerenders[0] = pr;
-        ck_assert(renderer_render_80mhz_block(&scenario, &cache, &receiver, 0, out, 64, &stats));
+        ck_assert(render_rx_block(&scenario, &cache, &receiver, 0, out, 64, &stats));
         ck_assert_uint_eq(stats.active_signals, 1);
         ck_assert(samples_have_energy(out, 64));
         free(pr.samples);
@@ -826,7 +829,7 @@ START_TEST(renderer_am_envelope_is_normalised_and_does_not_over_saturate)
     const receiver_config_t receiver = fixed_center_receiver();
     iq_ci16_t out[8];
     render_stats_t stats;
-    ck_assert(renderer_render_80mhz_block(&scenario, &cache, &receiver, 0, out, 8, &stats));
+    ck_assert(render_rx_block(&scenario, &cache, &receiver, 0, out, 8, &stats));
     ck_assert_uint_eq(stats.active_signals, 1);
     const int expected = (int)lrint(32767.0 * (1.0 + 0.8 * 0.5) / (1.0 + 0.8));
     ck_assert_int_ne(out[0].i, 32767);
@@ -846,18 +849,10 @@ START_TEST(renderer_audio_stops_at_end_of_asset_within_block)
     setup_dc_audio_signal(&scenario, &cache, audio, 2, 1.0f, SCENARIO_MODULATION_AM, 48000, 10000);
     ck_assert_uint_eq(cache.prerenders[0].sample_rate_hz, 96000U);
     ck_assert_uint_eq(cache.prerenders[0].sample_count, 4U);
-    const receiver_config_t receiver = {
-        .id = 0,
-        .frequency_start_hz = 9999900000ULL,
-        .frequency_stop_hz = 10000100000ULL,
-        .bandwidth_hz = 200000,
-        .sample_rate_hz = 96000, /* == pre-render rate: integer-aligned direct path */
-        .output_scale = 1.0,
-        .rf_reference_power_dbm = -40.0,
-    };
+    const receiver_config_t receiver = window_receiver(9999900000ULL, 10000100000ULL, 200000, 96000, 0.0, 1.0, -40.0); /* rate == pre-render rate: integer-aligned direct path */
     iq_ci16_t out[8];
     render_stats_t stats;
-    ck_assert(renderer_render_80mhz_block(&scenario, &cache, &receiver, 0, out, 8, &stats));
+    ck_assert(render_rx_block(&scenario, &cache, &receiver, 0, out, 8, &stats));
     ck_assert_uint_eq(stats.active_signals, 1);
     for (size_t i = 0; i < 4; i++) {
         ck_assert_int_ne(out[i].i, 0);
@@ -879,24 +874,17 @@ START_TEST(renders_burst_scenario_only_during_active_second)
     asset_cache_t cache;
     ck_assert_msg(asset_cache_load(&cache, &scenario, error, sizeof(error)), "%s", error);
 
-    ddc_config_t ddc = {
-        .id = 0,
-        .center_frequency_hz = 10005000000ULL,
-        .bandwidth_hz = SIM_DDC_BANDWIDTH_HZ,
-        .sample_rate_hz = SIM_DDC_SAMPLE_RATE_HZ,
-        .output_scale = 1.0,
-        .rf_reference_power_dbm = -55.0,
-    };
+    const receiver_config_t rx = fixed_channel_receiver(10005000000ULL, SIM_DDC_BANDWIDTH_HZ, SIM_DDC_SAMPLE_RATE_HZ, 1.0, -55.0);
     iq_ci16_t active_a[1024];
     iq_ci16_t inactive[1024];
     iq_ci16_t active_b[1024];
     render_stats_t stats;
 
-    ck_assert(renderer_render_ddc_block(&scenario, &cache, &ddc, 500000000ULL, active_a, 1024, &stats));
+    ck_assert(render_rx_block(&scenario, &cache, &rx, 500000000ULL, active_a, 1024, &stats));
     ck_assert_uint_eq(stats.active_signals, 1);
-    ck_assert(renderer_render_ddc_block(&scenario, &cache, &ddc, 1500000000ULL, inactive, 1024, &stats));
+    ck_assert(render_rx_block(&scenario, &cache, &rx, 1500000000ULL, inactive, 1024, &stats));
     ck_assert_uint_eq(stats.active_signals, 0);
-    ck_assert(renderer_render_ddc_block(&scenario, &cache, &ddc, 5500000000ULL, active_b, 1024, &stats));
+    ck_assert(render_rx_block(&scenario, &cache, &rx, 5500000000ULL, active_b, 1024, &stats));
     ck_assert_uint_eq(stats.active_signals, 1);
 
     ck_assert(samples_have_energy(active_a, 1024));
@@ -920,17 +908,17 @@ START_TEST(renderer_applies_window_passband_gain)
     iq_ci16_t out[4];
 
     scenario.signals[0].center_frequency_hz = 10039000000ULL;
-    ck_assert(renderer_render_80mhz_block(&scenario, &cache, &receiver, 0, out, 4, &stats));
+    ck_assert(render_rx_block(&scenario, &cache, &receiver, 0, out, 4, &stats));
     ck_assert_uint_eq(stats.active_signals, 1);
     ck_assert_int_eq(out[0].i, 1000);
 
     scenario.signals[0].center_frequency_hz = 10040500000ULL;
-    ck_assert(renderer_render_80mhz_block(&scenario, &cache, &receiver, 0, out, 4, &stats));
+    ck_assert(render_rx_block(&scenario, &cache, &receiver, 0, out, 4, &stats));
     ck_assert_uint_eq(stats.active_signals, 1);
     ck_assert_int_eq(out[0].i, 500);
 
     scenario.signals[0].center_frequency_hz = 10041500000ULL;
-    ck_assert(renderer_render_80mhz_block(&scenario, &cache, &receiver, 0, out, 4, &stats));
+    ck_assert(render_rx_block(&scenario, &cache, &receiver, 0, out, 4, &stats));
     ck_assert_uint_eq(stats.active_signals, 0);
     ck_assert_int_eq(out[0].i, 0);
     ck_assert_int_eq(out[0].q, 0);
@@ -958,7 +946,7 @@ START_TEST(nco_phase_is_continuous_across_block_boundaries)
     cache.assets[0].sample_count = 256;
 
     const receiver_config_t receiver = fixed_center_receiver();
-    const uint32_t rate = receiver.sample_rate_hz;
+    const uint32_t rate = receiver.channels[0].sample_rate_hz;
     const uint64_t t0 = streamer_block_start_ns(0, 64, rate);
     const uint64_t t1 = streamer_block_start_ns(1, 64, rate);
 
@@ -966,9 +954,9 @@ START_TEST(nco_phase_is_continuous_across_block_boundaries)
     iq_ci16_t block1[64];
     iq_ci16_t combined[128];
     render_stats_t stats;
-    ck_assert(renderer_render_80mhz_block(&scenario, &cache, &receiver, t0, block0, 64, &stats));
-    ck_assert(renderer_render_80mhz_block(&scenario, &cache, &receiver, t1, block1, 64, &stats));
-    ck_assert(renderer_render_80mhz_block(&scenario, &cache, &receiver, t0, combined, 128, &stats));
+    ck_assert(render_rx_block(&scenario, &cache, &receiver, t0, block0, 64, &stats));
+    ck_assert(render_rx_block(&scenario, &cache, &receiver, t1, block1, 64, &stats));
+    ck_assert(render_rx_block(&scenario, &cache, &receiver, t0, combined, 128, &stats));
 
     for (size_t j = 0; j < 64; j++) {
         ck_assert_int_eq(block0[j].i, combined[j].i);
@@ -1005,18 +993,10 @@ static double render_decimated_tone_power(double tone_cycles_per_source_sample)
     cache.assets[0].sample_count = SRC;
     cache.assets[0].samples = src;
 
-    const receiver_config_t receiver = {
-        .id = 0,
-        .frequency_start_hz = 9999500000ULL,
-        .frequency_stop_hz = 10000500000ULL,
-        .bandwidth_hz = 1000000,
-        .sample_rate_hz = 1000000, /* source_per_output = 4 */
-        .output_scale = 1.0,
-        .rf_reference_power_dbm = -40.0,
-    };
+    const receiver_config_t receiver = window_receiver(9999500000ULL, 10000500000ULL, 1000000, 1000000, 0.0, 1.0, -40.0); /* source_per_output = 4 */
     iq_ci16_t out[OUT];
     render_stats_t stats;
-    ck_assert(renderer_render_80mhz_block(&scenario, &cache, &receiver, 0, out, OUT, &stats));
+    ck_assert(render_rx_block(&scenario, &cache, &receiver, 0, out, OUT, &stats));
     ck_assert_uint_eq(stats.active_signals, 1);
     double power = 0.0;
     for (size_t i = 0; i < OUT; i++) {
@@ -1049,17 +1029,10 @@ START_TEST(renderer_skips_signal_beyond_output_nyquist)
     scenario.sources[0].sample_rate_hz = 2000000;
     scenario.signals[0].bandwidth_hz = 100000;
 
-    ddc_config_t ddc = {
-        .id = 0,
-        .center_frequency_hz = 10000000000ULL,
-        .bandwidth_hz = 80000000U, /* window wider than the output rate */
-        .sample_rate_hz = 2000000U, /* Nyquist = 1 MHz */
-        .output_scale = 1.0,
-        .rf_reference_power_dbm = -40.0,
-    };
+    const receiver_config_t rx = fixed_channel_receiver(10000000000ULL, 80000000U /* window wider than the output rate */, 2000000U /* Nyquist = 1 MHz */, 1.0, -40.0);
     iq_ci16_t out[16];
     render_stats_t stats;
-    ck_assert(renderer_render_ddc_block(&scenario, &cache, &ddc, 0, out, 16, &stats));
+    ck_assert(render_rx_block(&scenario, &cache, &rx, 0, out, 16, &stats));
     ck_assert_uint_eq(stats.active_signals, 0);
     for (size_t i = 0; i < 16; i++) {
         ck_assert_int_eq(out[i].i, 0);
@@ -1068,7 +1041,7 @@ START_TEST(renderer_skips_signal_beyond_output_nyquist)
 
     /* A signal only 0.3 MHz off centre is within Nyquist and still rendered. */
     scenario.signals[0].center_frequency_hz = 10000300000ULL;
-    ck_assert(renderer_render_ddc_block(&scenario, &cache, &ddc, 0, out, 16, &stats));
+    ck_assert(render_rx_block(&scenario, &cache, &rx, 0, out, 16, &stats));
     ck_assert_uint_eq(stats.active_signals, 1);
 }
 END_TEST
@@ -1210,15 +1183,7 @@ START_TEST(renderer_wbfm_prerender_demod_recovers_tone)
     ck_assert_msg(asset_cache_prerender_from_audio(&pr, audio, AN, AR, &sc.signals[0], &low_pp, err, sizeof(err)), "%s", err);
     cache.prerenders[0] = pr;
 
-    const receiver_config_t rx = {
-        .id = 0,
-        .frequency_start_hz = 10000000000ULL - OUT / 2,
-        .frequency_stop_hz = 10000000000ULL + OUT / 2,
-        .bandwidth_hz = OUT,
-        .sample_rate_hz = OUT,
-        .output_scale = 1.0,
-        .rf_reference_power_dbm = -40.0,
-    };
+    const receiver_config_t rx = window_receiver(10000000000ULL - OUT / 2, 10000000000ULL + OUT / 2, OUT, OUT, 0.0, 1.0, -40.0);
     double *re = malloc(N * sizeof(*re));
     double *im = malloc(N * sizeof(*im));
     ck_assert(re != NULL && im != NULL);
@@ -1226,7 +1191,7 @@ START_TEST(renderer_wbfm_prerender_demod_recovers_tone)
     for (size_t b = 0; b < NBLK; b++) {
         iq_ci16_t blk[4096];
         const uint64_t t = streamer_block_start_ns(b, BLK, OUT);
-        ck_assert(renderer_render_80mhz_block(&sc, &cache, &rx, t, blk, BLK, &st));
+        ck_assert(render_rx_block(&sc, &cache, &rx, t, blk, BLK, &st));
         for (size_t i = 0; i < BLK; i++) {
             re[b * BLK + i] = (double)blk[i].i;
             im[b * BLK + i] = (double)blk[i].q;
@@ -1336,6 +1301,247 @@ START_TEST(renderer_prerender_audio_is_deterministic)
 }
 END_TEST
 
+/* One in-memory replay signal over a caller-filled asset. power_dbm == ref and scale 1, so the
+ * end-to-end gain is exactly 1.0 and direct-path output reproduces the file samples verbatim. */
+static void setup_replay_signal(scenario_t *scenario, asset_cache_t *cache, iq_ci16_t *asset_samples, size_t n,
+                                uint32_t source_rate_hz, scenario_replay_mode_t mode, bool loop,
+                                uint64_t f0_hz, uint64_t range_start_hz, uint64_t range_stop_hz)
+{
+    memset(scenario, 0, sizeof(*scenario));
+    memset(cache, 0, sizeof(*cache));
+    scenario->schema_version = 1;
+    snprintf(scenario->scenario_id, sizeof(scenario->scenario_id), "%s", "unit_replay");
+    scenario->source_count = 1;
+    scenario->signal_count = 1;
+
+    scenario_source_t *source = &scenario->sources[0];
+    snprintf(source->id, sizeof(source->id), "%s", "replay_src");
+    snprintf(source->source_type, sizeof(source->source_type), "%s", "iq_file");
+    source->source_kind = SCENARIO_SOURCE_IQ_FILE;
+    source->sample_rate_hz = source_rate_hz;
+    source->bandwidth_hz = source_rate_hz;
+    source->sample_count = n;
+
+    scenario_signal_t *signal = &scenario->signals[0];
+    snprintf(signal->signal_id, sizeof(signal->signal_id), "%s", "replay_sig");
+    snprintf(signal->source_reference, sizeof(signal->source_reference), "%s", "replay_src");
+    signal->replay_mode = mode;
+    signal->loop = loop;
+    signal->center_frequency_hz = f0_hz;
+    signal->replay_range_start_hz = range_start_hz;
+    signal->replay_range_stop_hz = range_stop_hz;
+    signal->bandwidth_hz = source_rate_hz;
+    signal->power_dbm = -40.0;
+    signal->start_time_s = 0.0;
+    signal->repeat_interval_s = loop ? 0.0 : 1.0;
+
+    cache->asset_count = 1;
+    snprintf(cache->assets[0].source_id, sizeof(cache->assets[0].source_id), "%s", "replay_src");
+    cache->assets[0].sample_count = n;
+    cache->assets[0].samples = asset_samples;
+}
+
+START_TEST(replay_range_mode_follows_tune_and_loops)
+{
+    /* Ramp asset at the full 98.304 MS/s output rate: equal rates keep the direct (no-resample)
+     * path, so the output must reproduce the file bytes exactly -- including across the loop
+     * seam inside one block. */
+    enum { N = 1000, COUNT = 2048 };
+    static iq_ci16_t asset[N];
+    for (size_t i = 0; i < N; i++) {
+        asset[i] = (iq_ci16_t){.i = (int16_t)i, .q = (int16_t)(N - i)};
+    }
+    scenario_t scenario;
+    asset_cache_t cache;
+    setup_replay_signal(&scenario, &cache, asset, N, SIM_RECEIVER_SAMPLE_RATE_HZ,
+                        SCENARIO_REPLAY_RANGE, true, 0, 99900000ULL, 100100000ULL);
+
+    /* 1 ms on the 98.304 MS/s grid is exactly output sample 98304 -> file offset 304. */
+    const uint64_t t_ns = 1000000ULL;
+    iq_ci16_t low[COUNT];
+    iq_ci16_t high[COUNT];
+    render_stats_t stats;
+    receiver_config_t rx = fixed_channel_receiver(99950000ULL, (uint32_t)SIM_RECEIVER_BANDWIDTH_HZ, SIM_RECEIVER_SAMPLE_RATE_HZ, 1.0, -40.0);
+    ck_assert(render_rx_block(&scenario, &cache, &rx, t_ns, low, COUNT, &stats));
+    ck_assert_uint_eq(stats.active_signals, 1);
+    for (size_t k = 0; k < COUNT; k++) {
+        const size_t pos = (98304U + k) % N;
+        ck_assert_int_eq(low[k].i, asset[pos].i);
+        ck_assert_int_eq(low[k].q, asset[pos].q);
+    }
+
+    /* Anywhere else inside the range: bit-identical output. */
+    rx = fixed_channel_receiver(100050000ULL, (uint32_t)SIM_RECEIVER_BANDWIDTH_HZ, SIM_RECEIVER_SAMPLE_RATE_HZ, 1.0, -40.0);
+    ck_assert(render_rx_block(&scenario, &cache, &rx, t_ns, high, COUNT, &stats));
+    ck_assert_int_eq(memcmp(low, high, sizeof(low)), 0);
+
+    /* Outside the range: silent. */
+    rx = fixed_channel_receiver(100200000ULL, (uint32_t)SIM_RECEIVER_BANDWIDTH_HZ, SIM_RECEIVER_SAMPLE_RATE_HZ, 1.0, -40.0);
+    ck_assert(render_rx_block(&scenario, &cache, &rx, t_ns, high, COUNT, &stats));
+    ck_assert_uint_eq(stats.active_signals, 0);
+    ck_assert(!samples_have_energy(high, COUNT));
+}
+END_TEST
+
+START_TEST(replay_shift_mode_pins_absolute_frequency)
+{
+    /* DC-only file nominally at 100 MHz. Tuned to 110 MHz the content must stay at 100 MHz
+     * absolute, i.e. appear as a -10 MHz tone in the channel: s(t) * e^{j*2*pi*(f0-f_tune)*t}. */
+    enum { N = 1000, COUNT = 4096 };
+    static iq_ci16_t asset[N];
+    for (size_t i = 0; i < N; i++) {
+        asset[i] = (iq_ci16_t){.i = 10000, .q = 0};
+    }
+    scenario_t scenario;
+    asset_cache_t cache;
+    setup_replay_signal(&scenario, &cache, asset, N, SIM_RECEIVER_SAMPLE_RATE_HZ,
+                        SCENARIO_REPLAY_SHIFT, true, 100000000ULL, 80000000ULL, 120000000ULL);
+
+    iq_ci16_t out[COUNT];
+    render_stats_t stats;
+    receiver_config_t rx = fixed_channel_receiver(110000000ULL, (uint32_t)SIM_RECEIVER_BANDWIDTH_HZ, SIM_RECEIVER_SAMPLE_RATE_HZ, 1.0, -40.0);
+    ck_assert(render_rx_block(&scenario, &cache, &rx, 0, out, COUNT, &stats));
+    ck_assert_uint_eq(stats.active_signals, 1);
+    const double at_minus_10m = dft_bin_mag(out, COUNT, -10000000.0, (double)SIM_RECEIVER_SAMPLE_RATE_HZ);
+    const double at_dc = dft_bin_mag(out, COUNT, 0.0, (double)SIM_RECEIVER_SAMPLE_RATE_HZ);
+    ck_assert(at_minus_10m > 5000.0);
+    ck_assert(at_dc < at_minus_10m / 100.0);
+
+    /* Tuned to f0 itself the rotation is zero: pure DC. */
+    rx = fixed_channel_receiver(100000000ULL, (uint32_t)SIM_RECEIVER_BANDWIDTH_HZ, SIM_RECEIVER_SAMPLE_RATE_HZ, 1.0, -40.0);
+    ck_assert(render_rx_block(&scenario, &cache, &rx, 0, out, COUNT, &stats));
+    ck_assert(dft_bin_mag(out, COUNT, 0.0, (double)SIM_RECEIVER_SAMPLE_RATE_HZ) > 5000.0);
+
+    /* Outside the shift range: silent. */
+    rx = fixed_channel_receiver(125000000ULL, (uint32_t)SIM_RECEIVER_BANDWIDTH_HZ, SIM_RECEIVER_SAMPLE_RATE_HZ, 1.0, -40.0);
+    ck_assert(render_rx_block(&scenario, &cache, &rx, 0, out, COUNT, &stats));
+    ck_assert_uint_eq(stats.active_signals, 0);
+    ck_assert(!samples_have_energy(out, COUNT));
+}
+END_TEST
+
+START_TEST(fixed_mode_with_loop_uses_epoch_position)
+{
+    /* loop=true on a fixed-placement signal: normal passband/offset machinery, but the
+     * playback position comes from the continuous epoch grid instead of start/repeat. */
+    enum { N = 500, COUNT = 1024 };
+    static iq_ci16_t asset[N];
+    for (size_t i = 0; i < N; i++) {
+        asset[i] = (iq_ci16_t){.i = (int16_t)(i + 1), .q = 0};
+    }
+    scenario_t scenario;
+    asset_cache_t cache;
+    setup_replay_signal(&scenario, &cache, asset, N, SIM_RECEIVER_SAMPLE_RATE_HZ,
+                        SCENARIO_REPLAY_FIXED, true, 100000000ULL, 0, 0);
+    /* Keep the declared band inside the window so the fractional-overlap gain is exactly 1. */
+    scenario.signals[0].bandwidth_hz = (uint32_t)SIM_RECEIVER_BANDWIDTH_HZ;
+
+    iq_ci16_t out[COUNT];
+    render_stats_t stats;
+    receiver_config_t rx = fixed_channel_receiver(100000000ULL, (uint32_t)SIM_RECEIVER_BANDWIDTH_HZ, SIM_RECEIVER_SAMPLE_RATE_HZ, 1.0, -40.0);
+    const uint64_t t_ns = 1000000ULL; /* output sample 98304 -> offset 98304 % 500 = 304 */
+    ck_assert(render_rx_block(&scenario, &cache, &rx, t_ns, out, COUNT, &stats));
+    ck_assert_uint_eq(stats.active_signals, 1);
+    for (size_t k = 0; k < COUNT; k++) {
+        const size_t pos = (98304U + k) % N;
+        ck_assert_int_eq(out[k].i, asset[pos].i);
+    }
+}
+END_TEST
+
+START_TEST(passthrough_bypasses_mixer_for_matching_rate_range_signal)
+{
+    /* Unit gain (power_dbm == ref) so the fast path takes the literal memcpy branch: output
+     * must be byte-identical to the file, and a second unrelated fixed-mode signal in the same
+     * scenario must be invisible (the passthrough channel never enters the general mixer). */
+    enum { N = 2000, COUNT = 4096 };
+    static iq_ci16_t asset[N];
+    for (size_t i = 0; i < N; i++) {
+        asset[i] = (iq_ci16_t){.i = (int16_t)(1000 + (int)i), .q = (int16_t)(2000 - (int)i)};
+    }
+    scenario_t scenario;
+    asset_cache_t cache;
+    setup_replay_signal(&scenario, &cache, asset, N, SIM_RECEIVER_SAMPLE_RATE_HZ,
+                        SCENARIO_REPLAY_RANGE, true, 0, 99900000ULL, 100100000ULL);
+    scenario.signals[0].passthrough = true;
+
+    iq_ci16_t out[COUNT];
+    render_stats_t stats;
+    receiver_config_t rx = fixed_channel_receiver(100000000ULL, (uint32_t)SIM_RECEIVER_BANDWIDTH_HZ, SIM_RECEIVER_SAMPLE_RATE_HZ, 1.0, -40.0);
+    ck_assert(render_rx_block(&scenario, &cache, &rx, 0, out, COUNT, &stats));
+    ck_assert_uint_eq(stats.active_signals, 1);
+    for (size_t k = 0; k < COUNT; k++) {
+        ck_assert_int_eq(out[k].i, asset[k % N].i);
+        ck_assert_int_eq(out[k].q, asset[k % N].q);
+    }
+}
+END_TEST
+
+START_TEST(passthrough_rotates_for_shift_without_mixer)
+{
+    /* Shift mode still needs the frequency rotation (unavoidable DSP), but must skip the float
+     * mix bus: the output should match the general renderer's own shift-mode result exactly
+     * (same math, different code path), confirming passthrough doesn't silently change the
+     * signal's placement. */
+    enum { N = 2000, COUNT = 4096 };
+    static iq_ci16_t asset[N];
+    for (size_t i = 0; i < N; i++) {
+        asset[i] = (iq_ci16_t){.i = 10000, .q = 0};
+    }
+    scenario_t scenario_fast, scenario_general;
+    asset_cache_t cache_fast, cache_general;
+    setup_replay_signal(&scenario_fast, &cache_fast, asset, N, SIM_RECEIVER_SAMPLE_RATE_HZ,
+                        SCENARIO_REPLAY_SHIFT, true, 100000000ULL, 80000000ULL, 120000000ULL);
+    scenario_fast.signals[0].passthrough = true;
+    setup_replay_signal(&scenario_general, &cache_general, asset, N, SIM_RECEIVER_SAMPLE_RATE_HZ,
+                        SCENARIO_REPLAY_SHIFT, true, 100000000ULL, 80000000ULL, 120000000ULL);
+
+    iq_ci16_t out_fast[COUNT];
+    iq_ci16_t out_general[COUNT];
+    render_stats_t stats;
+    receiver_config_t rx = fixed_channel_receiver(110000000ULL, (uint32_t)SIM_RECEIVER_BANDWIDTH_HZ, SIM_RECEIVER_SAMPLE_RATE_HZ, 1.0, -40.0);
+    ck_assert(render_rx_block(&scenario_fast, &cache_fast, &rx, 0, out_fast, COUNT, &stats));
+    ck_assert_uint_eq(stats.active_signals, 1);
+    ck_assert(render_rx_block(&scenario_general, &cache_general, &rx, 0, out_general, COUNT, &stats));
+    /* Independent NCO implementations (VOLK rotator vs scalar mixer path) can differ by a
+     * rounding count -- allow a small per-sample tolerance rather than requiring bit-exactness. */
+    for (size_t k = 0; k < COUNT; k++) {
+        ck_assert(abs((int)out_fast[k].i - (int)out_general[k].i) <= 2);
+        ck_assert(abs((int)out_fast[k].q - (int)out_general[k].q) <= 2);
+    }
+}
+END_TEST
+
+START_TEST(passthrough_falls_back_when_rate_mismatches_or_out_of_range)
+{
+    enum { N = 2000, COUNT = 1024 };
+    static iq_ci16_t asset[N];
+    for (size_t i = 0; i < N; i++) {
+        asset[i] = (iq_ci16_t){.i = 5000, .q = 0};
+    }
+    scenario_t scenario;
+    asset_cache_t cache;
+    /* Source rate (1 MS/s) does not match the 98.304 MS/s channel -> falls back to the general
+     * mixer, which resamples correctly instead of silently misreading the file. */
+    setup_replay_signal(&scenario, &cache, asset, N, 1000000U,
+                        SCENARIO_REPLAY_RANGE, true, 0, 99900000ULL, 100100000ULL);
+    scenario.signals[0].passthrough = true;
+
+    iq_ci16_t out[COUNT];
+    render_stats_t stats;
+    receiver_config_t rx = fixed_channel_receiver(100000000ULL, (uint32_t)SIM_RECEIVER_BANDWIDTH_HZ, SIM_RECEIVER_SAMPLE_RATE_HZ, 1.0, -40.0);
+    ck_assert(render_rx_block(&scenario, &cache, &rx, 0, out, COUNT, &stats));
+    ck_assert_uint_eq(stats.active_signals, 1);
+    ck_assert(samples_have_energy(out, COUNT));
+
+    /* Out of range -> silence via the general mixer fallback (no passthrough match either). */
+    rx = fixed_channel_receiver(130000000ULL, (uint32_t)SIM_RECEIVER_BANDWIDTH_HZ, SIM_RECEIVER_SAMPLE_RATE_HZ, 1.0, -40.0);
+    ck_assert(render_rx_block(&scenario, &cache, &rx, 0, out, COUNT, &stats));
+    ck_assert_uint_eq(stats.active_signals, 0);
+    ck_assert(!samples_have_energy(out, COUNT));
+}
+END_TEST
+
 Suite *renderer_suite(void)
 {
     Suite *suite = suite_create("renderer");
@@ -1365,6 +1571,12 @@ Suite *renderer_suite(void)
     tcase_add_test(tc, renderer_prerender_audio_is_deterministic);
     tcase_add_test(tc, renders_burst_scenario_only_during_active_second);
     tcase_add_test(tc, renderer_applies_window_passband_gain);
+    tcase_add_test(tc, replay_range_mode_follows_tune_and_loops);
+    tcase_add_test(tc, replay_shift_mode_pins_absolute_frequency);
+    tcase_add_test(tc, fixed_mode_with_loop_uses_epoch_position);
+    tcase_add_test(tc, passthrough_bypasses_mixer_for_matching_rate_range_signal);
+    tcase_add_test(tc, passthrough_rotates_for_shift_without_mixer);
+    tcase_add_test(tc, passthrough_falls_back_when_rate_mismatches_or_out_of_range);
     suite_add_tcase(suite, tc);
     return suite;
 }

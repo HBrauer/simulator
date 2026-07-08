@@ -14,7 +14,7 @@ Top-level fields:
 | `log_path` | string | no | Reserved for runtime logging. |
 | `stream_block_samples` | integer | no | CI16 IQ samples per VITA 49.2 IF-data packet. Defaults to `1024`; valid range is `1..4096`. Use `1536` for the MTU 9000 high-rate profile. |
 | `stream_cpu` | integer | no | Linux CPU index used for stream render/UDP threads. `-1` disables pinning. Defaults to `-1`. |
-| `asset_cache_max_bytes` | integer | no | Maximum total in-memory IQ asset bytes. `0` means unlimited. Defaults to `0`. |
+| `asset_cache_max_bytes` | integer | no | Maximum total in-memory asset bytes. Defaults to 16 GiB. IQ files over the remaining budget are memory-mapped read-only (the OS pages them in lazily) instead of copied to RAM; audio sources must fit the budget. `0` means unlimited RAM loading (legacy). |
 | `receivers` | array | yes | At least one receiver, up to `SIM_MAX_RECEIVERS` (`12`). |
 
 Receiver fields:
@@ -26,40 +26,64 @@ Receiver fields:
 | `rest_port` | integer | yes | Unique per instance. |
 | `udp_output_host` | string | yes | UDP destination host. May be unicast, for example `127.0.0.1`, or IPv4 multicast, for example `239.10.10.10`. |
 | `udp_multicast_interface` | string | no | Local IPv4 interface used for multicast sends, for example `127.0.0.1` for loopback-only testing. Empty/default lets the kernel choose. |
-| `frequency_start_hz` | integer | yes | Inclusive RF range start, `0..40000000000`. |
-| `frequency_stop_hz` | integer | yes | RF range stop, greater than start and `<= 40000000000`. |
-| `bandwidth_hz` | integer | no | Receiver RF window bandwidth. Defaults to `80000000`; must be non-zero. |
-| `sample_rate_hz` | integer | no | Receiver IQ output sample rate. Defaults to `98304000`; must be non-zero. |
-| `scan_rate_hz_per_s` | number | yes | Used when range is wider than the receiver bandwidth. |
-| `output_scale` | number | no | Receiver output multiplier. Defaults to `1.0`; must be positive when set. |
+| `frequency_start_hz` | integer | yes | Inclusive RF tuner range start, `0..40000000000`. |
+| `frequency_stop_hz` | integer | yes | RF tuner range stop, greater than start and `<= 40000000000`. |
+| `frontend_bandwidth_hz` | integer | no | Instantaneous analog (ADC) window all channels extract from. Defaults to `80000000`; must be non-zero. |
+| `scan_rate_hz_per_s` | number | yes | Used when the tuner range is wider than the front-end bandwidth. |
+| `output_scale` | number | no | Default channel output multiplier. Defaults to `1.0`; must be positive when set. |
 | `rf_reference_power_dbm` | number | no | RF power that preserves the source's `nominal_level_dbfs`. Defaults to `-55.0`. |
-| `stream_enabled` | boolean | no | Enables the 80-MHz UDP stream. Defaults to `true`. |
-| `udp_80mhz_output_port` | integer | yes | Unique across all receiver/DDC UDP outputs. |
-| `ddc` | array | yes | Four DDC entries with IDs `0..3`. |
+| `profiles` | array | no | Supported `{bandwidth_hz, sample_rate_hz}` pairs, up to `SIM_MAX_PROFILES` (`16`). Defaults to the built-in table `80/40/20/10/5/1 MHz` with the `1.2288x` rate family. |
+| `channels` | array | yes | `1..SIM_MAX_CHANNELS` (`8`) channel entries with IDs `0..N-1`. |
 
-DDC fields:
+Profile fields (fixed bandwidth/sample-rate pairs, like hardware DDC decimation stages;
+selecting a bandwidth always selects its paired sample rate):
 
 | Field | Type | Required | Notes |
 | --- | --- | --- | --- |
-| `ddc_id` | integer | yes | `0..3`. |
-| `center_frequency_hz` | integer | yes | Absolute RF center frequency. |
-| `bandwidth_hz` | integer | no | DDC RF bandwidth. Defaults to `20000000`; must be non-zero. |
-| `sample_rate_hz` | integer | no | DDC IQ output sample rate. Defaults to `24576000`; must be non-zero. |
-| `output_scale` | number | no | DDC output multiplier. Defaults to receiver `output_scale`. |
-| `stream_enabled` | boolean | no | Enables this DDC UDP stream. Defaults to `true`. |
-| `udp_output_port` | integer | yes | Unique across all receiver/DDC UDP outputs. |
+| `bandwidth_hz` | integer | yes | Unique within the receiver; non-zero. |
+| `sample_rate_hz` | integer | yes | Must be `>= bandwidth_hz`. |
+| `name` | string | no | Label reported by the REST API, for example `"20M"`. |
+
+Channel fields (every output stream is a channel; the former wideband stream is a
+channel with `track_tuner: true` and the widest profile):
+
+| Field | Type | Required | Notes |
+| --- | --- | --- | --- |
+| `channel_id` | integer | yes | `0..N-1`, in order. |
+| `track_tuner` | boolean | no | Channel center follows the receiver tuner (fixed center or scan sweep). Defaults to `false`. |
+| `center_frequency_hz` | integer | when not tracking | Absolute RF center frequency. Ignored with `track_tuner: true`. |
+| `bandwidth_hz` | integer | yes | Must exactly match a profile `bandwidth_hz` and be `<= frontend_bandwidth_hz`. The sample rate is the profile partner; specifying `sample_rate_hz` on a channel is an error. |
+| `output_scale` | number | no | Channel output multiplier. Defaults to receiver `output_scale`. |
+| `rf_reference_power_dbm` | number | no | Defaults to the receiver value. |
+| `stream_enabled` | boolean | no | Enables this channel's UDP stream. Defaults to `true`. |
+| `udp_output_port` | integer | yes | Unique across all channel UDP outputs of the instance. |
+
+A channel whose span leaves the front-end window (tuner center ± `frontend_bandwidth_hz/2`)
+keeps streaming, but empty — exactly like a hardware DDC tuned outside the digitised band.
+
+The pre-channel keys (`bandwidth_hz`/`sample_rate_hz`/`stream_enabled`/`udp_80mhz_output_port`
+at receiver level, and the `ddc` array) are rejected with a `legacy_key_...` error naming
+the replacement.
 
 Validation error codes include:
 
 - `config_invalid`
 - `too_many_receivers`
+- `too_many_profiles`
+- `too_many_channels`
 - `invalid_stream_block_samples`
 - `duplicate_receiver`
 - `duplicate_rest_port`
 - `duplicate_udp_port`
 - `invalid_receiver`
-- `invalid_ddc`
-- `invalid_sample_rate_or_bandwidth`
+- `invalid_frontend_bandwidth`
+- `invalid_profiles` / `invalid_profile` / `duplicate_profile_bandwidth`
+- `invalid_channels` / `invalid_channel`
+- `channel_bandwidth_required`
+- `unsupported_channel_bandwidth`
+- `bandwidth_exceeds_frontend`
+- `channel_sample_rate_comes_from_profile`
+- `legacy_key_ddc_use_channels` (and the other `legacy_key_...` codes)
 - `invalid_output_scale`
 
 ## Scenario JSON
@@ -99,13 +123,29 @@ Signal fields:
 | `signal_id` | string | yes | Unique signal ID. |
 | `source_reference` | string | yes | Must match an existing source `id`. |
 | `modulation` | string | no | Defaults to `iq`. Use `iq` for `iq_file`; use `wbfm`, `am`, `usb`, or `lsb` for `audio_file`. |
-| `center_frequency_hz` | integer | yes | Absolute RF center frequency. |
+| `center_frequency_hz` | integer | see notes | Absolute RF center frequency. Required except in `range` replay mode (where the content follows the tune and the field is ignored). |
 | `bandwidth_hz` | integer | yes | Signal bandwidth. |
 | `power_dbm` | number | yes | RF power. Digital level is `nominal_level_dbfs + (power_dbm - rf_reference_power_dbm)` before `output_scale`. |
 | `fm_deviation_hz` | number | WBFM only | FM peak deviation. Defaults to `75000`. |
 | `am_depth` | number | AM only | AM modulation depth from `0.0` to `1.0`. Defaults to `0.8`. |
-| `start_time_s` | number | yes | Scenario start time for playback. |
-| `repeat_interval_s` | number | yes | Must be positive enough to repeat the source without invalid wrapping. |
+| `start_time_s` | number | no | Scenario start time for playback. Defaults to `0`. |
+| `repeat_interval_s` | number | unless `loop` | Burst repeat period. Required when `loop` is `false`; must not be combined with `loop: true` (`loop_repeat_conflict`). |
+| `replay_mode` | string | no | `fixed` (default), `range`, or `shift`. See below. |
+| `frequency_range` | object | range/shift | `{ "start_hz": ..., "stop_hz": ... }`. The tune interval in which the signal is active. |
+| `loop` | bool | no | Continuous epoch-anchored looping of the file (no silent gap). Defaults to `true` for `range`/`shift`, `false` for `fixed`. IQ-file sources only. |
+| `passthrough` | bool | no | Bypasses the mixer entirely for a channel dedicated to this one signal (see below). Requires `replay_mode` `range` or `shift` and `loop: true`. Defaults to `false`. |
+
+Replay modes (IQ-file sources with `iq` modulation only):
+
+- `fixed` — legacy behaviour: the signal sits at `center_frequency_hz` and is rendered whenever its passband overlaps the channel window.
+- `range` — the file is played **centered at the tuned frequency** whenever the channel's effective center lies inside `frequency_range`; the output is identical anywhere in the range (like a capture that fills the channel), and silent outside it. With the noise floor enabled the noise still varies with the tune (its seed hashes the window center), so bit-identical output across the range requires `noise_floor` disabled.
+- `shift` — the file content stays at its **absolute** RF position: while the tune is inside `frequency_range`, the IQ is rotated by `e^{j*2*pi*(center_frequency_hz - f_tune)*t}`. Tuning a channel to 110 MHz with the file configured at 100 MHz shows the content at −10 MHz offset. This is a pure rotation with no band-limiting: content rotated past ±sample_rate/2 wraps around (accepted semantics for full-rate captures).
+
+Looping playback position is an exact function of the absolute epoch-derived sample index (`position = output_sample_index * source_rate / output_rate mod file_length`), so independently started simulator instances emit identical samples at identical wall-clock times. The position wraps at midnight UTC together with the day-anchored timebase.
+
+**`passthrough`** — for a channel whose only job is to replay one capture, the general renderer (float mix bus, per-signal passband/gain machinery, noise floor) is overhead the use case doesn't need. Setting `passthrough: true` on a `range`/`shift` signal makes it bypass the mixer entirely whenever it's active *and* the channel's sample rate exactly matches the source's: the samples are written straight to the output (a literal `memcpy` when `power_dbm == rf_reference_power_dbm` and `output_scale == 1.0`; a scaled copy otherwise; a frequency-rotated copy for shift mode away from its nominal center). This is meaningfully cheaper than even the mixer's own direct-copy fast path — roughly 15x less render time per block in local measurements — because it also skips the mix-bus zero/accumulate/saturate round trip and the noise-floor/other-signal bookkeeping the mixer always performs.
+
+Because a passthrough channel bypasses the mixer completely, **any other signal that would otherwise be active for the same channel window is silently not rendered** while the passthrough signal is active — passthrough is exclusive by design, not an overlay. If you want to combine a replay capture with other signals or a noise floor, leave `passthrough` unset (or `false`) and use the general renderer instead; `range`/`shift` semantics and epoch-anchored looping work identically either way. When the channel's sample rate doesn't match the source (e.g. a wideband channel spanning many signals), the fast path silently declines and the general renderer handles that channel/block as usual — so a scenario is never *incorrect* for having `passthrough: true` on a signal also visible to a non-matching-rate channel, just not accelerated there.
 
 Optional `noise_floor` object:
 
@@ -133,5 +173,14 @@ Validation error codes include:
 - `duplicate_signal_id`
 - `missing_source_reference`
 - `signal_repeat_too_short`
+- `signal_replay_mode_invalid`
+- `signal_frequency_range_invalid`
+- `replay_range_invalid`
+- `replay_mode_source_mismatch`
+- `replay_shift_missing_center`
+- `loop_repeat_conflict`
+- `loop_source_unsupported`
+- `passthrough_requires_replay_mode`
+- `passthrough_requires_loop`
 - `noise_floor_invalid`
 - `noise_floor_conflicting_power`

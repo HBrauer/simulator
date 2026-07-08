@@ -42,7 +42,7 @@ typedef struct {
     atomic_uint_fast64_t samples_dropped;
     atomic_uint_fast64_t worker_errors;
     atomic_uint_fast64_t active_streams;
-    stream_metrics_t streams[1 + SIM_DDC_COUNT];
+    stream_metrics_t streams[SIM_MAX_CHANNELS];
 } receiver_metrics_t;
 
 static inline void stream_metrics_init(stream_metrics_t *metrics)
@@ -83,7 +83,7 @@ static inline void receiver_metrics_init(receiver_metrics_t *metrics)
     atomic_init(&metrics->samples_dropped, 0);
     atomic_init(&metrics->worker_errors, 0);
     atomic_init(&metrics->active_streams, 0);
-    for (size_t i = 0; i < 1 + SIM_DDC_COUNT; i++) {
+    for (size_t i = 0; i < SIM_MAX_CHANNELS; i++) {
         stream_metrics_init(&metrics->streams[i]);
     }
 }

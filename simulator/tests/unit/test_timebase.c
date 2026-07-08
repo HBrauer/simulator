@@ -18,31 +18,31 @@ START_TEST(scanner_is_deterministic)
     receiver_config_t r = {
         .frequency_start_hz = 9960000000ULL,
         .frequency_stop_hz = 10060000000ULL,
-        .bandwidth_hz = SIM_RECEIVER_BANDWIDTH_HZ,
+        .frontend_bandwidth_hz = SIM_RECEIVER_BANDWIDTH_HZ,
         .scan_rate_hz_per_s = 100000000000.0,
     };
     ck_assert_uint_eq(receiver_center_frequency_hz(&r, 500000ULL), 10010000000ULL);
 }
 END_TEST
 
-START_TEST(ddc_window_check_requires_full_ddc_band_inside_receiver_window)
+START_TEST(channel_window_check_requires_full_channel_band_inside_frontend_window)
 {
     receiver_config_t r = {
         .frequency_start_hz = 9960000000ULL,
         .frequency_stop_hz = 10040000000ULL,
-        .bandwidth_hz = SIM_RECEIVER_BANDWIDTH_HZ,
+        .frontend_bandwidth_hz = SIM_RECEIVER_BANDWIDTH_HZ,
         .scan_rate_hz_per_s = 100000000000.0,
     };
-    ddc_config_t inside = {
+    channel_config_t inside = {
         .center_frequency_hz = 10000000000ULL,
         .bandwidth_hz = SIM_DDC_BANDWIDTH_HZ,
     };
-    ddc_config_t outside = {
+    channel_config_t outside = {
         .center_frequency_hz = 10035000000ULL,
         .bandwidth_hz = SIM_DDC_BANDWIDTH_HZ,
     };
-    ck_assert(receiver_ddc_in_window(&r, &inside, 0));
-    ck_assert(!receiver_ddc_in_window(&r, &outside, 0));
+    ck_assert(receiver_channel_in_window(&r, &inside, 0));
+    ck_assert(!receiver_channel_in_window(&r, &outside, 0));
 }
 END_TEST
 
@@ -52,7 +52,7 @@ Suite *timebase_suite(void)
     TCase *tc = tcase_create("core");
     tcase_add_test(tc, override_returns_fixed_scenario_time);
     tcase_add_test(tc, scanner_is_deterministic);
-    tcase_add_test(tc, ddc_window_check_requires_full_ddc_band_inside_receiver_window);
+    tcase_add_test(tc, channel_window_check_requires_full_channel_band_inside_frontend_window);
     suite_add_tcase(suite, tc);
     return suite;
 }

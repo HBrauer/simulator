@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
 
 static void write_le16(FILE *file, uint16_t value)
@@ -224,10 +225,159 @@ START_TEST(resolves_relative_asset_path_against_base_dir)
 }
 END_TEST
 
+START_TEST(loads_replay_range_shift_scenario)
+{
+    scenario_t scenario;
+    char error[128];
+    ck_assert_msg(scenario_load_json("simulator/scenarios/replay_range_shift.json", &scenario, error, sizeof(error)), "%s", error);
+    ck_assert_msg(scenario_validate(&scenario, ".", error, sizeof(error)), "%s", error);
+    ck_assert_uint_eq(scenario.signal_count, 2);
+    ck_assert_uint_eq(scenario.signals[0].replay_mode, SCENARIO_REPLAY_RANGE);
+    ck_assert_uint_eq(scenario.signals[0].replay_range_start_hz, 99900000ULL);
+    ck_assert_uint_eq(scenario.signals[0].replay_range_stop_hz, 100100000ULL);
+    ck_assert(scenario.signals[0].loop); /* defaults to true for range/shift */
+    ck_assert_uint_eq(scenario.signals[1].replay_mode, SCENARIO_REPLAY_SHIFT);
+    ck_assert_uint_eq(scenario.signals[1].center_frequency_hz, 100000000ULL);
+    ck_assert(scenario.signals[1].loop);
+    ck_assert(!scenario.signals[0].passthrough); /* absent in JSON -> defaults false */
+}
+END_TEST
+
+START_TEST(defaults_to_fixed_replay_without_new_fields)
+{
+    scenario_t scenario;
+    char error[128];
+    ck_assert_msg(scenario_load_json("simulator/scenarios/test_scenario_001.json", &scenario, error, sizeof(error)), "%s", error);
+    ck_assert_uint_eq(scenario.signals[0].replay_mode, SCENARIO_REPLAY_FIXED);
+    ck_assert(!scenario.signals[0].loop);
+    ck_assert_uint_eq(scenario.signals[0].replay_range_start_hz, 0);
+}
+END_TEST
+
+START_TEST(rejects_invalid_replay_configs)
+{
+    scenario_t scenario;
+    char error[128];
+    ck_assert_msg(scenario_load_json("simulator/scenarios/replay_range_shift.json", &scenario, error, sizeof(error)), "%s", error);
+
+    scenario_t broken = scenario;
+    broken.signals[0].replay_range_start_hz = broken.signals[0].replay_range_stop_hz;
+    ck_assert(!scenario_validate(&broken, ".", error, sizeof(error)));
+    ck_assert_str_eq(error, "replay_range_invalid");
+
+    broken = scenario;
+    broken.signals[1].center_frequency_hz = 0;
+    ck_assert(!scenario_validate(&broken, ".", error, sizeof(error)));
+    ck_assert_str_eq(error, "replay_shift_missing_center");
+
+    broken = scenario;
+    broken.signals[0].modulation = SCENARIO_MODULATION_WBFM;
+    ck_assert(!scenario_validate(&broken, ".", error, sizeof(error)));
+    /* Non-IQ modulation trips the generic source/modulation check or the replay one; either
+     * way range replay on a non-IQ signal must not validate. */
+    ck_assert(strcmp(error, "replay_mode_source_mismatch") == 0 ||
+              strcmp(error, "signal_modulation_source_mismatch") == 0);
+}
+END_TEST
+
+START_TEST(rejects_loop_repeat_conflict_and_bad_mode)
+{
+    char path[] = "/tmp/sdr_scenario_replay_conflict_XXXXXX";
+    int fd = mkstemp(path);
+    ck_assert_int_ge(fd, 0);
+    FILE *file = fdopen(fd, "w");
+    ck_assert_ptr_nonnull(file);
+    fprintf(file,
+        "{"
+        "\"schema_version\":1,"
+        "\"scenario_id\":\"replay_conflict\","
+        "\"sources\":[{"
+        "\"id\":\"asset_fsk_001\",\"source_type\":\"iq_file\",\"file\":\"simulator/assets/fsk_20mhz.c16\","
+        "\"format\":\"ci16\",\"byte_order\":\"little_endian\",\"iq_layout\":\"interleaved_iq\","
+        "\"sample_rate_hz\":24576000,\"bandwidth_hz\":20000000,\"center_frequency_hz\":0,\"nominal_level_dbfs\":-12.0"
+        "}],"
+        "\"signals\":[{"
+        "\"signal_id\":\"sig\",\"source_reference\":\"asset_fsk_001\","
+        "\"replay_mode\":\"range\",\"frequency_range\":{\"start_hz\":99900000,\"stop_hz\":100100000},"
+        "\"bandwidth_hz\":1000000,\"power_dbm\":-55.0,"
+        "\"repeat_interval_s\":1.0"
+        "}]"
+        "}");
+    fclose(file);
+    scenario_t scenario;
+    char error[128];
+    /* range mode implies loop, and loop cannot be combined with a repeat interval */
+    ck_assert(!scenario_load_json(path, &scenario, error, sizeof(error)));
+    ck_assert_str_eq(error, "loop_repeat_conflict");
+    unlink(path);
+
+    char bad_mode_path[] = "/tmp/sdr_scenario_replay_badmode_XXXXXX";
+    fd = mkstemp(bad_mode_path);
+    ck_assert_int_ge(fd, 0);
+    file = fdopen(fd, "w");
+    ck_assert_ptr_nonnull(file);
+    fprintf(file,
+        "{"
+        "\"schema_version\":1,"
+        "\"scenario_id\":\"replay_badmode\",\"sources\":[],"
+        "\"signals\":[{"
+        "\"signal_id\":\"sig\",\"source_reference\":\"x\",\"replay_mode\":\"follow\","
+        "\"bandwidth_hz\":1000000,\"power_dbm\":-55.0"
+        "}]"
+        "}");
+    fclose(file);
+    ck_assert(!scenario_load_json(bad_mode_path, &scenario, error, sizeof(error)));
+    ck_assert_str_eq(error, "signal_replay_mode_invalid");
+    unlink(bad_mode_path);
+}
+END_TEST
+
+START_TEST(rejects_passthrough_without_range_or_shift)
+{
+    scenario_t scenario;
+    char error[128];
+    ck_assert_msg(scenario_load_json("simulator/scenarios/test_scenario_001.json", &scenario, error, sizeof(error)), "%s", error);
+    scenario.signals[0].passthrough = true; /* fixed replay mode by default */
+    ck_assert(!scenario_validate(&scenario, ".", error, sizeof(error)));
+    ck_assert_str_eq(error, "passthrough_requires_replay_mode");
+}
+END_TEST
+
+START_TEST(rejects_passthrough_without_loop)
+{
+    scenario_t scenario;
+    char error[128];
+    ck_assert_msg(scenario_load_json("simulator/scenarios/replay_range_shift.json", &scenario, error, sizeof(error)), "%s", error);
+    scenario.signals[0].passthrough = true;
+    scenario.signals[0].loop = false;
+    scenario.signals[0].repeat_interval_s = 1.0;
+    ck_assert(!scenario_validate(&scenario, ".", error, sizeof(error)));
+    ck_assert_str_eq(error, "passthrough_requires_loop");
+}
+END_TEST
+
+START_TEST(accepts_passthrough_on_range_or_shift_with_loop)
+{
+    scenario_t scenario;
+    char error[128];
+    ck_assert_msg(scenario_load_json("simulator/scenarios/replay_range_shift.json", &scenario, error, sizeof(error)), "%s", error);
+    scenario.signals[0].passthrough = true;
+    scenario.signals[1].passthrough = true;
+    ck_assert_msg(scenario_validate(&scenario, ".", error, sizeof(error)), "%s", error);
+}
+END_TEST
+
 Suite *scenario_suite(void)
 {
     Suite *suite = suite_create("scenario");
     TCase *tc = tcase_create("core");
+    tcase_add_test(tc, loads_replay_range_shift_scenario);
+    tcase_add_test(tc, rejects_passthrough_without_range_or_shift);
+    tcase_add_test(tc, rejects_passthrough_without_loop);
+    tcase_add_test(tc, accepts_passthrough_on_range_or_shift_with_loop);
+    tcase_add_test(tc, defaults_to_fixed_replay_without_new_fields);
+    tcase_add_test(tc, rejects_invalid_replay_configs);
+    tcase_add_test(tc, rejects_loop_repeat_conflict_and_bad_mode);
     tcase_add_test(tc, loads_and_validates_scenario);
     tcase_add_test(tc, loads_optional_noise_floor);
     tcase_add_test(tc, loads_audio_wav_modulation_scenario);

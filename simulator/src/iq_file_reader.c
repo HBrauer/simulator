@@ -61,7 +61,12 @@ bool iq_file_reader_read(iq_file_reader_t *reader, uint64_t sample_offset, iq_ci
     return *read_count == wanted;
 }
 
-bool iq_signal_active(const scenario_signal_t *signal, const scenario_source_t *source, double day_time_s, uint64_t *sample_offset, double *offset_fraction)
+/* Playback position within the repeat cycle, in exact integer nanosecond/sample math.
+ * The earlier double fmod() on the day time could round a cycle boundary to just before
+ * the end of the file instead of exactly zero, so the block starting a new cycle rendered
+ * from the file's last sample and went silent for the rest of the block -- a periodic
+ * one-block dropout on every repeat (visible as level pumping on decimated channels). */
+bool iq_signal_active(const scenario_signal_t *signal, const scenario_source_t *source, uint64_t day_time_ns, uint64_t *sample_offset, double *offset_fraction)
 {
     if (offset_fraction != NULL) {
         *offset_fraction = 0.0;
@@ -69,23 +74,59 @@ bool iq_signal_active(const scenario_signal_t *signal, const scenario_source_t *
     if (signal->repeat_interval_s <= 0.0 || source->sample_rate_hz == 0 || source->sample_count == 0) {
         return false;
     }
-    if (day_time_s < signal->start_time_s) {
+    const uint64_t start_ns = (uint64_t)llround(signal->start_time_s * 1e9);
+    const uint64_t repeat_ns = (uint64_t)llround(signal->repeat_interval_s * 1e9);
+    if (repeat_ns == 0ULL || day_time_ns < start_ns) {
         return false;
     }
-    const double file_duration_s = (double)source->sample_count / (double)source->sample_rate_hz;
-    const double elapsed = day_time_s - signal->start_time_s;
-    const double occurrence_elapsed = fmod(elapsed, signal->repeat_interval_s);
-    if (occurrence_elapsed < 0.0 || occurrence_elapsed >= file_duration_s) {
-        return false;
+    const uint64_t occurrence_ns = (day_time_ns - start_ns) % repeat_ns;
+    /* Source-sample position = occurrence_ns * rate / 1e9, exact in 128-bit. */
+    const __uint128_t scaled = (__uint128_t)occurrence_ns * (uint64_t)source->sample_rate_hz;
+    const uint64_t position = (uint64_t)(scaled / 1000000000ULL);
+    if (position >= source->sample_count) {
+        return false; /* between the end of the file and the next repeat */
     }
-    const double exact_position = occurrence_elapsed * (double)source->sample_rate_hz;
-    const double integer_position = floor(exact_position);
-    *sample_offset = (uint64_t)integer_position;
-    if (*sample_offset >= source->sample_count) {
-        return false;
-    }
+    *sample_offset = position;
     if (offset_fraction != NULL) {
-        *offset_fraction = exact_position - integer_position;
+        *offset_fraction = (double)(uint64_t)(scaled % 1000000000ULL) / 1e9;
+    }
+    return true;
+}
+
+/* Loop position from the absolute output sample index rather than nanoseconds: the block grid
+ * time is floor(sample_index*1e9/rate), so re-deriving samples from nanoseconds would land a
+ * hair before the integer sample and push equal-rate signals onto the resampler path. Working
+ * on the sample grid keeps the fraction exactly zero whenever the rates match. */
+bool iq_signal_loop_position(const scenario_signal_t *signal, const scenario_source_t *source, uint64_t start_sample, uint32_t output_rate_hz, uint64_t *sample_offset, double *offset_fraction, uint64_t *samples_until_wrap)
+{
+    if (offset_fraction != NULL) {
+        *offset_fraction = 0.0;
+    }
+    if (source->sample_rate_hz == 0 || source->sample_count == 0 || output_rate_hz == 0) {
+        return false;
+    }
+    const uint64_t start_out = (uint64_t)llround(signal->start_time_s * (double)output_rate_hz);
+    if (start_sample < start_out) {
+        return false;
+    }
+    /* Source position = (start_sample - start_out) * source_rate / output_rate, exact in
+     * 128-bit; the integer part wraps modulo the file length, the remainder is the [0,1)
+     * fractional source-sample position. */
+    const __uint128_t scaled = (__uint128_t)(start_sample - start_out) * (uint64_t)source->sample_rate_hz;
+    const uint64_t remainder = (uint64_t)(scaled % output_rate_hz);
+    const uint64_t offset = (uint64_t)((scaled / output_rate_hz) % source->sample_count);
+    *sample_offset = offset;
+    if (offset_fraction != NULL) {
+        *offset_fraction = (double)remainder / (double)output_rate_hz;
+    }
+    if (samples_until_wrap != NULL) {
+        /* Smallest n >= 1 with position(start_sample + n) reaching the next file boundary:
+         * n = ceil(((sample_count - offset) * output_rate - remainder) / source_rate). Always
+         * >= 1 because offset < sample_count and remainder < output_rate. */
+        const __uint128_t units_to_boundary =
+            (__uint128_t)(source->sample_count - offset) * output_rate_hz - remainder;
+        *samples_until_wrap =
+            (uint64_t)((units_to_boundary + source->sample_rate_hz - 1U) / source->sample_rate_hz);
     }
     return true;
 }

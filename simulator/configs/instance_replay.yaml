@@ -1,0 +1,38 @@
+# General-mixer replay demo: two overlapping replay signals (range + shift mode) rendered
+# through the ordinary renderer, so they can be combined with each other or a noise floor.
+# For a channel dedicated to replaying a single file at minimal cost (no mixer, no resampling,
+# a near-literal file-to-VITA49 copy), see instance_replay_passthrough.yaml instead.
+schema_version: 1
+instance_id: "sim_instance_replay"
+scenario_file: "simulator/scenarios/replay_range_shift.json"
+log_path: "logs/instance_replay.log"
+stream_block_samples: 1024
+# Default asset budget is 16 GiB; IQ files beyond it are mmap-backed instead of RAM-copied.
+# Uncomment to override (0 = unlimited RAM, legacy behaviour):
+# asset_cache_max_bytes: 0
+receivers:
+  - receiver_id: 0
+    rest_bind_host: "127.0.0.1"
+    rest_port: 8110
+    udp_output_host: "127.0.0.1"
+    # 80 MHz span => fixed tuner centered at 100 MHz (the FM-band replay demo).
+    frequency_start_hz: 60000000
+    frequency_stop_hz: 140000000
+    frontend_bandwidth_hz: 80000000
+    scan_rate_hz_per_s: 100000000000
+    rf_reference_power_dbm: -55.0
+    profiles:
+      - { bandwidth_hz: 80000000, sample_rate_hz: 98304000, name: "80M" }
+      - { bandwidth_hz: 20000000, sample_rate_hz: 24576000, name: "20M" }
+      - { bandwidth_hz: 1000000, sample_rate_hz: 1536000, name: "1M" }
+    channels:
+      - channel_id: 0
+        track_tuner: true
+        bandwidth_hz: 80000000
+        stream_enabled: true
+        udp_output_port: 51000
+      - channel_id: 1
+        center_frequency_hz: 100000000
+        bandwidth_hz: 1000000
+        stream_enabled: true
+        udp_output_port: 51001

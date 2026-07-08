@@ -10,6 +10,8 @@ typedef struct {
     scenario_source_kind_t source_kind;
     uint64_t sample_count;
     iq_ci16_t *samples;
+    bool mmapped;     /* samples points into a read-only file mapping, not the heap */
+    size_t map_bytes; /* mapping length for munmap when mmapped */
     float *audio_samples;
     float *audio_hilbert;
     double *audio_integral;

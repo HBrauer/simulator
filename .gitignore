@@ -29,3 +29,6 @@ logs/
 .idea/
 *~
 .DS_Store
+
+# Reference/scratch material, not part of the build
+temp/

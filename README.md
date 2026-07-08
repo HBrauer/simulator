@@ -10,12 +10,13 @@ Current implementation includes:
 - YAML instance configuration.
 - JSON RF scenario loading.
 - deterministic scenario-time override.
-- per-receiver REST API.
-- VITA 49.2 UDP output for receiver-bandwidth and DDC streams.
+- unified channel model: every stream is a channel with a supported {bandwidth, sample rate} profile; the wideband stream is channel 0 tracking the tuner.
+- per-receiver REST API with capability discovery and runtime channel frequency/bandwidth control.
+- VITA 49.2 UDP output per channel, with in-band IF-context packets announcing retunes and rate changes.
 - cached IQ assets.
 - cached PCM WAV audio assets with WBFM, AM, USB, and LSB modulation.
 - scalar sample-rate-aware renderer.
-- DDC out-of-window empty stream behavior.
+- out-of-front-end-window channels stream empty blocks, like a hardware DDC tuned outside the digitised band.
 - runtime metrics endpoint.
 - unit, integration, sanitizer, and benchmark targets.
 
@@ -28,17 +29,7 @@ meson compile -C build
 
 ## Quick Start Example
 
-Terminal 1, start the waterfall receiver on DDC 0. This stream is centered on the demo signal, so the SDL window should show colored waterfall lines immediately:
-
-```sh
-build/sdr-waterfall-receiver \
-  --host 127.0.0.1 \
-  --port 50001 \
-  --fft-size 1024 \
-  --sample-rate-hz 24576000
-```
-
-Terminal 2, start the simulator:
+Terminal 1, start the simulator:
 
 ```sh
 build/sdr-simulator \
@@ -47,9 +38,18 @@ build/sdr-simulator \
   --stream-block-samples 1536
 ```
 
-The receiver opens an SDL2 window, parses VITA 49.2 packets at UDP line rate, and displays the selected history duration across automatically computed waterfall rows. The 80-MHz scanner stream is still available on port `50000`, but the quick start uses DDC port `50001` because it is centered on the demo signal and is easier to verify visually.
+Terminal 2, start the waterfall receiver on channel 1. It discovers the channel's UDP port, sample rate, and bandwidth from the REST API — no `--port`/`--sample-rate-hz` needed:
 
-For a non-continuous signal, use `simulator/scenarios/burst_1s_every_5s.json`. It emits a one-second burst every five seconds on DDC 0 over a continuous simulated noise floor:
+```sh
+build/sdr-waterfall-receiver \
+  --control-url http://127.0.0.1:8100 \
+  --channel 1 \
+  --fft-size 1024
+```
+
+The receiver opens an SDL2 window, parses VITA 49.2 packets at UDP line rate, and displays the selected history duration across automatically computed waterfall rows. The toolbar's left control group has a channel combo box, a center-frequency input field (click, type MHz, Enter), and a bandwidth combo box listing the supported profiles (keyboard: PgUp/PgDn or `0`-`7` for channels, Left/Right with Shift for x10 retune steps, `B` to cycle bandwidth). The wideband scanner stream is channel `0` on port `50000`; the quick start uses channel `1` (port `50001`) because it is centered on the demo signal and is easier to verify visually. Manual mode still works: `--host 127.0.0.1 --port 50001 --sample-rate-hz 24576000`.
+
+For a non-continuous signal, use `simulator/scenarios/burst_1s_every_5s.json`. It emits a one-second burst every five seconds on channel 1 over a continuous simulated noise floor:
 
 ```sh
 build/sdr-simulator \
@@ -58,13 +58,57 @@ build/sdr-simulator \
   --stream-block-samples 1536
 ```
 
+### Recorded-file replay (range and shift modes)
+
+`simulator/scenarios/replay_range_shift.json` demonstrates replaying recorded IQ captures tied to
+the tuned frequency (see `docs/schemas.md` for the full schema):
+
+- **range mode** — the file plays *centered at the tuned frequency* whenever the channel's center
+  lies inside the configured `frequency_range` (e.g. 99.9–100.1 MHz), identical output anywhere in
+  the range, silence outside it.
+- **shift mode** — the file content stays at its absolute RF position: configured for 100 MHz with
+  a shift range of 80–120 MHz, tuning a channel to 110 MHz shows the content at −10 MHz offset
+  (the IQ is rotated by `f_file − f_tune`; no band-limiting, wrap-around at ±Fs/2 is accepted).
+
+Replay signals loop continuously and the playback position is derived from wall-clock epoch time,
+so **simulator instances started at different times emit identical samples (and identical VITA-49
+payloads) at identical wall-clock times**:
+
+```sh
+build/sdr-simulator \
+  --config simulator/configs/instance_replay.yaml \
+  --scenario simulator/scenarios/replay_range_shift.json
+```
+
+Large captures are handled by the asset budget (`asset_cache_max_bytes`, default 16 GiB): IQ files
+over the remaining budget are memory-mapped read-only instead of copied to RAM, so multi-minute
+80 MHz recordings (≈ 393 MB/s of ci16) replay without exhausting memory, and concurrent instances
+replaying the same capture share the page cache.
+
+If a channel's only job is to replay one capture — no mixing with other signals or noise — add
+`"passthrough": true` to its signal (`simulator/scenarios/replay_passthrough_demo.json`, run with
+`simulator/configs/instance_replay_passthrough.yaml`). This skips the general mixer entirely for
+that channel (no float mix bus, no noise floor, no other signals) and streams the file's samples
+almost directly into VITA-49 packets whenever the channel's sample rate exactly matches the
+source's — in local measurements, roughly **15x less render time per block** than even the
+mixer's own fastest (direct-copy) path. It's exclusive, not an overlay: while the passthrough
+signal is active, any other signal that would otherwise be visible to that channel is not
+rendered. Use it for a channel dedicated to one recording; use the general renderer (no
+`passthrough`) when you want a replay capture to combine with other signals or a noise floor.
+
+```sh
+build/sdr-simulator \
+  --config simulator/configs/instance_replay_passthrough.yaml \
+  --scenario simulator/scenarios/replay_passthrough_demo.json
+```
+
 For an audio-modulated radio demo, create a mono 48 kHz PCM WAV asset first:
 
 ```sh
 ffmpeg -i input.mp3 -ac 1 -ar 48000 -sample_fmt s16 simulator/assets/radio_clip.wav
 ```
 
-Then run the audio scenario. It places WBFM, AM, USB, and LSB signals from the same WAV file inside DDC 0:
+Then run the audio scenario. It places WBFM, AM, USB, and LSB signals from the same WAV file inside channel 1:
 
 ```sh
 build/sdr-simulator \
@@ -96,24 +140,32 @@ build/sdr-simulator \
 
 `stream_block_samples` in the instance YAML controls the CI16 IQ payload size in samples inside each VITA 49.2 UDP packet. The default is 1024 samples, and the allowed range is 1 to 4096 samples. `--stream-block-samples` overrides the YAML value for ad hoc runs. For high-rate receiver tests over jumbo-frame Ethernet, use `1536` samples; that produces a `6164` byte VITA/UDP payload and avoids IP fragmentation with MTU 9000.
 
-Receiver and DDC `sample_rate_hz` and `bandwidth_hz` are configurable in YAML. Existing defaults remain `98304000`/`80000000` for the receiver stream and `24576000`/`20000000` for DDC streams.
+Each receiver declares its supported `{bandwidth_hz, sample_rate_hz}` **profiles** and a list of **channels** in the instance YAML (see `docs/schemas.md`). Channel 0 in the sample config tracks the tuner at 80 MHz / 98.304 MS/s; channels 1-4 are fixed-center 20 MHz / 24.576 MS/s. Channel center frequency and bandwidth are settable at runtime via REST; selecting a bandwidth always selects its paired sample rate, like real DDC decimation stages.
 
-Useful REST endpoints for receiver 0 in the sample config:
+Useful REST endpoints for receiver 0 in the sample config (see `docs/rest_api.md` for the full API):
 
 ```text
 GET  http://127.0.0.1:8100/api/v1/health
+GET  http://127.0.0.1:8100/api/v1/capabilities
 GET  http://127.0.0.1:8100/api/v1/status
 GET  http://127.0.0.1:8100/api/v1/config
 GET  http://127.0.0.1:8100/api/v1/scenario/status
 GET  http://127.0.0.1:8100/api/v1/metrics
-GET  http://127.0.0.1:8100/api/v1/ddc/0/status
+GET  http://127.0.0.1:8100/api/v1/channels
+GET  http://127.0.0.1:8100/api/v1/channels/1
+PUT  http://127.0.0.1:8100/api/v1/channels/1
+POST http://127.0.0.1:8100/api/v1/channels/1/stream
 POST http://127.0.0.1:8100/api/v1/frequency-range
-POST http://127.0.0.1:8100/api/v1/streams/80mhz
-POST http://127.0.0.1:8100/api/v1/ddc/0/configure
-POST http://127.0.0.1:8100/api/v1/ddc/0/stream
 ```
 
-To check whether the simulator is actually sending the configured sample rate, inspect `/api/v1/metrics`. For the full-bandwidth stream, look at the `iq_80mhz` entry:
+Retune channel 1 and switch it to the 5 MHz profile (the sample rate follows the profile):
+
+```sh
+curl -X PUT http://127.0.0.1:8100/api/v1/channels/1 \
+  -d '{"center_frequency_hz": 10012000000, "bandwidth_hz": 5000000}'
+```
+
+To check whether the simulator is actually sending the configured sample rate, inspect `/api/v1/metrics` and look at the channel's `streams` entry:
 
 ```sh
 curl -s http://127.0.0.1:8100/api/v1/metrics
@@ -127,18 +179,17 @@ Set `udp_output_host` to an IPv4 multicast group such as `239.10.10.10`. The sim
 
 For local-machine testing, set `udp_multicast_interface: "127.0.0.1"` in the simulator config and pass `--interface 127.0.0.1` to the receiver. Otherwise the kernel may route multicast over the default physical NIC, which cannot carry a 98 MS/s CI16 stream.
 
-Terminal 1, join DDC0 on multicast:
+Terminal 1, join channel 1 on multicast:
 
 ```sh
 build/sdr-waterfall-receiver \
-  --host 239.10.10.10 \
+  --control-url http://127.0.0.1:8100 \
+  --channel 1 \
   --interface 127.0.0.1 \
-  --port 50001 \
-  --fft-size 1024 \
-  --sample-rate-hz 24576000
+  --fft-size 1024
 ```
 
-Terminal 2, start the multicast simulator:
+With `--control-url` the receiver reads `udp_output_host` from the API and joins the multicast group automatically. (Manual mode: `--host 239.10.10.10 --port 50001 --sample-rate-hz 24576000`.) Terminal 2, start the multicast simulator:
 
 ```sh
 build/sdr-simulator \
@@ -159,12 +210,12 @@ build/sdr-simulator \
 Expected hash at the current implementation state:
 
 ```text
-81e38ff17713e9a8ef2789d7e42c9eb9bbb38704bce89998f28a4f2efabdf38a
+e0bb3a76474fc8c2e3e984b62139e09f43104d1e0eda398c568b97f0249c5b42
 ```
 
 ### Determinism guarantees
 
-Rendered output is a pure function of the scenario, the receiver/DDC configuration, and the
+Rendered output is a pure function of the scenario, the receiver/channel configuration, and the
 scenario time. Two instances started with the same configuration produce **byte-identical**
 samples and VITA-49 timestamps for the same block, because:
 
@@ -241,7 +292,7 @@ The benchmark reports scalar 80-MHz renderer throughput in samples per second. U
 
 ## Full Receiver Performance Build
 
-For one real-time receiver with one 80-MHz stream plus four 20-MHz DDC streams, use a release build with fast math, and run with larger UDP blocks:
+For one real-time receiver with one 80-MHz channel plus four 20-MHz channels, use a release build with fast math, and run with larger UDP blocks:
 
 ```sh
 meson setup build-perf --buildtype=release -Dfast_math=true
@@ -253,7 +304,7 @@ build-perf/sdr-simulator \
   --stream-block-samples 1536
 ```
 
-On a Ryzen 7 5800XT test run, this delivered about `196.6 MSamples/s` total (`98.3 MSamples/s` on the 80-MHz stream and `24.58 MSamples/s` on each DDC) with no UDP errors, overruns, or underruns over a short local-loopback metrics sample. This path trades strict IEEE floating-point behavior for throughput; keep the default build for deterministic correctness checks. `-Dnative_optimizations=true` is available for local experiments, but was slightly slower than fast-math-only on this test host.
+On a Ryzen 7 5800XT test run, this delivered about `196.6 MSamples/s` total (`98.3 MSamples/s` on the 80-MHz channel and `24.58 MSamples/s` on each 20-MHz channel) with no UDP errors, overruns, or underruns over a short local-loopback metrics sample. This path trades strict IEEE floating-point behavior for throughput; keep the default build for deterministic correctness checks. `-Dnative_optimizations=true` is available for local experiments, but was slightly slower than fast-math-only on this test host.
 
 For `stream_block_samples: 1536`, each VITA 49.2 UDP datagram is `20 + 1536 * 4 = 6164` bytes before UDP/IP headers. This profile is intended for MTU 9000 jumbo-frame links between simulator and receiver.
 
@@ -269,6 +320,7 @@ build/sdr-waterfall-receiver --host 127.0.0.1 --port 50000
 
 - [Architecture](docs/architecture.md)
 - [Config and scenario schemas](docs/schemas.md)
+- [REST API](docs/rest_api.md)
 - [VITA 49.2 UDP output](docs/vita49_udp.md)
 - [Waterfall receiver](receiver/README.md)
 - [Release checklist](docs/release_checklist.md)
@@ -278,7 +330,7 @@ build/sdr-waterfall-receiver --host 127.0.0.1 --port 50000
 - DSP path is correctness-first, with specialized direct/resampled and baseband/NCO render loops.
 - Resampling uses a scalar Hann-windowed sinc FIR path by default; `-Dliquid_resampler=enabled` builds the optional liquid-dsp dot-product backend.
 - VOLK is detected by Meson and used for direct NCO rotation when available.
-- Receiver and DDC windows use an explicit rectangular passband gain based on signal/window bandwidth overlap.
+- Channel windows use an explicit rectangular passband gain based on signal/window bandwidth overlap.
 - UDP streaming uses a renderer-to-UDP ringbuffer pipeline with sample-rate pacing.
 - Metrics are available per receiver and per stream.
 - Frontend impairments, IQ imbalance, and high-performance SIMD kernels are not yet implemented.

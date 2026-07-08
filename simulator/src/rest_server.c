@@ -96,54 +96,112 @@ static bool json_get_bool_value(json_t *object, const char *key, bool *out)
     return true;
 }
 
-static bool parse_ddc_path(const char *url, const char *suffix, unsigned *ddc_id)
+/* Match /api/v1/channels/{id} (suffix "") or /api/v1/channels/{id}/stream (suffix "stream"). */
+static bool parse_channel_path(const char *url, const char *suffix, unsigned *channel_id)
 {
     int parsed_chars = 0;
-    if (sscanf(url, "/api/v1/ddc/%u/%n", ddc_id, &parsed_chars) != 1 || parsed_chars <= 0) {
+    if (sscanf(url, "/api/v1/channels/%u%n", channel_id, &parsed_chars) != 1 || parsed_chars <= 0) {
         return false;
     }
-    return strcmp(url + parsed_chars, suffix) == 0;
+    const char *rest = url + parsed_chars;
+    if (suffix[0] == '\0') {
+        return rest[0] == '\0';
+    }
+    return rest[0] == '/' && strcmp(rest + 1, suffix) == 0;
 }
 
-static json_t *receiver_json(const receiver_config_t *r, uint64_t scenario_time_ns, bool include_ddc)
+static json_t *profiles_json(const receiver_config_t *r)
+{
+    json_t *profiles = json_array();
+    for (size_t i = 0; i < r->profile_count; i++) {
+        json_array_append_new(profiles, json_pack(
+            "{s:i,s:i,s:s}",
+            "bandwidth_hz", (int)r->profiles[i].bandwidth_hz,
+            "sample_rate_hz", (int)r->profiles[i].sample_rate_hz,
+            "name", r->profiles[i].name
+        ));
+    }
+    return profiles;
+}
+
+static json_t *channel_json(const receiver_config_t *r, const channel_config_t *channel, const receiver_metrics_t *metrics, uint64_t scenario_time_ns)
+{
+    const channel_profile_t *profile = receiver_find_profile(r, channel->bandwidth_hz);
+    return json_pack(
+        "{s:i,s:b,s:I,s:I,s:i,s:i,s:s,s:b,s:b,s:b,s:i,s:f,s:f}",
+        "channel_id", (int)channel->id,
+        "track_tuner", channel->track_tuner,
+        "center_frequency_hz", (json_int_t)receiver_channel_center_hz(r, channel, scenario_time_ns),
+        "configured_center_frequency_hz", (json_int_t)channel->center_frequency_hz,
+        "bandwidth_hz", (int)channel->bandwidth_hz,
+        "sample_rate_hz", (int)channel->sample_rate_hz,
+        "profile", profile != NULL ? profile->name : "",
+        "in_frontend_window", receiver_channel_in_window(r, channel, scenario_time_ns),
+        "stream_enabled", channel->stream_enabled,
+        "active", metrics != NULL ? atomic_load(&metrics->streams[channel->id].active) : false,
+        "udp_port", (int)channel->udp_output.port,
+        "output_scale", channel->output_scale,
+        "rf_reference_power_dbm", channel->rf_reference_power_dbm
+    );
+}
+
+static json_t *channels_json(const receiver_config_t *r, const receiver_metrics_t *metrics, uint64_t scenario_time_ns)
+{
+    json_t *channels = json_array();
+    for (size_t i = 0; i < r->channel_count; i++) {
+        json_array_append_new(channels, channel_json(r, &r->channels[i], metrics, scenario_time_ns));
+    }
+    return channels;
+}
+
+static json_t *receiver_json(const receiver_config_t *r, const receiver_metrics_t *metrics, uint64_t scenario_time_ns, bool include_channels)
 {
     const char *mode = receiver_effective_mode(r) == RECEIVER_MODE_FIXED ? "fixed" : "scan";
     json_t *root = json_pack(
-        "{s:i,s:s,s:I,s:I,s:I,s:f,s:f,s:f,s:b,s:I,s:s,s:s,s:{s:{s:i}},s:b}",
+        "{s:i,s:s,s:I,s:I,s:I,s:I,s:f,s:f,s:f,s:s,s:s,s:i,s:I}",
         "receiver_id", (int)r->id,
         "effective_mode", mode,
         "frequency_start_hz", (json_int_t)r->frequency_start_hz,
         "frequency_stop_hz", (json_int_t)r->frequency_stop_hz,
         "center_frequency_hz", (json_int_t)receiver_center_frequency_hz(r, scenario_time_ns),
+        "frontend_bandwidth_hz", (json_int_t)r->frontend_bandwidth_hz,
         "scan_rate_hz_per_s", r->scan_rate_hz_per_s,
         "output_scale", r->output_scale,
         "rf_reference_power_dbm", r->rf_reference_power_dbm,
-        "stream_enabled", r->stream_enabled,
-        "bandwidth_hz", (json_int_t)r->bandwidth_hz,
         "udp_output_host", r->udp_output_host,
         "udp_multicast_interface", r->udp_multicast_interface,
-        "udp_outputs", "iq_80mhz", "port", (int)r->udp_80mhz_output.port,
-        "streams_active", r->stream_enabled
+        "channel_count", (int)r->channel_count,
+        "config_epoch", (json_int_t)r->config_epoch
     );
-    if (include_ddc) {
-        json_t *arr = json_array();
-        for (size_t i = 0; i < SIM_DDC_COUNT; i++) {
-            json_array_append_new(arr, json_pack(
-                "{s:i,s:I,s:i,s:i,s:f,s:f,s:b,s:{s:i}}",
-                "ddc_id", (int)r->ddc[i].id,
-                "center_frequency_hz", (json_int_t)r->ddc[i].center_frequency_hz,
-                "bandwidth_hz", (int)r->ddc[i].bandwidth_hz,
-                "sample_rate_hz", (int)r->ddc[i].sample_rate_hz,
-                "output_scale", r->ddc[i].output_scale,
-                "rf_reference_power_dbm", r->ddc[i].rf_reference_power_dbm,
-                "stream_enabled", r->ddc[i].stream_enabled,
-                "udp_output", "port", (int)r->ddc[i].udp_output.port
-            ));
-        }
-        json_object_set_new(root, "ddc", arr);
-        json_object_set_new(root, "sample_rate_hz", json_integer(r->sample_rate_hz));
+    if (include_channels) {
+        json_object_set_new(root, "profiles", profiles_json(r));
+        json_object_set_new(root, "channels", channels_json(r, metrics, scenario_time_ns));
         json_object_set_new(root, "iq_output_format", json_string("vita49_2_ci16"));
     }
+    return root;
+}
+
+static json_t *capabilities_json(const receiver_config_t *r, uint64_t scenario_time_ns)
+{
+    const char *mode = receiver_effective_mode(r) == RECEIVER_MODE_FIXED ? "fixed" : "scan";
+    json_t *root = json_pack(
+        "{s:i,s:I,s:I,s:I,s:{s:I,s:I,s:s,s:f},s:i,s:s,s:s,s:I}",
+        "receiver_id", (int)r->id,
+        "frequency_min_hz", (json_int_t)0,
+        "frequency_max_hz", (json_int_t)SIM_MAX_RF_HZ,
+        "frontend_bandwidth_hz", (json_int_t)r->frontend_bandwidth_hz,
+        "tuner",
+        "frequency_start_hz", (json_int_t)r->frequency_start_hz,
+        "frequency_stop_hz", (json_int_t)r->frequency_stop_hz,
+        "mode", mode,
+        "scan_rate_hz_per_s", r->scan_rate_hz_per_s,
+        "channel_count", (int)r->channel_count,
+        "iq_format", "vita49_2_ci16",
+        "udp_output_host", r->udp_output_host,
+        "config_epoch", (json_int_t)r->config_epoch
+    );
+    (void)scenario_time_ns;
+    json_object_set_new(root, "profiles", profiles_json(r));
     return root;
 }
 
@@ -167,15 +225,14 @@ static double average_rate(uint64_t samples, uint64_t started_at_ns)
 static json_t *stream_metrics_json(const receiver_config_t *receiver, const receiver_metrics_t *metrics, uint64_t started_at_ns)
 {
     json_t *streams = json_array();
-    for (size_t i = 0; i < 1 + SIM_DDC_COUNT; i++) {
+    for (size_t i = 0; i < receiver->channel_count; i++) {
         const stream_metrics_t *stream = &metrics->streams[i];
         const uint64_t samples_sent = atomic_load(&stream->samples_sent);
-        const uint32_t sample_rate_hz = i == 0 ? receiver->sample_rate_hz : receiver->ddc[i - 1U].sample_rate_hz;
         json_array_append_new(streams, json_pack(
             "{s:s,s:i,s:i,s:b,s:I,s:I,s:f,s:I,s:I,s:I,s:I,s:I,s:I,s:I,s:I,s:I,s:I,s:I,s:I,s:I}",
-            "stream_type", i == 0 ? "iq_80mhz" : "ddc",
-            "stream_id", i == 0 ? -1 : (int)i - 1,
-            "sample_rate_hz", (int)sample_rate_hz,
+            "stream_type", "channel",
+            "stream_id", (int)i,
+            "sample_rate_hz", (int)receiver->channels[i].sample_rate_hz,
             "active", atomic_load(&stream->active),
             "samples_rendered", (json_int_t)atomic_load(&stream->samples_rendered),
             "samples_sent", (json_int_t)samples_sent,
@@ -201,40 +258,22 @@ static json_t *stream_metrics_json(const receiver_config_t *receiver, const rece
 static json_t *stream_status_json(const receiver_config_t *receiver, const receiver_metrics_t *metrics, uint64_t scenario_time_ns)
 {
     json_t *streams = json_array();
-    json_array_append_new(streams, json_pack(
-        "{s:s,s:i,s:i,s:i,s:b,s:b,s:I,s:I,s:I,s:I,s:I,s:I,s:I,s:I,s:I,s:I,s:I}",
-        "stream_type", "iq_80mhz",
-        "stream_id", -1,
-        "udp_port", (int)receiver->udp_80mhz_output.port,
-        "sample_rate_hz", (int)receiver->sample_rate_hz,
-        "enabled", receiver->stream_enabled,
-        "active", atomic_load(&metrics->streams[0].active),
-        "samples_rendered", (json_int_t)atomic_load(&metrics->streams[0].samples_rendered),
-        "samples_sent", (json_int_t)atomic_load(&metrics->streams[0].samples_sent),
-        "samples_missed", (json_int_t)atomic_load(&metrics->streams[0].samples_missed),
-        "samples_late", (json_int_t)atomic_load(&metrics->streams[0].samples_late),
-        "samples_send_dropped", (json_int_t)atomic_load(&metrics->streams[0].samples_send_dropped),
-        "udp_packets_sent", (json_int_t)atomic_load(&metrics->streams[0].udp_packets_sent),
-        "udp_send_would_block", (json_int_t)atomic_load(&metrics->streams[0].udp_send_would_block),
-        "udp_send_no_buffer", (json_int_t)atomic_load(&metrics->streams[0].udp_send_no_buffer),
-        "udp_send_other_errors", (json_int_t)atomic_load(&metrics->streams[0].udp_send_other_errors),
-        "ringbuffer_overruns", (json_int_t)atomic_load(&metrics->streams[0].ringbuffer_overruns),
-        "ringbuffer_underruns", (json_int_t)atomic_load(&metrics->streams[0].ringbuffer_underruns)
-    ));
-    for (size_t i = 0; i < SIM_DDC_COUNT; i++) {
-        const ddc_config_t *ddc = &receiver->ddc[i];
-        const stream_metrics_t *stream = &metrics->streams[1 + i];
+    for (size_t i = 0; i < receiver->channel_count; i++) {
+        const channel_config_t *channel = &receiver->channels[i];
+        const stream_metrics_t *stream = &metrics->streams[i];
         json_array_append_new(streams, json_pack(
-            "{s:s,s:i,s:i,s:i,s:I,s:f,s:f,s:b,s:b,s:b,s:I,s:I,s:I,s:I,s:I,s:I,s:I,s:I,s:I,s:I,s:I}",
-            "stream_type", "ddc",
+            "{s:s,s:i,s:i,s:i,s:i,s:I,s:b,s:f,s:f,s:b,s:b,s:b,s:I,s:I,s:I,s:I,s:I,s:I,s:I,s:I,s:I,s:I,s:I}",
+            "stream_type", "channel",
             "stream_id", (int)i,
-            "udp_port", (int)ddc->udp_output.port,
-            "sample_rate_hz", (int)ddc->sample_rate_hz,
-            "center_frequency_hz", (json_int_t)ddc->center_frequency_hz,
-            "output_scale", ddc->output_scale,
-            "rf_reference_power_dbm", ddc->rf_reference_power_dbm,
-            "in_receiver_window", receiver_ddc_in_window(receiver, ddc, scenario_time_ns),
-            "enabled", ddc->stream_enabled,
+            "udp_port", (int)channel->udp_output.port,
+            "sample_rate_hz", (int)channel->sample_rate_hz,
+            "bandwidth_hz", (int)channel->bandwidth_hz,
+            "center_frequency_hz", (json_int_t)receiver_channel_center_hz(receiver, channel, scenario_time_ns),
+            "track_tuner", channel->track_tuner,
+            "output_scale", channel->output_scale,
+            "rf_reference_power_dbm", channel->rf_reference_power_dbm,
+            "in_frontend_window", receiver_channel_in_window(receiver, channel, scenario_time_ns),
+            "enabled", channel->stream_enabled,
             "active", atomic_load(&stream->active),
             "samples_rendered", (json_int_t)atomic_load(&stream->samples_rendered),
             "samples_sent", (json_int_t)atomic_load(&stream->samples_sent),
@@ -250,6 +289,15 @@ static json_t *stream_status_json(const receiver_config_t *receiver, const recei
         ));
     }
     return json_pack("{s:i,s:o}", "receiver_id", (int)receiver->id, "streams", streams);
+}
+
+/* Message listing the supported profile bandwidths, for unsupported_bandwidth errors. */
+static void supported_bandwidths_message(const receiver_config_t *r, char *out, size_t out_size)
+{
+    size_t used = (size_t)snprintf(out, out_size, "supported bandwidth_hz:");
+    for (size_t i = 0; i < r->profile_count && used < out_size; i++) {
+        used += (size_t)snprintf(out + used, out_size - used, "%s %u", i == 0 ? "" : ",", r->profiles[i].bandwidth_hz);
+    }
 }
 
 static enum MHD_Result answer(void *cls, struct MHD_Connection *connection, const char *url, const char *method, const char *version, const char *upload_data, size_t *upload_data_size, void **con_cls)
@@ -328,7 +376,9 @@ static enum MHD_Result answer(void *cls, struct MHD_Connection *connection, cons
             "samples_dropped", (json_int_t)atomic_load(&ctx->metrics->samples_dropped),
             "worker_errors", (json_int_t)atomic_load(&ctx->metrics->worker_errors)
         );
-        json_object_set_new(response, "streams", stream_metrics_json(ctx->receiver, ctx->metrics, server->started_at_ns));
+        pthread_mutex_lock(ctx->receiver_lock);
+        json_object_set_new(response, "streams", stream_metrics_json(r, ctx->metrics, server->started_at_ns));
+        pthread_mutex_unlock(ctx->receiver_lock);
         SEND_JSON_AND_FREE(MHD_HTTP_OK, response);
     }
     if (strcmp(method, "GET") == 0 && strcmp(url, "/api/v1/streams") == 0) {
@@ -337,33 +387,27 @@ static enum MHD_Result answer(void *cls, struct MHD_Connection *connection, cons
         pthread_mutex_unlock(ctx->receiver_lock);
         SEND_JSON_AND_FREE(MHD_HTTP_OK, response);
     }
-    if (strcmp(method, "POST") == 0 && strcmp(url, "/api/v1/streams/80mhz") == 0) {
-        json_error_t json_error;
-        json_t *request = json_loads(request_body->data, 0, &json_error);
-        if (request == NULL) {
-            SEND_JSON_AND_FREE(MHD_HTTP_BAD_REQUEST, error_body("invalid_json", json_error.text));
-        }
-        bool enabled = false;
-        if (!json_get_bool_value(request, "enabled", &enabled)) {
-            json_decref(request);
-            SEND_JSON_AND_FREE(MHD_HTTP_BAD_REQUEST, error_body("invalid_request", "enabled must be a boolean"));
-        }
-        json_decref(request);
+    if (strcmp(method, "GET") == 0 && strcmp(url, "/api/v1/capabilities") == 0) {
         pthread_mutex_lock(ctx->receiver_lock);
-        r->stream_enabled = enabled;
-        json_t *response = json_pack("{s:s,s:s,s:i,s:b}", "status", "ok", "stream_type", "iq_80mhz", "stream_id", -1, "enabled", enabled);
+        json_t *response = capabilities_json(r, scenario_time_ns);
+        pthread_mutex_unlock(ctx->receiver_lock);
+        SEND_JSON_AND_FREE(MHD_HTTP_OK, response);
+    }
+    if (strcmp(method, "GET") == 0 && strcmp(url, "/api/v1/channels") == 0) {
+        pthread_mutex_lock(ctx->receiver_lock);
+        json_t *response = channels_json(r, ctx->metrics, scenario_time_ns);
         pthread_mutex_unlock(ctx->receiver_lock);
         SEND_JSON_AND_FREE(MHD_HTTP_OK, response);
     }
     if (strcmp(method, "GET") == 0 && strcmp(url, "/api/v1/config") == 0) {
         pthread_mutex_lock(ctx->receiver_lock);
-        json_t *response = receiver_json(r, scenario_time_ns, true);
+        json_t *response = receiver_json(r, ctx->metrics, scenario_time_ns, true);
         pthread_mutex_unlock(ctx->receiver_lock);
         SEND_JSON_AND_FREE(MHD_HTTP_OK, response);
     }
     if (strcmp(method, "GET") == 0 && strcmp(url, "/api/v1/status") == 0) {
         pthread_mutex_lock(ctx->receiver_lock);
-        json_t *response = receiver_json(r, scenario_time_ns, false);
+        json_t *response = receiver_json(r, ctx->metrics, scenario_time_ns, false);
         pthread_mutex_unlock(ctx->receiver_lock);
         SEND_JSON_AND_FREE(MHD_HTTP_OK, response);
     }
@@ -393,8 +437,9 @@ static enum MHD_Result answer(void *cls, struct MHD_Connection *connection, cons
             pthread_mutex_unlock(ctx->receiver_lock);
             SEND_JSON_AND_FREE(MHD_HTTP_BAD_REQUEST, error_body(error, "invalid frequency range"));
         }
+        updated.config_epoch = r->config_epoch + 1U;
         *r = updated;
-        json_t *response = receiver_json(r, scenario_time_ns, false);
+        json_t *response = receiver_json(r, ctx->metrics, scenario_time_ns, false);
         pthread_mutex_unlock(ctx->receiver_lock);
         SEND_JSON_AND_FREE(MHD_HTTP_OK, response);
     }
@@ -415,29 +460,26 @@ static enum MHD_Result answer(void *cls, struct MHD_Connection *connection, cons
         }
         pthread_mutex_lock(ctx->receiver_lock);
         r->output_scale = output_scale;
-        for (size_t i = 0; i < SIM_DDC_COUNT; i++) {
-            r->ddc[i].output_scale = output_scale;
+        for (size_t i = 0; i < r->channel_count; i++) {
+            r->channels[i].output_scale = output_scale;
         }
-        json_t *response = receiver_json(r, scenario_time_ns, true);
+        r->config_epoch++;
+        json_t *response = receiver_json(r, ctx->metrics, scenario_time_ns, true);
         pthread_mutex_unlock(ctx->receiver_lock);
         SEND_JSON_AND_FREE(MHD_HTTP_OK, response);
     }
-    unsigned ddc_id = 99;
-    if (parse_ddc_path(url, "status", &ddc_id) && strcmp(method, "GET") == 0) {
-        if (ddc_id >= SIM_DDC_COUNT) {
-            SEND_JSON_AND_FREE(MHD_HTTP_NOT_FOUND, error_body("invalid_ddc_id", "ddc_id must be 0..3"));
-        }
+    unsigned channel_id = 0;
+    if (parse_channel_path(url, "", &channel_id) && strcmp(method, "GET") == 0) {
         pthread_mutex_lock(ctx->receiver_lock);
-        const ddc_config_t *d = &r->ddc[ddc_id];
-        const bool in_window = receiver_ddc_in_window(r, d, scenario_time_ns);
-        json_t *response = json_pack("{s:i,s:i,s:I,s:i,s:i,s:f,s:f,s:b,s:b,s:{s:i}}", "receiver_id", (int)r->id, "ddc_id", (int)d->id, "center_frequency_hz", (json_int_t)d->center_frequency_hz, "bandwidth_hz", (int)d->bandwidth_hz, "sample_rate_hz", (int)d->sample_rate_hz, "output_scale", d->output_scale, "rf_reference_power_dbm", d->rf_reference_power_dbm, "stream_enabled", d->stream_enabled, "in_receiver_window", in_window, "udp_output", "port", (int)d->udp_output.port);
+        if (channel_id >= r->channel_count) {
+            pthread_mutex_unlock(ctx->receiver_lock);
+            SEND_JSON_AND_FREE(MHD_HTTP_NOT_FOUND, error_body("invalid_channel_id", "no such channel"));
+        }
+        json_t *response = channel_json(r, &r->channels[channel_id], ctx->metrics, scenario_time_ns);
         pthread_mutex_unlock(ctx->receiver_lock);
         SEND_JSON_AND_FREE(MHD_HTTP_OK, response);
     }
-    if (parse_ddc_path(url, "stream", &ddc_id) && strcmp(method, "POST") == 0) {
-        if (ddc_id >= SIM_DDC_COUNT) {
-            SEND_JSON_AND_FREE(MHD_HTTP_NOT_FOUND, error_body("invalid_ddc_id", "ddc_id must be 0..3"));
-        }
+    if (parse_channel_path(url, "stream", &channel_id) && strcmp(method, "POST") == 0) {
         json_error_t json_error;
         json_t *request = json_loads(request_body->data, 0, &json_error);
         if (request == NULL) {
@@ -450,43 +492,83 @@ static enum MHD_Result answer(void *cls, struct MHD_Connection *connection, cons
         }
         json_decref(request);
         pthread_mutex_lock(ctx->receiver_lock);
-        r->ddc[ddc_id].stream_enabled = enabled;
-        pthread_mutex_unlock(ctx->receiver_lock);
-        SEND_JSON_AND_FREE(MHD_HTTP_OK, json_pack("{s:s,s:s,s:i,s:b}", "status", "ok", "stream_type", "ddc", "stream_id", (int)ddc_id, "enabled", enabled));
-    }
-    if (parse_ddc_path(url, "configure", &ddc_id) && strcmp(method, "POST") == 0) {
-        if (ddc_id >= SIM_DDC_COUNT) {
-            SEND_JSON_AND_FREE(MHD_HTTP_NOT_FOUND, error_body("invalid_ddc_id", "ddc_id must be 0..3"));
+        if (channel_id >= r->channel_count) {
+            pthread_mutex_unlock(ctx->receiver_lock);
+            SEND_JSON_AND_FREE(MHD_HTTP_NOT_FOUND, error_body("invalid_channel_id", "no such channel"));
         }
+        r->channels[channel_id].stream_enabled = enabled;
+        r->config_epoch++;
+        pthread_mutex_unlock(ctx->receiver_lock);
+        SEND_JSON_AND_FREE(MHD_HTTP_OK, json_pack("{s:s,s:s,s:i,s:b}", "status", "ok", "stream_type", "channel", "stream_id", (int)channel_id, "enabled", enabled));
+    }
+    if (parse_channel_path(url, "", &channel_id) && strcmp(method, "PUT") == 0) {
         json_error_t json_error;
         json_t *request = json_loads(request_body->data, 0, &json_error);
         if (request == NULL) {
             SEND_JSON_AND_FREE(MHD_HTTP_BAD_REQUEST, error_body("invalid_json", json_error.text));
         }
-        pthread_mutex_lock(ctx->receiver_lock);
-        uint64_t center = r->ddc[ddc_id].center_frequency_hz;
-        double output_scale = r->ddc[ddc_id].output_scale;
-        pthread_mutex_unlock(ctx->receiver_lock);
         const bool has_center = json_object_get(request, "center_frequency_hz") != NULL;
+        const bool has_bandwidth = json_object_get(request, "bandwidth_hz") != NULL;
+        const bool has_track = json_object_get(request, "track_tuner") != NULL;
         const bool has_scale = json_object_get(request, "output_scale") != NULL;
-        if ((!has_center && !has_scale) ||
+        uint64_t center = 0;
+        uint64_t bandwidth = 0;
+        bool track_tuner = false;
+        double output_scale = 0.0;
+        if ((!has_center && !has_bandwidth && !has_track && !has_scale) ||
             (has_center && !json_get_u64(request, "center_frequency_hz", &center)) ||
+            (has_bandwidth && !json_get_u64(request, "bandwidth_hz", &bandwidth)) ||
+            (has_track && !json_get_bool_value(request, "track_tuner", &track_tuner)) ||
             (has_scale && !json_get_double(request, "output_scale", &output_scale))) {
             json_decref(request);
-            SEND_JSON_AND_FREE(MHD_HTTP_BAD_REQUEST, error_body("invalid_request", "center_frequency_hz must be an unsigned integer Hz value and output_scale must be a positive number"));
+            SEND_JSON_AND_FREE(MHD_HTTP_BAD_REQUEST, error_body("invalid_request", "expected center_frequency_hz (unsigned Hz), bandwidth_hz (unsigned Hz), track_tuner (boolean), output_scale (positive number)"));
         }
         json_decref(request);
-        if (center > SIM_MAX_RF_HZ) {
-            SEND_JSON_AND_FREE(MHD_HTTP_BAD_REQUEST, error_body("invalid_frequency", "center_frequency_hz must be between 0 and 40000000000"));
-        }
-        if (output_scale <= 0.0) {
+        if (has_scale && output_scale <= 0.0) {
             SEND_JSON_AND_FREE(MHD_HTTP_BAD_REQUEST, error_body("invalid_output_scale", "output_scale must be greater than zero"));
         }
+
         pthread_mutex_lock(ctx->receiver_lock);
-        r->ddc[ddc_id].center_frequency_hz = center;
-        r->ddc[ddc_id].output_scale = output_scale;
+        if (channel_id >= r->channel_count) {
+            pthread_mutex_unlock(ctx->receiver_lock);
+            SEND_JSON_AND_FREE(MHD_HTTP_NOT_FOUND, error_body("invalid_channel_id", "no such channel"));
+        }
+        receiver_config_t updated = *r;
+        channel_config_t *channel = &updated.channels[channel_id];
+        if (has_track) {
+            channel->track_tuner = track_tuner;
+        }
+        if (has_center) {
+            if (channel->track_tuner) {
+                pthread_mutex_unlock(ctx->receiver_lock);
+                SEND_JSON_AND_FREE(MHD_HTTP_BAD_REQUEST, error_body("invalid_request", "center_frequency_hz requires track_tuner false; this channel follows the receiver tuner"));
+            }
+            channel->center_frequency_hz = center;
+        }
+        if (has_bandwidth) {
+            const channel_profile_t *profile = receiver_find_profile(&updated, (uint32_t)bandwidth);
+            if (profile == NULL || bandwidth > UINT32_MAX) {
+                char message[256];
+                supported_bandwidths_message(&updated, message, sizeof(message));
+                pthread_mutex_unlock(ctx->receiver_lock);
+                SEND_JSON_AND_FREE(MHD_HTTP_BAD_REQUEST, error_body("unsupported_bandwidth", message));
+            }
+            channel->bandwidth_hz = profile->bandwidth_hz;
+            channel->sample_rate_hz = profile->sample_rate_hz;
+        }
+        if (has_scale) {
+            channel->output_scale = output_scale;
+        }
+        char error[128];
+        if (!receiver_validate(&updated, error, sizeof(error))) {
+            pthread_mutex_unlock(ctx->receiver_lock);
+            SEND_JSON_AND_FREE(MHD_HTTP_BAD_REQUEST, error_body(error, "invalid channel configuration"));
+        }
+        updated.config_epoch = r->config_epoch + 1U;
+        *r = updated;
+        json_t *response = channel_json(r, &r->channels[channel_id], ctx->metrics, scenario_time_ns);
         pthread_mutex_unlock(ctx->receiver_lock);
-        SEND_JSON_AND_FREE(MHD_HTTP_OK, json_pack("{s:s}", "status", "ok"));
+        SEND_JSON_AND_FREE(MHD_HTTP_OK, response);
     }
 
     SEND_JSON_AND_FREE(MHD_HTTP_NOT_FOUND, error_body("not_found", "unknown endpoint"));

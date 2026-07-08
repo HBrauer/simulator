@@ -60,6 +60,39 @@ START_TEST(rejects_malformed_vita49_packet_size)
 }
 END_TEST
 
+START_TEST(parses_simulator_vita49_context_packet)
+{
+    /* Mirror of the simulator's vita49_write_context_packet layout. */
+    uint8_t packet[48];
+    memset(packet, 0, sizeof(packet));
+    const uint32_t header = (4U << 28U) | (1U << 22U) | (2U << 20U) | (5U << 16U) | 12U;
+    write_be32(packet, header);
+    write_be32(packet + 4, 0x53440001U);
+    write_be32(packet + 8, 1U);
+    write_be64(packet + 12, 234567890000ULL);
+    const uint32_t cif0 = (1U << 31U) | (1U << 29U) | (1U << 27U) | (1U << 21U);
+    write_be32(packet + 20, cif0);
+    write_be64(packet + 24, 20000000ULL << 20U);
+    write_be64(packet + 32, 10005000000ULL << 20U);
+    write_be64(packet + 40, 24576000ULL << 20U);
+
+    ck_assert_uint_eq(vita49_rx_packet_type(packet, sizeof(packet)), VITA49_RX_PACKET_TYPE_CONTEXT);
+    vita49_rx_context_t context;
+    ck_assert(vita49_rx_parse_context(packet, sizeof(packet), &context));
+    ck_assert_uint_eq(context.sequence, 5);
+    ck_assert(context.changed);
+    ck_assert_uint_eq(context.stream_id, 0x53440001U);
+    ck_assert_uint_eq(context.timestamp_ns, 1234567890ULL);
+    ck_assert_uint_eq(context.bandwidth_hz, 20000000ULL);
+    ck_assert_uint_eq(context.rf_reference_frequency_hz, 10005000000ULL);
+    ck_assert_uint_eq(context.sample_rate_hz, 24576000ULL);
+
+    /* Unknown CIF0 bits shift the field layout, so parsing must refuse. */
+    write_be32(packet + 20, cif0 | (1U << 15U));
+    ck_assert(!vita49_rx_parse_context(packet, sizeof(packet), &context));
+}
+END_TEST
+
 START_TEST(pushes_ci16_into_waterfall)
 {
     waterfall_t wf;
@@ -106,6 +139,7 @@ Suite *receiver_c_suite(void)
     TCase *tc = tcase_create("core");
     tcase_add_test(tc, parses_simulator_vita49_if_data_packet);
     tcase_add_test(tc, rejects_malformed_vita49_packet_size);
+    tcase_add_test(tc, parses_simulator_vita49_context_packet);
     tcase_add_test(tc, pushes_ci16_into_waterfall);
     tcase_add_test(tc, calculates_history_stride_from_duration);
     suite_add_tcase(suite, tc);

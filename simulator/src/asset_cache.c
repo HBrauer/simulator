@@ -4,12 +4,16 @@
 #include "util.h"
 #include "wav_reader.h"
 
+#include <fcntl.h>
 #include <stdint.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
 #include <time.h>
+#include <unistd.h>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -311,10 +315,48 @@ bool asset_cache_load_limited(asset_cache_t *cache, const scenario_t *scenario, 
         } else {
             asset_bytes = (size_t)asset->sample_count * sizeof(*asset->samples);
         }
-        if (max_bytes > 0 && (asset_bytes > max_bytes || total_bytes > max_bytes - asset_bytes)) {
-            snprintf(error, error_size, "asset_cache_limit_exceeded");
-            asset_cache_free(cache);
-            return false;
+        const bool over_budget = max_bytes > 0 && (asset_bytes > max_bytes || total_bytes > max_bytes - asset_bytes);
+        if (over_budget) {
+            /* An IQ file that does not fit the remaining budget is memory-mapped instead of
+             * copied: the OS pages it in lazily and evicts under pressure, so replay works for
+             * recordings far larger than RAM. MAP_SHARED (read-only) lets several simulator
+             * instances replaying the same capture share the page-cache pages. Mapped bytes are
+             * deliberately not counted against the budget. Audio must stay on the RAM path (it
+             * is rewritten in place during normalisation/pre-render), so it still fails hard. */
+            if (asset->source_kind != SCENARIO_SOURCE_IQ_FILE || asset_bytes == 0) {
+                snprintf(error, error_size, "asset_cache_limit_exceeded");
+                asset_cache_free(cache);
+                return false;
+            }
+            const int fd = open(source->file, O_RDONLY);
+            if (fd < 0) {
+                snprintf(error, error_size, "asset_cache_open_failed");
+                asset_cache_free(cache);
+                return false;
+            }
+            struct stat st;
+            if (fstat(fd, &st) != 0 || (uint64_t)st.st_size != asset_bytes) {
+                close(fd);
+                snprintf(error, error_size, "asset_cache_size_mismatch");
+                asset_cache_free(cache);
+                return false;
+            }
+            void *map = mmap(NULL, asset_bytes, PROT_READ, MAP_SHARED, fd, 0);
+            close(fd);
+            if (map == MAP_FAILED) {
+                snprintf(error, error_size, "asset_cache_mmap_failed");
+                asset_cache_free(cache);
+                return false;
+            }
+            /* Kick off asynchronous readahead so the first loop pass is warm. Not
+             * MADV_SEQUENTIAL: access wraps around and re-reads the file every loop, so
+             * drop-behind would guarantee cold faults on each pass. */
+            (void)madvise(map, asset_bytes, MADV_WILLNEED);
+            asset->samples = map;
+            asset->mmapped = true;
+            asset->map_bytes = asset_bytes;
+            fprintf(stderr, "asset_cache: mmap %s (%zu bytes, over cache budget)\n", source->file, asset_bytes);
+            continue;
         }
         total_bytes += asset_bytes;
 
@@ -395,7 +437,13 @@ bool asset_cache_load_limited(asset_cache_t *cache, const scenario_t *scenario, 
 void asset_cache_free(asset_cache_t *cache)
 {
     for (size_t i = 0; i < cache->asset_count; i++) {
-        free(cache->assets[i].samples);
+        if (cache->assets[i].mmapped) {
+            munmap(cache->assets[i].samples, cache->assets[i].map_bytes);
+            cache->assets[i].mmapped = false;
+            cache->assets[i].map_bytes = 0;
+        } else {
+            free(cache->assets[i].samples);
+        }
         free(cache->assets[i].audio_samples);
         free(cache->assets[i].audio_hilbert);
         free(cache->assets[i].audio_integral);

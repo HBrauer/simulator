@@ -49,7 +49,7 @@ def _free_udp_port_block(count=5, start=30000):
     raise RuntimeError("could not find a free UDP port block")
 
 
-def _write_config(path, rest_port, udp_base, ddc0_center=10005000000, stream_block_samples=None):
+def _write_config(path, rest_port, udp_base, ch1_center=10005000000, stream_block_samples=None):
     stream_block_samples_line = ""
     if stream_block_samples is not None:
         stream_block_samples_line = f"stream_block_samples: {stream_block_samples}\n"
@@ -67,20 +67,12 @@ receivers:
     frequency_start_hz: 9960000000
     frequency_stop_hz: 10040000000
     scan_rate_hz_per_s: 100000000000
-    udp_80mhz_output_port: {udp_base}
-    ddc:
-      - ddc_id: 0
-        center_frequency_hz: {ddc0_center}
-        udp_output_port: {udp_base + 1}
-      - ddc_id: 1
-        center_frequency_hz: 10010000000
-        udp_output_port: {udp_base + 2}
-      - ddc_id: 2
-        center_frequency_hz: 9995000000
-        udp_output_port: {udp_base + 3}
-      - ddc_id: 3
-        center_frequency_hz: 10030000000
-        udp_output_port: {udp_base + 4}
+    channels:
+      - {{ channel_id: 0, track_tuner: true, bandwidth_hz: 80000000, udp_output_port: {udp_base} }}
+      - {{ channel_id: 1, center_frequency_hz: {ch1_center}, bandwidth_hz: 20000000, udp_output_port: {udp_base + 1} }}
+      - {{ channel_id: 2, center_frequency_hz: 10010000000, bandwidth_hz: 20000000, udp_output_port: {udp_base + 2} }}
+      - {{ channel_id: 3, center_frequency_hz: 9995000000, bandwidth_hz: 20000000, udp_output_port: {udp_base + 3} }}
+      - {{ channel_id: 4, center_frequency_hz: 10030000000, bandwidth_hz: 20000000, udp_output_port: {udp_base + 4} }}
 """,
         encoding="utf-8",
     )
@@ -100,20 +92,12 @@ receivers:
     frequency_start_hz: 9960000000
     frequency_stop_hz: 10040000000
     scan_rate_hz_per_s: 100000000000
-    udp_80mhz_output_port: {udp_base}
-    ddc:
-      - ddc_id: 0
-        center_frequency_hz: 10005000000
-        udp_output_port: {udp_base + 1}
-      - ddc_id: 1
-        center_frequency_hz: 10010000000
-        udp_output_port: {udp_base + 2}
-      - ddc_id: 2
-        center_frequency_hz: 9995000000
-        udp_output_port: {udp_base + 3}
-      - ddc_id: 3
-        center_frequency_hz: 10030000000
-        udp_output_port: {udp_base + 4}
+    channels:
+      - {{ channel_id: 0, track_tuner: true, bandwidth_hz: 80000000, udp_output_port: {udp_base} }}
+      - {{ channel_id: 1, center_frequency_hz: 10005000000, bandwidth_hz: 20000000, udp_output_port: {udp_base + 1} }}
+      - {{ channel_id: 2, center_frequency_hz: 10010000000, bandwidth_hz: 20000000, udp_output_port: {udp_base + 2} }}
+      - {{ channel_id: 3, center_frequency_hz: 9995000000, bandwidth_hz: 20000000, udp_output_port: {udp_base + 3} }}
+      - {{ channel_id: 4, center_frequency_hz: 10030000000, bandwidth_hz: 20000000, udp_output_port: {udp_base + 4} }}
   - receiver_id: 1
     rest_bind_host: "127.0.0.1"
     rest_port: {rest_port_1}
@@ -121,20 +105,12 @@ receivers:
     frequency_start_hz: 19960000000
     frequency_stop_hz: 20040000000
     scan_rate_hz_per_s: 100000000000
-    udp_80mhz_output_port: {udp_base + 5}
-    ddc:
-      - ddc_id: 0
-        center_frequency_hz: 20000000000
-        udp_output_port: {udp_base + 6}
-      - ddc_id: 1
-        center_frequency_hz: 20010000000
-        udp_output_port: {udp_base + 7}
-      - ddc_id: 2
-        center_frequency_hz: 19990000000
-        udp_output_port: {udp_base + 8}
-      - ddc_id: 3
-        center_frequency_hz: 20030000000
-        udp_output_port: {udp_base + 9}
+    channels:
+      - {{ channel_id: 0, track_tuner: true, bandwidth_hz: 80000000, udp_output_port: {udp_base + 5} }}
+      - {{ channel_id: 1, center_frequency_hz: 20000000000, bandwidth_hz: 20000000, udp_output_port: {udp_base + 6} }}
+      - {{ channel_id: 2, center_frequency_hz: 20010000000, bandwidth_hz: 20000000, udp_output_port: {udp_base + 7} }}
+      - {{ channel_id: 3, center_frequency_hz: 19990000000, bandwidth_hz: 20000000, udp_output_port: {udp_base + 8} }}
+      - {{ channel_id: 4, center_frequency_hz: 20030000000, bandwidth_hz: 20000000, udp_output_port: {udp_base + 9} }}
 """,
         encoding="utf-8",
     )
@@ -153,16 +129,16 @@ def _wait_json(url):
     raise AssertionError(f"endpoint did not become ready: {url}: {last_error}")
 
 
-def _request_json(url, payload):
+def _request_json(url, payload, method="POST"):
     data = json.dumps(payload).encode("utf-8")
-    request = Request(url, data=data, method="POST", headers={"Content-Type": "application/json"})
+    request = Request(url, data=data, method=method, headers={"Content-Type": "application/json"})
     with urlopen(request, timeout=2.0) as response:
         return response.status, json.loads(response.read().decode("utf-8"))
 
 
-def _request_json_error(url, payload):
+def _request_json_error(url, payload, method="POST"):
     try:
-        _request_json(url, payload)
+        _request_json(url, payload, method=method)
     except HTTPError as exc:
         return exc.code, json.loads(exc.read().decode("utf-8"))
     raise AssertionError("request unexpectedly succeeded")
@@ -191,15 +167,35 @@ def _assert_receiver_status_shape(status):
             "frequency_start_hz",
             "frequency_stop_hz",
             "center_frequency_hz",
+            "frontend_bandwidth_hz",
             "scan_rate_hz_per_s",
             "output_scale",
             "rf_reference_power_dbm",
-            "stream_enabled",
-            "bandwidth_hz",
             "udp_output_host",
             "udp_multicast_interface",
-            "udp_outputs",
-            "streams_active",
+            "channel_count",
+            "config_epoch",
+        },
+    )
+
+
+def _assert_channel_shape(channel):
+    _assert_keys(
+        channel,
+        {
+            "channel_id",
+            "track_tuner",
+            "center_frequency_hz",
+            "configured_center_frequency_hz",
+            "bandwidth_hz",
+            "sample_rate_hz",
+            "profile",
+            "in_frontend_window",
+            "stream_enabled",
+            "active",
+            "udp_port",
+            "output_scale",
+            "rf_reference_power_dbm",
         },
     )
 
@@ -255,6 +251,7 @@ def _assert_metrics_shape(metrics):
                 "worker_errors",
             },
         )
+        assert stream["stream_type"] == "channel"
 
 
 def _assert_stream_status_shape(streams):
@@ -268,6 +265,12 @@ def _assert_stream_status_shape(streams):
                 "stream_id",
                 "udp_port",
                 "sample_rate_hz",
+                "bandwidth_hz",
+                "center_frequency_hz",
+                "track_tuner",
+                "output_scale",
+                "rf_reference_power_dbm",
+                "in_frontend_window",
                 "enabled",
                 "active",
                 "samples_rendered",
@@ -283,21 +286,20 @@ def _assert_stream_status_shape(streams):
                 "ringbuffer_underruns",
             },
         )
-        if stream["stream_type"] == "ddc":
-            _assert_keys(stream, {"center_frequency_hz", "output_scale", "rf_reference_power_dbm", "in_receiver_window"})
+        assert stream["stream_type"] == "channel"
 
 
-def _wait_stream_state(rest_port, stream_type, stream_id, enabled):
+def _wait_stream_state(rest_port, stream_id, enabled):
     for _ in range(50):
         streams = _wait_json(f"http://127.0.0.1:{rest_port}/api/v1/streams")
         for stream in streams["streams"]:
-            if stream["stream_type"] == stream_type and stream["stream_id"] == stream_id and stream["enabled"] is enabled and stream["active"] is enabled:
+            if stream["stream_id"] == stream_id and stream["enabled"] is enabled and stream["active"] is enabled:
                 return stream
         time.sleep(0.02)
-    raise AssertionError(f"stream {stream_type}/{stream_id} did not reach enabled={enabled}")
+    raise AssertionError(f"channel {stream_id} did not reach enabled={enabled}")
 
 
-def _parse_vita49_if_data(packet):
+def _parse_vita49_packet(packet):
     assert len(packet) >= 20
     header = int.from_bytes(packet[0:4], "big")
     packet_words = header & 0xFFFF
@@ -315,12 +317,71 @@ def _parse_vita49_if_data(packet):
     }
 
 
+def _parse_vita49_context(packet):
+    """IF context packet: CIF0 word then bandwidth, RF reference, sample rate as 64-bit
+    fixed point (radix point after bit 20)."""
+    vita = _parse_vita49_packet(packet)
+    assert vita["packet_type"] == 4
+    cif0 = int.from_bytes(packet[20:24], "big")
+    vita["cif0_changed"] = bool(cif0 >> 31)
+    vita["bandwidth_hz"] = int.from_bytes(packet[24:32], "big") >> 20
+    vita["rf_reference_frequency_hz"] = int.from_bytes(packet[32:40], "big") >> 20
+    vita["sample_rate_hz"] = int.from_bytes(packet[40:48], "big") >> 20
+    return vita
+
+
+def _recv_vita49(sock, packet_type):
+    """Receive until a packet of the requested VITA type arrives (context packets are
+    interleaved with IF data on every stream)."""
+    deadline = time.time() + 5.0
+    while time.time() < deadline:
+        packet, addr = sock.recvfrom(65536)
+        vita = _parse_vita49_packet(packet)
+        if vita["packet_type"] == packet_type:
+            return packet, vita, addr
+    raise AssertionError(f"no VITA packet of type {packet_type} received")
+
+
+def _recv_if_data(sock):
+    return _recv_vita49(sock, 1)
+
+
 def _ci16_payload_has_nonzero(payload):
     assert len(payload) % 4 == 0
     for offset in range(0, len(payload), 2):
         if int.from_bytes(payload[offset:offset + 2], "little", signed=True) != 0:
             return True
     return False
+
+
+def _terminate(proc):
+    proc.terminate()
+    try:
+        proc.wait(timeout=5.0)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=5.0)
+    stderr = proc.stderr.read() if proc.stderr else ""
+    assert proc.returncode in (0, -15), stderr
+
+
+def _start_sim(config, extra_args=()):
+    return subprocess.Popen(
+        [
+            str(SIM),
+            "--config",
+            str(config),
+            "--scenario",
+            "simulator/scenarios/test_scenario_001.json",
+            "--scenario-time-ns",
+            "450000",
+            *extra_args,
+        ],
+        cwd=ROOT,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
 
 
 def test_runtime_rest_and_udp_stream(tmp_path):
@@ -333,23 +394,7 @@ def test_runtime_rest_and_udp_stream(tmp_path):
     udp_sock.bind(("127.0.0.1", udp_port))
     udp_sock.settimeout(5.0)
 
-    proc = subprocess.Popen(
-        [
-            str(SIM),
-            "--config",
-            str(config),
-            "--scenario",
-            "simulator/scenarios/test_scenario_001.json",
-            "--scenario-time-ns",
-            "450000",
-            "--stream-block-samples",
-            "256",
-        ],
-        cwd=ROOT,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
+    proc = _start_sim(config, ("--stream-block-samples", "256"))
     try:
         health = _wait_json(f"http://127.0.0.1:{rest_port}/api/v1/health")
         assert health["status"] == "ok"
@@ -357,14 +402,13 @@ def test_runtime_rest_and_udp_stream(tmp_path):
         _assert_receiver_status_shape(status)
         assert status["receiver_id"] == 0
         assert status["center_frequency_hz"] == 10000000000
+        assert status["channel_count"] == 5
         scenario = _wait_json(f"http://127.0.0.1:{rest_port}/api/v1/scenario/status")
         _assert_keys(scenario, {"scenario_id", "loaded", "scenario_time_ns", "source_count", "signal_count"})
         assert scenario["scenario_time_ns"] == 450000
 
-        packet, addr = udp_sock.recvfrom(65536)
-        vita = _parse_vita49_if_data(packet)
+        packet, vita, addr = _recv_if_data(udp_sock)
         assert addr[0] == "127.0.0.1"
-        assert vita["packet_type"] == 1
         assert vita["stream_id"] == 0x53440000
         assert len(vita["payload"]) == 256 * 4
         assert _ci16_payload_has_nonzero(vita["payload"])
@@ -375,80 +419,55 @@ def test_runtime_rest_and_udp_stream(tmp_path):
         assert metrics["samples_sent"] >= 256
         assert metrics["samples_sent"] == metrics["samples_rendered"]
         assert metrics["actual_sample_rate_sps"] >= 0
-        assert metrics["samples_missed"] >= 0
-        assert metrics["samples_late"] >= 0
-        assert metrics["samples_send_dropped"] >= 0
         assert metrics["udp_packets_sent"] >= 1
         assert metrics["udp_bytes_sent"] >= 20 + 256 * 4
         assert metrics["udp_send_errors"] == 0
-        assert metrics["udp_send_would_block"] >= 0
-        assert metrics["udp_send_no_buffer"] >= 0
-        assert metrics["udp_send_other_errors"] >= 0
-        assert "ringbuffer_overruns" in metrics
-        assert "ringbuffer_underruns" in metrics
-        assert "samples_dropped" in metrics
-        assert len(metrics["streams"]) == 5
-        assert metrics["streams"][0]["stream_type"] == "iq_80mhz"
-        assert metrics["streams"][0]["stream_id"] == -1
+        assert {stream["stream_id"] for stream in metrics["streams"]} == {0, 1, 2, 3, 4}
         assert metrics["streams"][0]["sample_rate_hz"] == 98304000
+        assert metrics["streams"][1]["sample_rate_hz"] == 24576000
         assert metrics["streams"][0]["active"] is True
         assert metrics["streams"][0]["samples_sent"] == metrics["streams"][0]["samples_rendered"]
-        assert metrics["streams"][0]["actual_sample_rate_sps"] >= 0
-        assert metrics["streams"][0]["samples_missed"] >= 0
-        assert metrics["streams"][0]["samples_late"] >= 0
-        assert metrics["streams"][0]["samples_send_dropped"] >= 0
-        assert metrics["streams"][0]["udp_packets_sent"] >= 1
-        assert metrics["streams"][0]["udp_send_would_block"] >= 0
-        assert metrics["streams"][0]["udp_send_no_buffer"] >= 0
-        assert metrics["streams"][0]["udp_send_other_errors"] >= 0
-        assert "ringbuffer_overruns" in metrics["streams"][0]
-        assert "ringbuffer_underruns" in metrics["streams"][0]
-        assert "samples_dropped" in metrics["streams"][0]
-        assert {stream["stream_id"] for stream in metrics["streams"][1:]} == {0, 1, 2, 3}
         streams = _wait_json(f"http://127.0.0.1:{rest_port}/api/v1/streams")
         _assert_stream_status_shape(streams)
         assert streams["receiver_id"] == 0
-        assert len(streams["streams"]) == 5
-        assert streams["streams"][0]["stream_type"] == "iq_80mhz"
         assert streams["streams"][0]["udp_port"] == udp_port
+        assert streams["streams"][0]["track_tuner"] is True
         assert streams["streams"][0]["enabled"] is True
         assert streams["streams"][0]["active"] is True
-        ddc_streams = [stream for stream in streams["streams"] if stream["stream_type"] == "ddc"]
-        assert {stream["stream_id"] for stream in ddc_streams} == {0, 1, 2, 3}
-        assert all("in_receiver_window" in stream for stream in ddc_streams)
-        assert all(stream["enabled"] is True for stream in ddc_streams)
+        assert all(stream["in_frontend_window"] for stream in streams["streams"])
+        assert all(stream["enabled"] for stream in streams["streams"])
 
         code, stream_update = _request_json(
-            f"http://127.0.0.1:{rest_port}/api/v1/streams/80mhz",
+            f"http://127.0.0.1:{rest_port}/api/v1/channels/0/stream",
             {"enabled": False},
         )
         assert code == 200
         assert stream_update["enabled"] is False
-        _wait_stream_state(rest_port, "iq_80mhz", -1, False)
+        _wait_stream_state(rest_port, 0, False)
         code, stream_update = _request_json(
-            f"http://127.0.0.1:{rest_port}/api/v1/streams/80mhz",
+            f"http://127.0.0.1:{rest_port}/api/v1/channels/0/stream",
             {"enabled": True},
         )
         assert code == 200
         assert stream_update["enabled"] is True
-        _wait_stream_state(rest_port, "iq_80mhz", -1, True)
+        _wait_stream_state(rest_port, 0, True)
 
         code, stream_update = _request_json(
-            f"http://127.0.0.1:{rest_port}/api/v1/ddc/0/stream",
+            f"http://127.0.0.1:{rest_port}/api/v1/channels/1/stream",
             {"enabled": False},
         )
         assert code == 200
-        assert stream_update["stream_type"] == "ddc"
-        assert stream_update["stream_id"] == 0
+        assert stream_update["stream_type"] == "channel"
+        assert stream_update["stream_id"] == 1
         assert stream_update["enabled"] is False
-        _wait_stream_state(rest_port, "ddc", 0, False)
+        _wait_stream_state(rest_port, 1, False)
         code, stream_update = _request_json(
-            f"http://127.0.0.1:{rest_port}/api/v1/ddc/0/stream",
+            f"http://127.0.0.1:{rest_port}/api/v1/channels/1/stream",
             {"enabled": True},
         )
         assert code == 200
         assert stream_update["enabled"] is True
-        _wait_stream_state(rest_port, "ddc", 0, True)
+        _wait_stream_state(rest_port, 1, True)
 
         expected = subprocess.check_output(
             [
@@ -493,7 +512,7 @@ def test_runtime_rest_and_udp_stream(tmp_path):
         )
         assert code == 200
         assert scaled["output_scale"] == 0.5
-        assert all(ddc["output_scale"] == 0.5 for ddc in scaled["ddc"])
+        assert all(channel["output_scale"] == 0.5 for channel in scaled["channels"])
 
         code, error = _request_json_error(
             f"http://127.0.0.1:{rest_port}/api/v1/frequency-range",
@@ -513,57 +532,212 @@ def test_runtime_rest_and_udp_stream(tmp_path):
         assert code == 200
         assert updated["effective_mode"] == "scan"
         assert updated["center_frequency_hz"] == 10005000000
+    finally:
+        _terminate(proc)
+        udp_sock.close()
 
+
+def test_capabilities_and_channel_configuration(tmp_path):
+    rest_port = _free_tcp_port()
+    udp_port = _free_udp_port_block()
+    config = tmp_path / "runtime_channels.yaml"
+    _write_config(config, rest_port, udp_port, stream_block_samples=256)
+
+    proc = _start_sim(config)
+    try:
+        capabilities = _wait_json(f"http://127.0.0.1:{rest_port}/api/v1/capabilities")
+        _assert_keys(
+            capabilities,
+            {
+                "receiver_id",
+                "frequency_min_hz",
+                "frequency_max_hz",
+                "frontend_bandwidth_hz",
+                "tuner",
+                "channel_count",
+                "profiles",
+                "iq_format",
+                "udp_output_host",
+                "config_epoch",
+            },
+        )
+        assert capabilities["receiver_id"] == 0
+        assert capabilities["frequency_max_hz"] == 40000000000
+        assert capabilities["frontend_bandwidth_hz"] == 80000000
+        assert capabilities["channel_count"] == 5
+        assert capabilities["iq_format"] == "vita49_2_ci16"
+        assert capabilities["tuner"]["mode"] == "fixed"
+        profile_bandwidths = {profile["bandwidth_hz"] for profile in capabilities["profiles"]}
+        assert {80000000, 20000000, 5000000} <= profile_bandwidths
+        for profile in capabilities["profiles"]:
+            assert profile["sample_rate_hz"] >= profile["bandwidth_hz"]
+        epoch_0 = capabilities["config_epoch"]
+
+        channels = _wait_json(f"http://127.0.0.1:{rest_port}/api/v1/channels")
+        assert len(channels) == 5
+        for channel in channels:
+            _assert_channel_shape(channel)
+        assert channels[0]["track_tuner"] is True
+        assert channels[0]["bandwidth_hz"] == 80000000
+        assert channels[0]["udp_port"] == udp_port
+        assert channels[1]["center_frequency_hz"] == 10005000000
+
+        channel_1 = _wait_json(f"http://127.0.0.1:{rest_port}/api/v1/channels/1")
+        _assert_channel_shape(channel_1)
+        assert channel_1["channel_id"] == 1
+
+        # Retune + narrow the channel; the sample rate must follow the profile.
+        code, updated = _request_json(
+            f"http://127.0.0.1:{rest_port}/api/v1/channels/1",
+            {"center_frequency_hz": 10012000000, "bandwidth_hz": 5000000},
+            method="PUT",
+        )
+        assert code == 200
+        _assert_channel_shape(updated)
+        assert updated["center_frequency_hz"] == 10012000000
+        assert updated["bandwidth_hz"] == 5000000
+        assert updated["sample_rate_hz"] == 6144000
+        assert updated["in_frontend_window"] is True
+
+        capabilities = _wait_json(f"http://127.0.0.1:{rest_port}/api/v1/capabilities")
+        assert capabilities["config_epoch"] > epoch_0
+
+        # Error paths.
         code, error = _request_json_error(
-            f"http://127.0.0.1:{rest_port}/api/v1/ddc/99/configure",
+            f"http://127.0.0.1:{rest_port}/api/v1/channels/99",
             {"center_frequency_hz": 10005000000},
+            method="PUT",
         )
         assert code == 404
-        assert error["error"]["code"] == "invalid_ddc_id"
+        assert error["error"]["code"] == "invalid_channel_id"
 
         code, error = _request_json_error(
-            f"http://127.0.0.1:{rest_port}/api/v1/ddc/0/configure",
+            f"http://127.0.0.1:{rest_port}/api/v1/channels/1",
             {"center_frequency_hz": "bad"},
+            method="PUT",
         )
         assert code == 400
         assert error["error"]["code"] == "invalid_request"
 
         code, error = _request_json_error(
-            f"http://127.0.0.1:{rest_port}/api/v1/ddc/0/configure",
+            f"http://127.0.0.1:{rest_port}/api/v1/channels/1",
             {"output_scale": -1.0},
+            method="PUT",
         )
         assert code == 400
         assert error["error"]["code"] == "invalid_output_scale"
 
-        code, ddc_updated = _request_json(
-            f"http://127.0.0.1:{rest_port}/api/v1/ddc/0/configure",
-            {"center_frequency_hz": 10005000001, "output_scale": 0.25},
+        code, error = _request_json_error(
+            f"http://127.0.0.1:{rest_port}/api/v1/channels/1",
+            {"bandwidth_hz": 12345},
+            method="PUT",
         )
-        assert code == 200
-        assert ddc_updated["status"] == "ok"
-        ddc_status = _wait_json(f"http://127.0.0.1:{rest_port}/api/v1/ddc/0/status")
-        assert ddc_status["center_frequency_hz"] == 10005000001
-        assert ddc_status["output_scale"] == 0.25
-        assert ddc_status["in_receiver_window"] is True
+        assert code == 400
+        assert error["error"]["code"] == "unsupported_bandwidth"
+        assert "80000000" in error["error"]["message"]
 
-        code, ddc_updated = _request_json(
-            f"http://127.0.0.1:{rest_port}/api/v1/ddc/0/configure",
-            {"center_frequency_hz": 10060000000},
+        # A tuner-tracking channel rejects a direct retune.
+        code, error = _request_json_error(
+            f"http://127.0.0.1:{rest_port}/api/v1/channels/0",
+            {"center_frequency_hz": 10005000000},
+            method="PUT",
+        )
+        assert code == 400
+        assert error["error"]["code"] == "invalid_request"
+
+        # Unless it is detached from the tuner in the same request.
+        code, updated = _request_json(
+            f"http://127.0.0.1:{rest_port}/api/v1/channels/0",
+            {"track_tuner": False, "center_frequency_hz": 10001000000, "bandwidth_hz": 20000000},
+            method="PUT",
         )
         assert code == 200
-        assert ddc_updated["status"] == "ok"
-        ddc_status = _wait_json(f"http://127.0.0.1:{rest_port}/api/v1/ddc/0/status")
-        assert ddc_status["in_receiver_window"] is False
+        assert updated["track_tuner"] is False
+        assert updated["center_frequency_hz"] == 10001000000
+
+        # Retune outside the front-end window: accepted, but flagged out-of-window.
+        code, updated = _request_json(
+            f"http://127.0.0.1:{rest_port}/api/v1/channels/1",
+            {"center_frequency_hz": 10060000000},
+            method="PUT",
+        )
+        assert code == 200
+        assert updated["in_frontend_window"] is False
     finally:
-        proc.terminate()
-        try:
-            proc.wait(timeout=5.0)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait(timeout=5.0)
+        _terminate(proc)
+
+
+def test_channel_bandwidth_change_switches_stream_rate(tmp_path):
+    rest_port = _free_tcp_port()
+    udp_port = _free_udp_port_block()
+    config = tmp_path / "runtime_rate_change.yaml"
+    _write_config(config, rest_port, udp_port, stream_block_samples=256)
+
+    ch1_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    ch1_sock.bind(("127.0.0.1", udp_port + 1))
+    ch1_sock.settimeout(5.0)
+
+    proc = _start_sim(config)
+    try:
+        _wait_json(f"http://127.0.0.1:{rest_port}/api/v1/health")
+        _recv_if_data(ch1_sock)  # channel is streaming at 24.576 MS/s
+
+        code, updated = _request_json(
+            f"http://127.0.0.1:{rest_port}/api/v1/channels/1",
+            {"bandwidth_hz": 5000000},
+            method="PUT",
+        )
+        assert code == 200
+        assert updated["sample_rate_hz"] == 6144000
+
+        # The stream announces the new configuration in-band via a context packet.
+        deadline = time.time() + 5.0
+        while True:
+            assert time.time() < deadline, "no context packet with the new rate"
+            packet, vita, _ = _recv_vita49(ch1_sock, 4)
+            context = _parse_vita49_context(packet)
+            if context["sample_rate_hz"] == 6144000:
+                assert context["bandwidth_hz"] == 5000000
+                break
+
+        # The REST metrics follow, and the paced rate drops measurably.
+        metrics = _wait_json(f"http://127.0.0.1:{rest_port}/api/v1/metrics")
+        assert metrics["streams"][1]["sample_rate_hz"] == 6144000
+        start = _wait_json(f"http://127.0.0.1:{rest_port}/api/v1/metrics")["streams"][1]["samples_sent"]
+        time.sleep(1.5)
+        end = _wait_json(f"http://127.0.0.1:{rest_port}/api/v1/metrics")["streams"][1]["samples_sent"]
+        measured = (end - start) / 1.5
+        assert 3000000 < measured < 12000000, f"measured {measured} sps after switch to 6.144 MS/s"
+
+        metrics = _wait_json(f"http://127.0.0.1:{rest_port}/api/v1/metrics")
+        assert metrics["streams"][1]["worker_errors"] == 0
+    finally:
+        _terminate(proc)
+        ch1_sock.close()
+
+
+def test_context_packets_announce_stream_configuration(tmp_path):
+    rest_port = _free_tcp_port()
+    udp_port = _free_udp_port_block()
+    config = tmp_path / "runtime_context.yaml"
+    _write_config(config, rest_port, udp_port, stream_block_samples=256)
+
+    udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    udp_sock.bind(("127.0.0.1", udp_port))
+    udp_sock.settimeout(5.0)
+
+    proc = _start_sim(config)
+    try:
+        _wait_json(f"http://127.0.0.1:{rest_port}/api/v1/health")
+        packet, vita, _ = _recv_vita49(udp_sock, 4)
+        context = _parse_vita49_context(packet)
+        assert context["stream_id"] == 0x53440000
+        assert context["bandwidth_hz"] == 80000000
+        assert context["sample_rate_hz"] == 98304000
+        assert context["rf_reference_frequency_hz"] == 10000000000
+    finally:
+        _terminate(proc)
         udp_sock.close()
-        stderr = proc.stderr.read() if proc.stderr else ""
-        assert proc.returncode in (0, -15), stderr
 
 
 def test_vita49_udp_wraps_and_keeps_raw_payload(tmp_path):
@@ -576,28 +750,12 @@ def test_vita49_udp_wraps_and_keeps_raw_payload(tmp_path):
     udp_sock.bind(("127.0.0.1", udp_port))
     udp_sock.settimeout(5.0)
 
-    proc = subprocess.Popen(
-        [
-            str(SIM),
-            "--config",
-            str(config),
-            "--scenario",
-            "simulator/scenarios/test_scenario_001.json",
-            "--scenario-time-ns",
-            "450000",
-        ],
-        cwd=ROOT,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
+    proc = _start_sim(config)
     try:
         health = _wait_json(f"http://127.0.0.1:{rest_port}/api/v1/health")
         assert health["status"] == "ok"
-        packet, addr = udp_sock.recvfrom(65536)
-        vita = _parse_vita49_if_data(packet)
+        packet, vita, addr = _recv_if_data(udp_sock)
         assert addr[0] == "127.0.0.1"
-        assert vita["packet_type"] == 1
         assert vita["tsi"] == 1
         assert vita["tsf"] == 2
         assert vita["sequence"] == 0
@@ -624,15 +782,8 @@ def test_vita49_udp_wraps_and_keeps_raw_payload(tmp_path):
         )
         assert payload == expected
     finally:
-        proc.terminate()
-        try:
-            proc.wait(timeout=5.0)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait(timeout=5.0)
+        _terminate(proc)
         udp_sock.close()
-        stderr = proc.stderr.read() if proc.stderr else ""
-        assert proc.returncode in (0, -15), stderr
 
 
 def test_stream_block_samples_config_controls_udp_packet_size(tmp_path):
@@ -645,84 +796,40 @@ def test_stream_block_samples_config_controls_udp_packet_size(tmp_path):
     udp_sock.bind(("127.0.0.1", udp_port))
     udp_sock.settimeout(5.0)
 
-    proc = subprocess.Popen(
-        [
-            str(SIM),
-            "--config",
-            str(config),
-            "--scenario",
-            "simulator/scenarios/test_scenario_001.json",
-            "--scenario-time-ns",
-            "450000",
-        ],
-        cwd=ROOT,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
+    proc = _start_sim(config)
     try:
         health = _wait_json(f"http://127.0.0.1:{rest_port}/api/v1/health")
         assert health["status"] == "ok"
-        packet, addr = udp_sock.recvfrom(65536)
+        packet, vita, addr = _recv_if_data(udp_sock)
         assert addr[0] == "127.0.0.1"
-        vita = _parse_vita49_if_data(packet)
         assert len(vita["payload"]) == 128 * 4
     finally:
-        proc.terminate()
-        try:
-            proc.wait(timeout=5.0)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait(timeout=5.0)
+        _terminate(proc)
         udp_sock.close()
-        stderr = proc.stderr.read() if proc.stderr else ""
-        assert proc.returncode in (0, -15), stderr
 
 
-def test_ddc_4096_sample_vita49_packet_contains_signal(tmp_path):
+def test_channel_4096_sample_vita49_packet_contains_signal(tmp_path):
     rest_port = _free_tcp_port()
     udp_port = _free_udp_port_block()
-    config = tmp_path / "runtime_ddc_4096_signal.yaml"
+    config = tmp_path / "runtime_channel_4096_signal.yaml"
     _write_config(config, rest_port, udp_port, stream_block_samples=4096)
 
-    ddc_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    ddc_sock.bind(("127.0.0.1", udp_port + 1))
-    ddc_sock.settimeout(5.0)
+    ch1_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    ch1_sock.bind(("127.0.0.1", udp_port + 1))
+    ch1_sock.settimeout(5.0)
 
-    proc = subprocess.Popen(
-        [
-            str(SIM),
-            "--config",
-            str(config),
-            "--scenario",
-            "simulator/scenarios/test_scenario_001.json",
-            "--scenario-time-ns",
-            "450000",
-        ],
-        cwd=ROOT,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
+    proc = _start_sim(config)
     try:
         health = _wait_json(f"http://127.0.0.1:{rest_port}/api/v1/health")
         assert health["status"] == "ok"
-        packet, addr = ddc_sock.recvfrom(65536)
+        packet, vita, addr = _recv_if_data(ch1_sock)
         assert addr[0] == "127.0.0.1"
-        vita = _parse_vita49_if_data(packet)
         assert vita["stream_id"] == 0x53440001
         assert len(vita["payload"]) == 4096 * 4
         assert _ci16_payload_has_nonzero(vita["payload"])
     finally:
-        proc.terminate()
-        try:
-            proc.wait(timeout=5.0)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait(timeout=5.0)
-        ddc_sock.close()
-        stderr = proc.stderr.read() if proc.stderr else ""
-        assert proc.returncode in (0, -15), stderr
+        _terminate(proc)
+        ch1_sock.close()
 
 
 def test_concurrent_rest_updates_and_status_reads(tmp_path):
@@ -731,23 +838,7 @@ def test_concurrent_rest_updates_and_status_reads(tmp_path):
     config = tmp_path / "runtime_concurrent.yaml"
     _write_config(config, rest_port, udp_port)
 
-    proc = subprocess.Popen(
-        [
-            str(SIM),
-            "--config",
-            str(config),
-            "--scenario",
-            "simulator/scenarios/test_scenario_001.json",
-            "--scenario-time-ns",
-            "450000",
-            "--stream-block-samples",
-            "128",
-        ],
-        cwd=ROOT,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
+    proc = _start_sim(config, ("--stream-block-samples", "128"))
     errors = []
 
     def update_output_scale():
@@ -763,18 +854,19 @@ def test_concurrent_rest_updates_and_status_reads(tmp_path):
         except Exception as exc:  # pragma: no cover - diagnostic path
             errors.append(exc)
 
-    def update_ddc():
+    def update_channel():
         try:
             for index in range(20):
                 code, body = _request_json(
-                    f"http://127.0.0.1:{rest_port}/api/v1/ddc/0/configure",
+                    f"http://127.0.0.1:{rest_port}/api/v1/channels/1",
                     {
                         "center_frequency_hz": 10005000000 + index,
                         "output_scale": 0.5,
                     },
+                    method="PUT",
                 )
                 assert code == 200
-                assert body["status"] == "ok"
+                assert body["channel_id"] == 1
         except Exception as exc:  # pragma: no cover - diagnostic path
             errors.append(exc)
 
@@ -792,7 +884,7 @@ def test_concurrent_rest_updates_and_status_reads(tmp_path):
         _wait_json(f"http://127.0.0.1:{rest_port}/api/v1/health")
         threads = [
             threading.Thread(target=update_output_scale),
-            threading.Thread(target=update_ddc),
+            threading.Thread(target=update_channel),
             threading.Thread(target=read_status),
         ]
         for thread in threads:
@@ -802,61 +894,30 @@ def test_concurrent_rest_updates_and_status_reads(tmp_path):
         assert not errors
         assert all(not thread.is_alive() for thread in threads)
     finally:
-        proc.terminate()
-        try:
-            proc.wait(timeout=5.0)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait(timeout=5.0)
-        stderr = proc.stderr.read() if proc.stderr else ""
-        assert proc.returncode in (0, -15), stderr
+        _terminate(proc)
 
 
-def test_ddc_udp_stream_is_empty_when_outside_receiver_window(tmp_path):
+def test_channel_udp_stream_is_empty_when_outside_frontend_window(tmp_path):
     rest_port = _free_tcp_port()
     udp_port = _free_udp_port_block()
-    config = tmp_path / "runtime_ddc_outside.yaml"
-    _write_config(config, rest_port, udp_port, ddc0_center=10060000000)
+    config = tmp_path / "runtime_channel_outside.yaml"
+    _write_config(config, rest_port, udp_port, ch1_center=10060000000)
 
-    ddc_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    ddc_sock.bind(("127.0.0.1", udp_port + 1))
-    ddc_sock.settimeout(5.0)
+    ch1_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    ch1_sock.bind(("127.0.0.1", udp_port + 1))
+    ch1_sock.settimeout(5.0)
 
-    proc = subprocess.Popen(
-        [
-            str(SIM),
-            "--config",
-            str(config),
-            "--scenario",
-            "simulator/scenarios/test_scenario_001.json",
-            "--scenario-time-ns",
-            "450000",
-            "--stream-block-samples",
-            "256",
-        ],
-        cwd=ROOT,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
+    proc = _start_sim(config, ("--stream-block-samples", "256"))
     try:
-        ddc_status = _wait_json(f"http://127.0.0.1:{rest_port}/api/v1/ddc/0/status")
-        assert ddc_status["in_receiver_window"] is False
-        packet, addr = ddc_sock.recvfrom(65536)
-        vita = _parse_vita49_if_data(packet)
+        channel = _wait_json(f"http://127.0.0.1:{rest_port}/api/v1/channels/1")
+        assert channel["in_frontend_window"] is False
+        packet, vita, addr = _recv_if_data(ch1_sock)
         assert addr[0] == "127.0.0.1"
         assert len(vita["payload"]) == 256 * 4
         assert all(byte == 0 for byte in vita["payload"])
     finally:
-        proc.terminate()
-        try:
-            proc.wait(timeout=5.0)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait(timeout=5.0)
-        ddc_sock.close()
-        stderr = proc.stderr.read() if proc.stderr else ""
-        assert proc.returncode in (0, -15), stderr
+        _terminate(proc)
+        ch1_sock.close()
 
 
 def test_two_receivers_expose_independent_rest_apis(tmp_path):
@@ -866,23 +927,7 @@ def test_two_receivers_expose_independent_rest_apis(tmp_path):
     config = tmp_path / "runtime_two_receivers.yaml"
     _write_two_receiver_config(config, rest_port_0, rest_port_1, udp_base)
 
-    proc = subprocess.Popen(
-        [
-            str(SIM),
-            "--config",
-            str(config),
-            "--scenario",
-            "simulator/scenarios/test_scenario_001.json",
-            "--scenario-time-ns",
-            "450000",
-            "--stream-block-samples",
-            "128",
-        ],
-        cwd=ROOT,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
+    proc = _start_sim(config, ("--stream-block-samples", "128"))
     try:
         status_0 = _wait_json(f"http://127.0.0.1:{rest_port_0}/api/v1/status")
         status_1 = _wait_json(f"http://127.0.0.1:{rest_port_1}/api/v1/status")
@@ -891,14 +936,7 @@ def test_two_receivers_expose_independent_rest_apis(tmp_path):
         assert status_0["center_frequency_hz"] == 10000000000
         assert status_1["center_frequency_hz"] == 20000000000
     finally:
-        proc.terminate()
-        try:
-            proc.wait(timeout=5.0)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait(timeout=5.0)
-        stderr = proc.stderr.read() if proc.stderr else ""
-        assert proc.returncode in (0, -15), stderr
+        _terminate(proc)
 
 
 def test_two_instances_emit_identical_udp_for_same_scenario_time(tmp_path):
@@ -919,62 +957,20 @@ def test_two_instances_emit_identical_udp_for_same_scenario_time(tmp_path):
     sock_2.settimeout(5.0)
 
     procs = [
-        subprocess.Popen(
-            [
-                str(SIM),
-                "--config",
-                str(config_1),
-                "--scenario",
-                "simulator/scenarios/test_scenario_001.json",
-                "--scenario-time-ns",
-                "450000",
-                "--stream-block-samples",
-                "256",
-            ],
-            cwd=ROOT,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        ),
-        subprocess.Popen(
-            [
-                str(SIM),
-                "--config",
-                str(config_2),
-                "--scenario",
-                "simulator/scenarios/test_scenario_001.json",
-                "--scenario-time-ns",
-                "450000",
-                "--stream-block-samples",
-                "256",
-            ],
-            cwd=ROOT,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        ),
+        _start_sim(config_1, ("--stream-block-samples", "256")),
+        _start_sim(config_2, ("--stream-block-samples", "256")),
     ]
     try:
         status_1 = _wait_json(f"http://127.0.0.1:{rest_port_1}/api/v1/status")
         status_2 = _wait_json(f"http://127.0.0.1:{rest_port_2}/api/v1/status")
         assert status_1["receiver_id"] == status_2["receiver_id"] == 0
-        packet_1, _ = sock_1.recvfrom(65536)
-        packet_2, _ = sock_2.recvfrom(65536)
-        vita_1 = _parse_vita49_if_data(packet_1)
-        vita_2 = _parse_vita49_if_data(packet_2)
+        packet_1, vita_1, _ = _recv_if_data(sock_1)
+        packet_2, vita_2, _ = _recv_if_data(sock_2)
         assert len(vita_1["payload"]) == len(vita_2["payload"]) == 256 * 4
         assert packet_1 == packet_2
     finally:
         for proc in procs:
-            proc.terminate()
-        for proc in procs:
-            try:
-                proc.wait(timeout=5.0)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait(timeout=5.0)
-            stderr = proc.stderr.read() if proc.stderr else ""
-            assert proc.returncode in (0, -15), stderr
+            _terminate(proc)
         sock_1.close()
         sock_2.close()
 
@@ -985,21 +981,7 @@ def test_runtime_soak_keeps_streaming_without_send_errors(tmp_path):
     config = tmp_path / "runtime_soak.yaml"
     _write_config(config, rest_port, udp_port, stream_block_samples=512)
 
-    proc = subprocess.Popen(
-        [
-            str(SIM),
-            "--config",
-            str(config),
-            "--scenario",
-            "simulator/scenarios/test_scenario_001.json",
-            "--scenario-time-ns",
-            "450000",
-        ],
-        cwd=ROOT,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
+    proc = _start_sim(config)
     try:
         start_metrics = _wait_json(f"http://127.0.0.1:{rest_port}/api/v1/metrics")
         time.sleep(2.0)
@@ -1013,11 +995,4 @@ def test_runtime_soak_keeps_streaming_without_send_errors(tmp_path):
         assert end_metrics["udp_send_errors"] == 0
         assert all(stream["active"] is True for stream in end_metrics["streams"])
     finally:
-        proc.terminate()
-        try:
-            proc.wait(timeout=5.0)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait(timeout=5.0)
-        stderr = proc.stderr.read() if proc.stderr else ""
-        assert proc.returncode in (0, -15), stderr
+        _terminate(proc)
