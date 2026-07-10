@@ -277,6 +277,83 @@ bool asset_cache_load(asset_cache_t *cache, const scenario_t *scenario, char *er
     return asset_cache_load_limited(cache, scenario, 0, 4096, &params, error, error_size);
 }
 
+/* Load one IQ file into `out`, either heap-copied (counting against the budget) or, when it does
+ * not fit the remaining budget, memory-mapped read-only. Writes directly into `out` and zeroes it
+ * on failure so asset_cache_free can safely skip it. Shared by single-file sources and each
+ * passthrough rate variant. */
+static bool load_iq_buffer(const char *path, uint64_t sample_count, size_t max_bytes, size_t *total_bytes, size_t batch_samples, cached_iq_buffer_t *out, char *error, size_t error_size)
+{
+    memset(out, 0, sizeof(*out));
+    out->sample_count = sample_count;
+    if (sample_count > SIZE_MAX / sizeof(iq_ci16_t)) {
+        snprintf(error, error_size, "asset_cache_too_large");
+        return false;
+    }
+    const size_t bytes = (size_t)sample_count * sizeof(iq_ci16_t);
+    const bool over_budget = max_bytes > 0 && (bytes > max_bytes || *total_bytes > max_bytes - bytes);
+    if (over_budget) {
+        if (bytes == 0) {
+            snprintf(error, error_size, "asset_cache_limit_exceeded");
+            return false;
+        }
+        const int fd = open(path, O_RDONLY);
+        if (fd < 0) {
+            snprintf(error, error_size, "asset_cache_open_failed");
+            return false;
+        }
+        struct stat st;
+        if (fstat(fd, &st) != 0 || (uint64_t)st.st_size != bytes) {
+            close(fd);
+            snprintf(error, error_size, "asset_cache_size_mismatch");
+            return false;
+        }
+        void *map = mmap(NULL, bytes, PROT_READ, MAP_SHARED, fd, 0);
+        close(fd);
+        if (map == MAP_FAILED) {
+            snprintf(error, error_size, "asset_cache_mmap_failed");
+            return false;
+        }
+        (void)madvise(map, bytes, MADV_WILLNEED);
+        out->samples = map;
+        out->mmapped = true;
+        out->map_bytes = bytes;
+        fprintf(stderr, "asset_cache: mmap %s (%zu bytes, over cache budget)\n", path, bytes);
+        return true;
+    }
+    *total_bytes += bytes;
+    out->samples = calloc((size_t)sample_count, sizeof(iq_ci16_t));
+    if (out->samples == NULL) {
+        snprintf(error, error_size, "asset_cache_alloc_failed");
+        return false;
+    }
+    iq_file_reader_t reader;
+    if (!iq_file_reader_open(&reader, path, sample_count, error, error_size)) {
+        free(out->samples);
+        out->samples = NULL;
+        return false;
+    }
+    size_t read_count = 0;
+    bool ok = true;
+    while (read_count < sample_count) {
+        const size_t remaining = (size_t)sample_count - read_count;
+        const size_t wanted = remaining < batch_samples ? remaining : batch_samples;
+        size_t batch_read = 0;
+        if (!iq_file_reader_read(&reader, read_count, out->samples + read_count, wanted, &batch_read) || batch_read != wanted) {
+            ok = false;
+            break;
+        }
+        read_count += batch_read;
+    }
+    iq_file_reader_close(&reader);
+    if (!ok || read_count != sample_count) {
+        free(out->samples);
+        out->samples = NULL;
+        snprintf(error, error_size, "asset_cache_read_failed");
+        return false;
+    }
+    return true;
+}
+
 bool asset_cache_load_limited(asset_cache_t *cache, const scenario_t *scenario, size_t max_bytes, size_t batch_samples, const prerender_params_t *prerender, char *error, size_t error_size)
 {
     memset(cache, 0, sizeof(*cache));
@@ -295,8 +372,24 @@ bool asset_cache_load_limited(asset_cache_t *cache, const scenario_t *scenario, 
         sim_strlcpy(asset->source_id, source->id, sizeof(asset->source_id));
         asset->source_kind = source->source_kind;
         asset->sample_count = source->sample_count;
-        size_t asset_bytes = 0;
+
+        /* Passthrough source: load one buffer per rate variant; the top-level `file` is unused. */
+        if (source->source_kind == SCENARIO_SOURCE_IQ_FILE && source->passthrough_variant_count > 0) {
+            asset->variant_count = source->passthrough_variant_count;
+            for (size_t k = 0; k < source->passthrough_variant_count; k++) {
+                const scenario_passthrough_variant_t *v = &source->passthrough_variants[k];
+                if (!load_iq_buffer(v->file, v->sample_count, max_bytes, &total_bytes, batch_samples, &asset->variants[k], error, error_size)) {
+                    asset_cache_free(cache);
+                    return false;
+                }
+                asset->variants[k].sample_rate_hz = v->sample_rate_hz;
+            }
+            continue;
+        }
+
         if (asset->source_kind == SCENARIO_SOURCE_AUDIO_FILE) {
+            /* Audio stays on the RAM path (it is rewritten in place during normalisation and
+             * pre-render), so it cannot be mmap-backed and fails hard when over budget. */
             if (asset->sample_count > (SIZE_MAX - sizeof(*asset->audio_integral)) /
                                           (sizeof(*asset->audio_samples) + sizeof(*asset->audio_hilbert) +
                                            sizeof(*asset->audio_integral))) {
@@ -304,63 +397,17 @@ bool asset_cache_load_limited(asset_cache_t *cache, const scenario_t *scenario, 
                 asset_cache_free(cache);
                 return false;
             }
-            asset_bytes = (size_t)asset->sample_count *
+            const size_t asset_bytes = (size_t)asset->sample_count *
                               (sizeof(*asset->audio_samples) + sizeof(*asset->audio_hilbert) +
                                sizeof(*asset->audio_integral)) +
                           sizeof(*asset->audio_integral);
-        } else if (asset->sample_count > SIZE_MAX / sizeof(*asset->samples)) {
-            snprintf(error, error_size, "asset_cache_too_large");
-            asset_cache_free(cache);
-            return false;
-        } else {
-            asset_bytes = (size_t)asset->sample_count * sizeof(*asset->samples);
-        }
-        const bool over_budget = max_bytes > 0 && (asset_bytes > max_bytes || total_bytes > max_bytes - asset_bytes);
-        if (over_budget) {
-            /* An IQ file that does not fit the remaining budget is memory-mapped instead of
-             * copied: the OS pages it in lazily and evicts under pressure, so replay works for
-             * recordings far larger than RAM. MAP_SHARED (read-only) lets several simulator
-             * instances replaying the same capture share the page-cache pages. Mapped bytes are
-             * deliberately not counted against the budget. Audio must stay on the RAM path (it
-             * is rewritten in place during normalisation/pre-render), so it still fails hard. */
-            if (asset->source_kind != SCENARIO_SOURCE_IQ_FILE || asset_bytes == 0) {
+            if (max_bytes > 0 && (asset_bytes > max_bytes || total_bytes > max_bytes - asset_bytes)) {
                 snprintf(error, error_size, "asset_cache_limit_exceeded");
                 asset_cache_free(cache);
                 return false;
             }
-            const int fd = open(source->file, O_RDONLY);
-            if (fd < 0) {
-                snprintf(error, error_size, "asset_cache_open_failed");
-                asset_cache_free(cache);
-                return false;
-            }
-            struct stat st;
-            if (fstat(fd, &st) != 0 || (uint64_t)st.st_size != asset_bytes) {
-                close(fd);
-                snprintf(error, error_size, "asset_cache_size_mismatch");
-                asset_cache_free(cache);
-                return false;
-            }
-            void *map = mmap(NULL, asset_bytes, PROT_READ, MAP_SHARED, fd, 0);
-            close(fd);
-            if (map == MAP_FAILED) {
-                snprintf(error, error_size, "asset_cache_mmap_failed");
-                asset_cache_free(cache);
-                return false;
-            }
-            /* Kick off asynchronous readahead so the first loop pass is warm. Not
-             * MADV_SEQUENTIAL: access wraps around and re-reads the file every loop, so
-             * drop-behind would guarantee cold faults on each pass. */
-            (void)madvise(map, asset_bytes, MADV_WILLNEED);
-            asset->samples = map;
-            asset->mmapped = true;
-            asset->map_bytes = asset_bytes;
-            fprintf(stderr, "asset_cache: mmap %s (%zu bytes, over cache budget)\n", source->file, asset_bytes);
-            continue;
-        }
-        total_bytes += asset_bytes;
+            total_bytes += asset_bytes;
 
-        if (asset->source_kind == SCENARIO_SOURCE_AUDIO_FILE) {
             wav_audio_t audio;
             if (!wav_reader_load_mono_f32(source->file, &audio, error, error_size)) {
                 asset_cache_free(cache);
@@ -379,36 +426,14 @@ bool asset_cache_load_limited(asset_cache_t *cache, const scenario_t *scenario, 
                 return false;
             }
         } else {
-            asset->samples = calloc((size_t)asset->sample_count, sizeof(*asset->samples));
-            if (asset->samples == NULL) {
-                snprintf(error, error_size, "asset_cache_alloc_failed");
+            cached_iq_buffer_t buf;
+            if (!load_iq_buffer(source->file, source->sample_count, max_bytes, &total_bytes, batch_samples, &buf, error, error_size)) {
                 asset_cache_free(cache);
                 return false;
             }
-
-            iq_file_reader_t reader;
-            if (!iq_file_reader_open(&reader, source->file, source->sample_count, error, error_size)) {
-                asset_cache_free(cache);
-                return false;
-            }
-            size_t read_count = 0;
-            bool ok = true;
-            while (read_count < asset->sample_count) {
-                const size_t remaining = (size_t)asset->sample_count - read_count;
-                const size_t wanted = remaining < batch_samples ? remaining : batch_samples;
-                size_t batch_read = 0;
-                if (!iq_file_reader_read(&reader, read_count, asset->samples + read_count, wanted, &batch_read) || batch_read != wanted) {
-                    ok = false;
-                    break;
-                }
-                read_count += batch_read;
-            }
-            iq_file_reader_close(&reader);
-            if (!ok || read_count != asset->sample_count) {
-                snprintf(error, error_size, "asset_cache_read_failed");
-                asset_cache_free(cache);
-                return false;
-            }
+            asset->samples = buf.samples;
+            asset->mmapped = buf.mmapped;
+            asset->map_bytes = buf.map_bytes;
         }
     }
 
@@ -447,6 +472,16 @@ void asset_cache_free(asset_cache_t *cache)
         free(cache->assets[i].audio_samples);
         free(cache->assets[i].audio_hilbert);
         free(cache->assets[i].audio_integral);
+        for (size_t k = 0; k < cache->assets[i].variant_count; k++) {
+            cached_iq_buffer_t *v = &cache->assets[i].variants[k];
+            if (v->mmapped) {
+                munmap(v->samples, v->map_bytes);
+            } else {
+                free(v->samples);
+            }
+            v->samples = NULL;
+        }
+        cache->assets[i].variant_count = 0;
         cache->assets[i].samples = NULL;
         cache->assets[i].audio_samples = NULL;
         cache->assets[i].audio_hilbert = NULL;

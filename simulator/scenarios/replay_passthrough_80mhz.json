@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "scenario_id": "replay_passthrough_80mhz",
+  "description": "80 MHz-wide passthrough replay. The source carries a capture per bandwidth (1 MHz / 20 MHz / 80 MHz); at 80 MHz the channel streams the 98.304 MS/s file verbatim (no resampling) straight into VITA-49. Retune the channel bandwidth via REST to select a different variant. The tone sits at +20 MHz within the captured band so it is visible on a waterfall.",
+  "sources": [
+    {
+      "id": "capture_wideband",
+      "source_type": "iq_file",
+      "format": "ci16",
+      "byte_order": "little_endian",
+      "iq_layout": "interleaved_iq",
+      "passthrough_variants": [
+        { "sample_rate_hz": 1536000,  "bandwidth_hz": 1000000,  "file": "simulator/assets/replay_tone_1536ksps.c16" },
+        { "sample_rate_hz": 24576000, "bandwidth_hz": 20000000, "file": "simulator/assets/replay_tone_20m_24576ksps.c16" },
+        { "sample_rate_hz": 98304000, "bandwidth_hz": 80000000, "file": "simulator/assets/replay_tone_80m_98304ksps.c16" }
+      ]
+    }
+  ],
+  "signals": [
+    {
+      "signal_id": "replay_passthrough_wideband",
+      "source_reference": "capture_wideband",
+      "replay_mode": "range",
+      "frequency_range": { "start_hz": 60000000, "stop_hz": 140000000 },
+      "bandwidth_hz": 80000000,
+      "power_dbm": -55.0,
+      "passthrough": true
+    }
+  ]
+}

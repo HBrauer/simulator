@@ -1,26 +1,24 @@
 {
   "schema_version": 1,
   "scenario_id": "replay_passthrough_demo",
-  "description": "A channel dedicated to replaying a single recorded capture: passthrough:true skips the mixer (float mix bus, noise floor, other signals) entirely and streams the file's samples straight into VITA-49 packets whenever the tune is inside the 99.9-100.1 MHz range. This is the cheap 'just wrap VITA49 around the IQ data' path -- use it when a channel's only job is to replay one capture, and reserve the general renderer (see replay_range_shift.json) for overlaying multiple signals or a noise floor.",
+  "description": "A channel dedicated to replaying a recorded capture, one file per bandwidth. passthrough:true bypasses the mixer (no float bus, noise floor, or other signals) and streams the capture matching the channel's current sample rate straight into VITA-49 packets. Retune the channel bandwidth and it selects the matching variant (1 MHz -> 1.536 MS/s file, 20 MHz -> 24.576 MS/s file); a bandwidth with no variant (e.g. 80 MHz) renders silence -- passthrough never resamples.",
   "sources": [
     {
-      "id": "capture_tone_100k",
+      "id": "capture_fm",
       "source_type": "iq_file",
-      "file": "simulator/assets/replay_tone_1536ksps.c16",
       "format": "ci16",
       "byte_order": "little_endian",
       "iq_layout": "interleaved_iq",
-      "sample_rate_hz": 1536000,
-      "bandwidth_hz": 1000000,
-      "center_frequency_hz": 0,
-      "sample_count": 153600,
-      "nominal_level_dbfs": -12.0
+      "passthrough_variants": [
+        { "sample_rate_hz": 1536000,  "bandwidth_hz": 1000000,  "file": "simulator/assets/replay_tone_1536ksps.c16" },
+        { "sample_rate_hz": 24576000, "bandwidth_hz": 20000000, "file": "simulator/assets/replay_tone_20m_24576ksps.c16" }
+      ]
     }
   ],
   "signals": [
     {
       "signal_id": "replay_passthrough_fm",
-      "source_reference": "capture_tone_100k",
+      "source_reference": "capture_fm",
       "replay_mode": "range",
       "frequency_range": { "start_hz": 99900000, "stop_hz": 100100000 },
       "bandwidth_hz": 1000000,

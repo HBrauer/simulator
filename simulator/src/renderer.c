@@ -858,6 +858,12 @@ static bool renderer_render_window_block(
 
     for (size_t s = 0; s < scenario->signal_count; s++) {
         const scenario_signal_t *signal = &scenario->signals[s];
+        /* Passthrough signals are handled exclusively by renderer_try_passthrough (which owns the
+         * whole channel when active); the mixer is only reached when none are active, and their
+         * variant sources carry no single samples buffer to mix here anyway. */
+        if (signal->passthrough) {
+            continue;
+        }
         const scenario_source_t *source = scenario_find_source(scenario, signal->source_reference);
         const cached_asset_t *asset = asset_cache_find(cache, signal->source_reference);
         if (source == NULL || asset == NULL) {
@@ -1037,10 +1043,16 @@ static void passthrough_rotate_segment(const iq_ci16_t *src, iq_ci16_t *out, siz
  * (renderer_render_window_block) cannot offer, because that one exists to combine an arbitrary
  * number of overlapping signals plus noise into one window.
  *
- * Returns false whenever the fast criteria don't hold -- no active passthrough signal at this
- * tune, or the source rate doesn't match the channel rate (no resampling is available on this
- * path by design) -- so the caller falls back to the general mixer, which stays fully correct
- * for every other case (and is itself still cheap on its direct-baseband/NCO paths). */
+ * The passthrough source carries one capture per channel rate (its variants). This function
+ * selects the variant whose rate matches the channel and streams it verbatim; it never resamples.
+ * Return values:
+ *  - false: no passthrough signal is active at this tune (out of every range) -- the caller falls
+ *    back to the general mixer, which handles any ordinary signals.
+ *  - true with rendered samples: an active passthrough signal has a variant matching the channel
+ *    rate; it took over the channel (passthrough is exclusive by design).
+ *  - true with silence: an active passthrough signal has NO variant for this channel rate. Rather
+ *    than resample (which passthrough must never do), the channel goes silent -- the intended
+ *    behaviour for a bandwidth the capture set does not cover. */
 static bool renderer_try_passthrough(const scenario_t *scenario, const asset_cache_t *cache, uint64_t window_center_hz, uint32_t output_sample_rate_hz, double output_scale, double rf_reference_power_dbm, uint64_t scenario_time_ns, iq_ci16_t *out, size_t count, render_stats_t *stats)
 {
     for (size_t s = 0; s < scenario->signal_count; s++) {
@@ -1051,11 +1063,34 @@ static bool renderer_try_passthrough(const scenario_t *scenario, const asset_cac
         if (window_center_hz < signal->replay_range_start_hz || window_center_hz > signal->replay_range_stop_hz) {
             continue;
         }
-        const scenario_source_t *source = scenario_find_source(scenario, signal->source_reference);
+        /* A passthrough signal is active for this tune -- it owns the channel from here, whether
+         * or not a matching-rate capture exists. */
         const cached_asset_t *asset = asset_cache_find(cache, signal->source_reference);
-        if (source == NULL || asset == NULL || source->sample_rate_hz != output_sample_rate_hz) {
-            continue; /* rate mismatch: no resampling on this path, fall back to the mixer */
+        const cached_iq_buffer_t *variant = NULL;
+        if (asset != NULL) {
+            for (size_t k = 0; k < asset->variant_count; k++) {
+                if (asset->variants[k].sample_rate_hz == output_sample_rate_hz) {
+                    variant = &asset->variants[k];
+                    break;
+                }
+            }
         }
+        if (variant == NULL || variant->samples == NULL || variant->sample_count == 0) {
+            /* No capture at this bandwidth: silence, never resample. */
+            memset(out, 0, count * sizeof(*out));
+            if (stats != NULL) {
+                memset(stats, 0, sizeof(*stats));
+                stats->samples_rendered = count;
+            }
+            return true;
+        }
+
+        /* iq_signal_loop_position keys off the source's rate and sample count; feed it the
+         * selected variant's so the wrap period matches the file actually being streamed. */
+        scenario_source_t variant_source;
+        memset(&variant_source, 0, sizeof(variant_source));
+        variant_source.sample_rate_hz = variant->sample_rate_hz;
+        variant_source.sample_count = variant->sample_count;
 
         const double offset_hz = signal->replay_mode == SCENARIO_REPLAY_RANGE
             ? 0.0
@@ -1069,7 +1104,7 @@ static bool renderer_try_passthrough(const scenario_t *scenario, const asset_cac
             uint64_t seg_offset = 0;
             double seg_fraction = 0.0;
             uint64_t until_wrap = 0;
-            if (!iq_signal_loop_position(signal, source, start_sample + out_done, output_sample_rate_hz, &seg_offset, &seg_fraction, &until_wrap)) {
+            if (!iq_signal_loop_position(signal, &variant_source, start_sample + out_done, output_sample_rate_hz, &seg_offset, &seg_fraction, &until_wrap)) {
                 memset(out + out_done, 0, (count - out_done) * sizeof(*out));
                 break;
             }
@@ -1077,7 +1112,7 @@ static bool renderer_try_passthrough(const scenario_t *scenario, const asset_cac
              * contract), so the copy/rotate below never needs sub-sample interpolation. */
             const size_t remaining = count - out_done;
             const size_t seg_count = until_wrap < (uint64_t)remaining ? (size_t)until_wrap : remaining;
-            const iq_ci16_t *src = &asset->samples[seg_offset];
+            const iq_ci16_t *src = &variant->samples[seg_offset];
             if (offset_hz == 0.0) {
                 passthrough_copy_segment(src, out + out_done, seg_count, gain);
             } else {

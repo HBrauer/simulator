@@ -1341,6 +1341,60 @@ static void setup_replay_signal(scenario_t *scenario, asset_cache_t *cache, iq_c
     cache->assets[0].samples = asset_samples;
 }
 
+/* Build a passthrough scenario+cache with one or two rate variants. Pass v1 == NULL for a single
+ * variant. The renderer selects the variant matching the channel rate and streams it verbatim. */
+static void setup_passthrough_signal(scenario_t *scenario, asset_cache_t *cache,
+                                     scenario_replay_mode_t mode, uint64_t f0_hz,
+                                     uint64_t range_start_hz, uint64_t range_stop_hz,
+                                     iq_ci16_t *v0, size_t n0, uint32_t r0,
+                                     iq_ci16_t *v1, size_t n1, uint32_t r1)
+{
+    memset(scenario, 0, sizeof(*scenario));
+    memset(cache, 0, sizeof(*cache));
+    scenario->schema_version = 1;
+    snprintf(scenario->scenario_id, sizeof(scenario->scenario_id), "%s", "unit_passthrough");
+    scenario->source_count = 1;
+    scenario->signal_count = 1;
+
+    scenario_source_t *source = &scenario->sources[0];
+    snprintf(source->id, sizeof(source->id), "%s", "pt_src");
+    snprintf(source->source_type, sizeof(source->source_type), "%s", "iq_file");
+    source->source_kind = SCENARIO_SOURCE_IQ_FILE;
+    source->passthrough_variant_count = v1 != NULL ? 2 : 1;
+    source->passthrough_variants[0].sample_rate_hz = r0;
+    source->passthrough_variants[0].bandwidth_hz = r0;
+    source->passthrough_variants[0].sample_count = n0;
+    if (v1 != NULL) {
+        source->passthrough_variants[1].sample_rate_hz = r1;
+        source->passthrough_variants[1].bandwidth_hz = r1;
+        source->passthrough_variants[1].sample_count = n1;
+    }
+
+    scenario_signal_t *signal = &scenario->signals[0];
+    snprintf(signal->signal_id, sizeof(signal->signal_id), "%s", "pt_sig");
+    snprintf(signal->source_reference, sizeof(signal->source_reference), "%s", "pt_src");
+    signal->replay_mode = mode;
+    signal->loop = true;
+    signal->passthrough = true;
+    signal->center_frequency_hz = f0_hz;
+    signal->replay_range_start_hz = range_start_hz;
+    signal->replay_range_stop_hz = range_stop_hz;
+    signal->bandwidth_hz = r0;
+    signal->power_dbm = -40.0;
+
+    cache->asset_count = 1;
+    snprintf(cache->assets[0].source_id, sizeof(cache->assets[0].source_id), "%s", "pt_src");
+    cache->assets[0].variant_count = v1 != NULL ? 2 : 1;
+    cache->assets[0].variants[0].samples = v0;
+    cache->assets[0].variants[0].sample_count = n0;
+    cache->assets[0].variants[0].sample_rate_hz = r0;
+    if (v1 != NULL) {
+        cache->assets[0].variants[1].samples = v1;
+        cache->assets[0].variants[1].sample_count = n1;
+        cache->assets[0].variants[1].sample_rate_hz = r1;
+    }
+}
+
 START_TEST(replay_range_mode_follows_tune_and_loops)
 {
     /* Ramp asset at the full 98.304 MS/s output rate: equal rates keep the direct (no-resample)
@@ -1461,9 +1515,8 @@ START_TEST(passthrough_bypasses_mixer_for_matching_rate_range_signal)
     }
     scenario_t scenario;
     asset_cache_t cache;
-    setup_replay_signal(&scenario, &cache, asset, N, SIM_RECEIVER_SAMPLE_RATE_HZ,
-                        SCENARIO_REPLAY_RANGE, true, 0, 99900000ULL, 100100000ULL);
-    scenario.signals[0].passthrough = true;
+    setup_passthrough_signal(&scenario, &cache, SCENARIO_REPLAY_RANGE, 0, 99900000ULL, 100100000ULL,
+                             asset, N, SIM_RECEIVER_SAMPLE_RATE_HZ, NULL, 0, 0);
 
     iq_ci16_t out[COUNT];
     render_stats_t stats;
@@ -1474,6 +1527,42 @@ START_TEST(passthrough_bypasses_mixer_for_matching_rate_range_signal)
         ck_assert_int_eq(out[k].i, asset[k % N].i);
         ck_assert_int_eq(out[k].q, asset[k % N].q);
     }
+}
+END_TEST
+
+START_TEST(passthrough_selects_variant_by_channel_rate)
+{
+    /* Two variants at different rates carry distinguishable constants. The channel rate selects
+     * which file streams; a rate with no variant is silent (passthrough never resamples). */
+    enum { NA = 1500, NB = 900 };
+    static iq_ci16_t va[NA];
+    static iq_ci16_t vb[NB];
+    for (size_t i = 0; i < NA; i++) va[i] = (iq_ci16_t){.i = 111, .q = -111};
+    for (size_t i = 0; i < NB; i++) vb[i] = (iq_ci16_t){.i = 777, .q = -777};
+    scenario_t scenario;
+    asset_cache_t cache;
+    setup_passthrough_signal(&scenario, &cache, SCENARIO_REPLAY_RANGE, 0, 99900000ULL, 100100000ULL,
+                             va, NA, SIM_RECEIVER_SAMPLE_RATE_HZ, vb, NB, SIM_DDC_SAMPLE_RATE_HZ);
+
+    iq_ci16_t out[512];
+    render_stats_t stats;
+    /* Channel at variant A's rate -> variant A content (unit gain memcpy). */
+    receiver_config_t rx = fixed_channel_receiver(100000000ULL, (uint32_t)SIM_RECEIVER_BANDWIDTH_HZ, SIM_RECEIVER_SAMPLE_RATE_HZ, 1.0, -40.0);
+    ck_assert(render_rx_block(&scenario, &cache, &rx, 0, out, 512, &stats));
+    ck_assert_uint_eq(stats.active_signals, 1);
+    ck_assert_int_eq(out[0].i, 111);
+    ck_assert_int_eq(out[300].i, 111);
+    /* Channel at variant B's rate -> variant B content. */
+    rx = fixed_channel_receiver(100000000ULL, SIM_DDC_BANDWIDTH_HZ, SIM_DDC_SAMPLE_RATE_HZ, 1.0, -40.0);
+    ck_assert(render_rx_block(&scenario, &cache, &rx, 0, out, 512, &stats));
+    ck_assert_uint_eq(stats.active_signals, 1);
+    ck_assert_int_eq(out[0].i, 777);
+    ck_assert_int_eq(out[300].i, 777);
+    /* Channel at a rate with no variant -> silence, still handled (not passed to the mixer). */
+    rx = fixed_channel_receiver(100000000ULL, 1000000U, 1000000U, 1.0, -40.0);
+    ck_assert(render_rx_block(&scenario, &cache, &rx, 0, out, 512, &stats));
+    ck_assert_uint_eq(stats.active_signals, 0);
+    ck_assert(!samples_have_energy(out, 512));
 }
 END_TEST
 
@@ -1490,9 +1579,8 @@ START_TEST(passthrough_rotates_for_shift_without_mixer)
     }
     scenario_t scenario_fast, scenario_general;
     asset_cache_t cache_fast, cache_general;
-    setup_replay_signal(&scenario_fast, &cache_fast, asset, N, SIM_RECEIVER_SAMPLE_RATE_HZ,
-                        SCENARIO_REPLAY_SHIFT, true, 100000000ULL, 80000000ULL, 120000000ULL);
-    scenario_fast.signals[0].passthrough = true;
+    setup_passthrough_signal(&scenario_fast, &cache_fast, SCENARIO_REPLAY_SHIFT, 100000000ULL, 80000000ULL, 120000000ULL,
+                             asset, N, SIM_RECEIVER_SAMPLE_RATE_HZ, NULL, 0, 0);
     setup_replay_signal(&scenario_general, &cache_general, asset, N, SIM_RECEIVER_SAMPLE_RATE_HZ,
                         SCENARIO_REPLAY_SHIFT, true, 100000000ULL, 80000000ULL, 120000000ULL);
 
@@ -1512,8 +1600,10 @@ START_TEST(passthrough_rotates_for_shift_without_mixer)
 }
 END_TEST
 
-START_TEST(passthrough_falls_back_when_rate_mismatches_or_out_of_range)
+START_TEST(passthrough_is_silent_out_of_range_and_at_unsupported_rate)
 {
+    /* Passthrough never resamples: an in-range channel whose rate has no variant renders silence,
+     * and an out-of-range tune renders silence too (no signal reaches the mixer). */
     enum { N = 2000, COUNT = 1024 };
     static iq_ci16_t asset[N];
     for (size_t i = 0; i < N; i++) {
@@ -1521,20 +1611,19 @@ START_TEST(passthrough_falls_back_when_rate_mismatches_or_out_of_range)
     }
     scenario_t scenario;
     asset_cache_t cache;
-    /* Source rate (1 MS/s) does not match the 98.304 MS/s channel -> falls back to the general
-     * mixer, which resamples correctly instead of silently misreading the file. */
-    setup_replay_signal(&scenario, &cache, asset, N, 1000000U,
-                        SCENARIO_REPLAY_RANGE, true, 0, 99900000ULL, 100100000ULL);
-    scenario.signals[0].passthrough = true;
+    /* One variant at 98.304 MS/s only. */
+    setup_passthrough_signal(&scenario, &cache, SCENARIO_REPLAY_RANGE, 0, 99900000ULL, 100100000ULL,
+                             asset, N, SIM_RECEIVER_SAMPLE_RATE_HZ, NULL, 0, 0);
 
     iq_ci16_t out[COUNT];
     render_stats_t stats;
-    receiver_config_t rx = fixed_channel_receiver(100000000ULL, (uint32_t)SIM_RECEIVER_BANDWIDTH_HZ, SIM_RECEIVER_SAMPLE_RATE_HZ, 1.0, -40.0);
+    /* In range, but the channel rate (1 MS/s) has no matching variant -> silence, no resample. */
+    receiver_config_t rx = fixed_channel_receiver(100000000ULL, 1000000U, 1000000U, 1.0, -40.0);
     ck_assert(render_rx_block(&scenario, &cache, &rx, 0, out, COUNT, &stats));
-    ck_assert_uint_eq(stats.active_signals, 1);
-    ck_assert(samples_have_energy(out, COUNT));
+    ck_assert_uint_eq(stats.active_signals, 0);
+    ck_assert(!samples_have_energy(out, COUNT));
 
-    /* Out of range -> silence via the general mixer fallback (no passthrough match either). */
+    /* Matching rate but out of range -> silence via the mixer path (passthrough not active). */
     rx = fixed_channel_receiver(130000000ULL, (uint32_t)SIM_RECEIVER_BANDWIDTH_HZ, SIM_RECEIVER_SAMPLE_RATE_HZ, 1.0, -40.0);
     ck_assert(render_rx_block(&scenario, &cache, &rx, 0, out, COUNT, &stats));
     ck_assert_uint_eq(stats.active_signals, 0);
@@ -1575,8 +1664,9 @@ Suite *renderer_suite(void)
     tcase_add_test(tc, replay_shift_mode_pins_absolute_frequency);
     tcase_add_test(tc, fixed_mode_with_loop_uses_epoch_position);
     tcase_add_test(tc, passthrough_bypasses_mixer_for_matching_rate_range_signal);
+    tcase_add_test(tc, passthrough_selects_variant_by_channel_rate);
     tcase_add_test(tc, passthrough_rotates_for_shift_without_mixer);
-    tcase_add_test(tc, passthrough_falls_back_when_rate_mismatches_or_out_of_range);
+    tcase_add_test(tc, passthrough_is_silent_out_of_range_and_at_unsupported_rate);
     suite_add_tcase(suite, tc);
     return suite;
 }

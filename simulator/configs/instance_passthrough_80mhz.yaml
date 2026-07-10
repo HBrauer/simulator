@@ -1,0 +1,44 @@
+# 80 MHz passthrough replay: channel 1 defaults to the full 80 MHz / 98.304 MS/s profile and
+# streams the matching 98.304 MS/s capture verbatim. Retune channel 1's bandwidth via REST
+# (PUT /api/v1/channels/1) to 20M or 1M to select a different variant; every listed profile has
+# a matching capture in the scenario.
+schema_version: 1
+instance_id: "sim_instance_passthrough_80mhz"
+scenario_file: "simulator/scenarios/replay_passthrough_80mhz.json"
+log_path: "logs/instance_passthrough_80mhz.log"
+# 1536-sample blocks sustain the 80 MHz stream in real time (1024 cannot; see instance_replay.yaml).
+stream_block_samples: 1536
+receivers:
+  - receiver_id: 0
+    rest_bind_host: "127.0.0.1"
+    rest_port: 8112
+    udp_output_host: "127.0.0.1"
+    frequency_start_hz: 60000000
+    frequency_stop_hz: 140000000
+    frontend_bandwidth_hz: 80000000
+    scan_rate_hz_per_s: 100000000000
+    # Matches the signal power_dbm (with output_scale 1.0), so passthrough takes the literal
+    # memcpy branch (gain == 1.0).
+    rf_reference_power_dbm: -55.0
+    profiles:
+      - { bandwidth_hz: 80000000, sample_rate_hz: 98304000, name: "80M" }
+      - { bandwidth_hz: 20000000, sample_rate_hz: 24576000, name: "20M" }
+      - { bandwidth_hz: 1000000, sample_rate_hz: 1536000, name: "1M" }
+    channels:
+      # Channel 0: a wideband 80 MHz reference stream (tracks the tuner). Left DISABLED by default:
+      # a second 80 MHz stream doubles loopback traffic to ~196 MS/s (~786 MB/s) and steals CPU
+      # from the receiver, whose UDP socket buffer (net.core.rmem_max, ~208 KB by default) then
+      # overflows -- observed as gaps and a receive rate well below 98.3 MS/s even though the sim
+      # sends both streams cleanly (udp_send_errors=0). Enable it only if you also raise the OS
+      # receive buffer (see the README note) and are viewing this channel, not channel 1.
+      - channel_id: 0
+        track_tuner: true
+        bandwidth_hz: 80000000
+        stream_enabled: false
+        udp_output_port: 51200
+      # Channel 1: dedicated 80 MHz passthrough replay at 100 MHz -- the channel this demo streams.
+      - channel_id: 1
+        center_frequency_hz: 100000000
+        bandwidth_hz: 80000000
+        stream_enabled: true
+        udp_output_port: 51201

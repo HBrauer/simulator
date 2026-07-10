@@ -356,14 +356,34 @@ START_TEST(rejects_passthrough_without_loop)
 }
 END_TEST
 
-START_TEST(accepts_passthrough_on_range_or_shift_with_loop)
+START_TEST(loads_passthrough_variant_scenario)
 {
+    /* The passthrough demo carries a variant source (one capture per rate) referenced by a
+     * passthrough signal; it must parse and validate, with variant rates/counts populated. */
+    scenario_t scenario;
+    char error[128];
+    ck_assert_msg(scenario_load_json("simulator/scenarios/replay_passthrough_demo.json", &scenario, error, sizeof(error)), "%s", error);
+    ck_assert_uint_eq(scenario.sources[0].passthrough_variant_count, 2);
+    ck_assert_uint_eq(scenario.sources[0].passthrough_variants[0].sample_rate_hz, 1536000);
+    ck_assert_uint_eq(scenario.sources[0].passthrough_variants[1].sample_rate_hz, 24576000);
+    ck_assert(scenario.signals[0].passthrough);
+    ck_assert_msg(scenario_validate(&scenario, ".", error, sizeof(error)), "%s", error);
+    /* Validation fills each variant's sample_count from its file. */
+    ck_assert_uint_gt(scenario.sources[0].passthrough_variants[0].sample_count, 0);
+    ck_assert_uint_gt(scenario.sources[0].passthrough_variants[1].sample_count, 0);
+}
+END_TEST
+
+START_TEST(rejects_passthrough_without_variants)
+{
+    /* A passthrough signal whose source has no variants is a misconfiguration: passthrough only
+     * streams matched-rate captures, so it needs a variant set. */
     scenario_t scenario;
     char error[128];
     ck_assert_msg(scenario_load_json("simulator/scenarios/replay_range_shift.json", &scenario, error, sizeof(error)), "%s", error);
-    scenario.signals[0].passthrough = true;
-    scenario.signals[1].passthrough = true;
-    ck_assert_msg(scenario_validate(&scenario, ".", error, sizeof(error)), "%s", error);
+    scenario.signals[0].passthrough = true; /* range mode, loop true, but source has no variants */
+    ck_assert(!scenario_validate(&scenario, ".", error, sizeof(error)));
+    ck_assert_str_eq(error, "passthrough_requires_variants");
 }
 END_TEST
 
@@ -374,7 +394,8 @@ Suite *scenario_suite(void)
     tcase_add_test(tc, loads_replay_range_shift_scenario);
     tcase_add_test(tc, rejects_passthrough_without_range_or_shift);
     tcase_add_test(tc, rejects_passthrough_without_loop);
-    tcase_add_test(tc, accepts_passthrough_on_range_or_shift_with_loop);
+    tcase_add_test(tc, loads_passthrough_variant_scenario);
+    tcase_add_test(tc, rejects_passthrough_without_variants);
     tcase_add_test(tc, defaults_to_fixed_replay_without_new_fields);
     tcase_add_test(tc, rejects_invalid_replay_configs);
     tcase_add_test(tc, rejects_loop_repeat_conflict_and_bad_mode);

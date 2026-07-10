@@ -98,13 +98,14 @@ set exceeds RAM (observable as `samples_late` growth). No per-block touch-ahead 
 A channel whose only job is to replay one capture pays for the general mixer's float mix bus,
 per-signal gain/passband machinery, and noise-floor pass on every block, even on the mixer's
 already-cheapest direct-copy dispatch. `signal.passthrough: true` (range/shift replay modes only)
-adds a check ahead of the mixer (`renderer_try_passthrough` in `renderer.c`) that, when the
-channel's sample rate exactly matches the source's, writes the file's samples straight to the
-output block -- a literal `memcpy` at unit gain, a scaled copy otherwise, or a rotated copy for
-shift mode away from its nominal center -- with no float bus, no noise floor, and no other-signal
-bookkeeping. When the rate doesn't match (e.g. a wideband channel spanning many signals), it
-silently declines and the general renderer runs as usual for that channel/block, so scenario
-correctness never depends on which channels happen to get the fast path.
+adds a check ahead of the mixer (`renderer_try_passthrough` in `renderer.c`). The source supplies
+one capture per channel rate (`passthrough_variants`); the check selects the variant whose rate
+matches the channel and writes its samples straight to the output block -- a literal `memcpy` at
+unit gain, a scaled copy otherwise, or a rotated copy for shift mode away from its nominal center
+-- with no float bus, no noise floor, and no other-signal bookkeeping. It never resamples: a
+channel rate with no matching variant renders silence, not an upsampled approximation (matching
+the "one file per bandwidth" model). The mixer is reached only when no passthrough signal is active
+for the tune (all out of range), where the passthrough signals are skipped anyway.
 
 Measured with a standalone harness driving `renderer_render_channel_block` directly (no UDP/pacing
 noise) on a 1024-sample block at 1.536 MS/s, single-thread, `-O3`, comparing `passthrough: true`
@@ -120,3 +121,39 @@ Roughly a 14-17x reduction in render time for the dedicated-channel case. The ga
 zero/accumulate/saturate round trip (int16->float->int16 per sample) and per-block signal-loop
 bookkeeping the mixer always performs, none of which passthrough needs when it's simply copying
 (or rotating) one file's bytes into the packet payload.
+
+## Where an 80 MHz "replay looks slower than generation" actually comes from (receive side)
+
+Symptom: an 80 MHz passthrough channel shows ~63-69 MS/s with growing `gaps` on the receiver's
+waterfall, worse than a generated 80 MHz stream at ~98 MS/s. It is tempting to blame the replay
+render path. Measurement says otherwise, and the loss is entirely on the *receive* side.
+
+Render-only, single core, `-O3` native, 1536-sample blocks (`renderer_benchmark`):
+
+| Scenario (channel 0) | Msamples/s | x real time |
+| --- | --- | --- |
+| Generator (`test_scenario_001`, synth wideband) | ~587 | 6.0 |
+| 80 MHz passthrough (`replay_passthrough_80mhz`) | **~10 300** | **105** |
+
+Passthrough renders ~17x *faster* than generation and ~105x faster than real time -- the render is
+nowhere near the bottleneck. Live sim metrics under the two-channel 80 MHz demo confirm the sim
+*sends* both streams cleanly: `actual_sample_rate_sps` ~98.2 MS/s per channel, `udp_send_errors=0`,
+`samples_send_dropped=0`.
+
+The gaps are kernel UDP **receive-buffer overflows**. On the dev box `net.core.rmem_max` is ~208 KB;
+an 80 MHz stream is 98.304 MS/s x 4 B = **393 MB/s**, so a full socket buffer holds ~0.3 ms. Any
+receiver scheduling hiccup drops datagrams. `/proc/net/snmp` showed `Udp InErrors == RcvbufErrors`
+(every drop is a buffer overflow) climbing at ~19 100 drops/s; at 1536 samples/packet that is
+~29.4 MS/s lost, and 98.3 - 29.4 = **68.9 MS/s** -- matching the observed 68.97 MS/s exactly.
+
+Two things make replay *look* worse than generation even though its render is faster:
+1. The 80 MHz passthrough demo config originally streamed a *second* 80 MHz channel (the wideband
+   `track_tuner` reference on ch0) alongside the viewed ch1. That doubles loopback to ~196 MS/s /
+   ~786 MB/s and steals CPU from the receiver so its socket overflows sooner. `instance_001`'s extra
+   channels are 20M each, so the single viewed 80M generator stream keeps more headroom. Ch0 is now
+   `stream_enabled: false` in `instance_passthrough_80mhz.yaml`.
+2. The default OS receive buffer is ~50x too small for 80 MHz. Fixes, receiver side (not sim code):
+   `sudo sysctl -w net.core.rmem_max=16777216` (and `net.core.rmem_default`), and the receiver must
+   request it with `setsockopt(SO_RCVBUF, ~8 MB)` -- a socket only gets a big buffer if it asks *and*
+   the ceiling allows it. With a single 80 MHz stream and an adequate receive buffer the waterfall
+   sees the full ~98.3 MS/s.

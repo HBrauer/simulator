@@ -5,6 +5,15 @@
 
 #include <stdbool.h>
 
+/* A loaded IQ buffer: either heap-allocated (mmapped=false) or a read-only file mapping. */
+typedef struct {
+    iq_ci16_t *samples;
+    uint64_t sample_count;
+    uint32_t sample_rate_hz;
+    bool mmapped;
+    size_t map_bytes; /* mapping length for munmap when mmapped */
+} cached_iq_buffer_t;
+
 typedef struct {
     char source_id[SIM_MAX_ID];
     scenario_source_kind_t source_kind;
@@ -16,6 +25,10 @@ typedef struct {
     float *audio_hilbert;
     double *audio_integral;
     double normalization_gain; /* factor applied to audio_samples at load (1.0 for IQ) */
+    /* Passthrough sources load one buffer per rate variant here (parallel to
+     * source->passthrough_variants); the renderer picks the one matching the channel rate. */
+    size_t variant_count;
+    cached_iq_buffer_t variants[SIM_MAX_PASSTHROUGH_VARIANTS];
 } cached_asset_t;
 
 /* Complex-baseband IQ pre-rendered once at load for a signal that references an audio source.

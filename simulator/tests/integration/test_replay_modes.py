@@ -199,3 +199,85 @@ def test_replay_instances_started_apart_stay_sample_synchronous(tmp_path):
             _terminate(proc)
         sock_a.close()
         sock_b.close()
+
+
+PASSTHROUGH_SCENARIO = "simulator/scenarios/replay_passthrough_demo.json"
+
+
+def _write_passthrough_config(path, rest_port, udp_base):
+    path.write_text(
+        f"""schema_version: 1
+instance_id: "pytest_passthrough"
+scenario_file: "{PASSTHROUGH_SCENARIO}"
+log_path: "logs/pytest_passthrough.log"
+stream_block_samples: 256
+receivers:
+  - receiver_id: 0
+    rest_bind_host: "127.0.0.1"
+    rest_port: {rest_port}
+    udp_output_host: "127.0.0.1"
+    frequency_start_hz: 60000000
+    frequency_stop_hz: 140000000
+    rf_reference_power_dbm: -55.0
+    scan_rate_hz_per_s: 100000000000
+    profiles:
+      - {{ bandwidth_hz: 80000000, sample_rate_hz: 98304000, name: "80M" }}
+      - {{ bandwidth_hz: 20000000, sample_rate_hz: 24576000, name: "20M" }}
+      - {{ bandwidth_hz: 1000000, sample_rate_hz: 1536000, name: "1M" }}
+    channels:
+      - {{ channel_id: 0, track_tuner: true, bandwidth_hz: 80000000, udp_output_port: {udp_base} }}
+      - {{ channel_id: 1, center_frequency_hz: 100000000, bandwidth_hz: 1000000, udp_output_port: {udp_base + 1} }}
+""",
+        encoding="utf-8",
+    )
+
+
+def _set_bandwidth(rest_port, hz):
+    code, _ = _request_json(
+        f"http://127.0.0.1:{rest_port}/api/v1/channels/1",
+        {"bandwidth_hz": hz},
+        method="PUT",
+    )
+    assert code == 200, f"bandwidth retune to {hz} failed: {code}"
+
+
+def test_passthrough_selects_variant_by_bandwidth(tmp_path):
+    """The passthrough source carries a capture for 1 MHz and 20 MHz but not 80 MHz. Retuning the
+    channel bandwidth selects the matching variant (energy) or, where none exists, renders silence
+    -- passthrough never resamples."""
+    rest_port = _free_tcp_port()
+    udp_base = _free_udp_port_block()
+    config = tmp_path / "passthrough.yaml"
+    _write_passthrough_config(config, rest_port, udp_base)
+
+    ch1_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    ch1_sock.bind(("127.0.0.1", udp_base + 1))
+    ch1_sock.settimeout(5.0)
+
+    proc = subprocess.Popen(
+        [str(SIM), "--config", str(config), "--scenario", PASSTHROUGH_SCENARIO],
+        cwd=ROOT,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        _wait_json(f"http://127.0.0.1:{rest_port}/api/v1/health")
+
+        # 1 MHz channel: the 1.536 MS/s variant exists -> energy.
+        _wait_payload_state(ch1_sock, True)
+
+        # 20 MHz: the 24.576 MS/s variant exists -> energy.
+        _set_bandwidth(rest_port, 20000000)
+        _wait_payload_state(ch1_sock, True)
+
+        # 80 MHz: no variant for 98.304 MS/s -> silence (no resample).
+        _set_bandwidth(rest_port, 80000000)
+        _wait_payload_state(ch1_sock, False)
+
+        # Back to 1 MHz -> energy again.
+        _set_bandwidth(rest_port, 1000000)
+        _wait_payload_state(ch1_sock, True)
+    finally:
+        _terminate(proc)
+        ch1_sock.close()

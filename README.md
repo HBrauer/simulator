@@ -87,14 +87,16 @@ replaying the same capture share the page cache.
 
 If a channel's only job is to replay one capture — no mixing with other signals or noise — add
 `"passthrough": true` to its signal (`simulator/scenarios/replay_passthrough_demo.json`, run with
-`simulator/configs/instance_replay_passthrough.yaml`). This skips the general mixer entirely for
-that channel (no float mix bus, no noise floor, no other signals) and streams the file's samples
-almost directly into VITA-49 packets whenever the channel's sample rate exactly matches the
-source's — in local measurements, roughly **15x less render time per block** than even the
-mixer's own fastest (direct-copy) path. It's exclusive, not an overlay: while the passthrough
-signal is active, any other signal that would otherwise be visible to that channel is not
-rendered. Use it for a channel dedicated to one recording; use the general renderer (no
-`passthrough`) when you want a replay capture to combine with other signals or a noise floor.
+`simulator/configs/instance_replay_passthrough.yaml`). The source then supplies one capture file
+per channel sample rate (`passthrough_variants`); the renderer picks the variant matching the
+channel's current rate and streams it straight into VITA-49 packets, skipping the general mixer
+(no float mix bus, no noise floor, no other signals) — roughly **15x less render time per block**
+than even the mixer's own fastest (direct-copy) path in local measurements. It **never resamples**:
+retune the channel to a bandwidth with no matching variant and it renders silence rather than an
+upsampled approximation, so you provide exactly the bandwidths you want to support. It's exclusive,
+not an overlay: while the passthrough signal is active, any other signal visible to that channel is
+not rendered. Use the general renderer (no `passthrough`, which resamples as needed) when you want
+a replay capture to combine with other signals or a noise floor.
 
 ```sh
 build/sdr-simulator \

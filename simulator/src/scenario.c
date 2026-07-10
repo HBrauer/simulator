@@ -107,6 +107,38 @@ static bool parse_replay_mode(const char *name, scenario_replay_mode_t *out)
     return false;
 }
 
+static bool parse_passthrough_variants(json_t *src, scenario_source_t *out, char *error, size_t error_size)
+{
+    json_t *arr = json_object_get(src, "passthrough_variants");
+    if (arr == NULL) {
+        return true; /* optional */
+    }
+    if (!json_is_array(arr)) {
+        snprintf(error, error_size, "passthrough_variants_invalid");
+        return false;
+    }
+    const size_t n = json_array_size(arr);
+    if (n == 0 || n > SIM_MAX_PASSTHROUGH_VARIANTS) {
+        snprintf(error, error_size, "passthrough_variants_invalid");
+        return false;
+    }
+    out->passthrough_variant_count = n;
+    for (size_t k = 0; k < n; k++) {
+        json_t *v = json_array_get(arr, k);
+        scenario_passthrough_variant_t *pv = &out->passthrough_variants[k];
+        if (!get_json_string(v, "file", pv->file, sizeof(pv->file)) ||
+            !get_json_u32(v, "sample_rate_hz", &pv->sample_rate_hz) ||
+            !get_json_u32(v, "bandwidth_hz", &pv->bandwidth_hz)) {
+            snprintf(error, error_size, "passthrough_variant_invalid");
+            return false;
+        }
+        if (!get_json_u64(v, "sample_count", &pv->sample_count)) {
+            pv->sample_count = 0;
+        }
+    }
+    return true;
+}
+
 bool scenario_load_json(const char *path, scenario_t *scenario, char *error, size_t error_size)
 {
     memset(scenario, 0, sizeof(*scenario));
@@ -170,11 +202,7 @@ bool scenario_load_json(const char *path, scenario_t *scenario, char *error, siz
         scenario_source_t *out = &scenario->sources[i];
         if (!get_json_string(src, "id", out->id, sizeof(out->id)) ||
             !get_json_string(src, "source_type", out->source_type, sizeof(out->source_type)) ||
-            !get_json_string(src, "file", out->file, sizeof(out->file)) ||
-            !get_json_string(src, "format", out->format, sizeof(out->format)) ||
-            !get_json_u32(src, "sample_rate_hz", &out->sample_rate_hz) ||
-            !get_json_u32(src, "bandwidth_hz", &out->bandwidth_hz) ||
-            !get_json_double(src, "nominal_level_dbfs", &out->nominal_level_dbfs)) {
+            !get_json_string(src, "format", out->format, sizeof(out->format))) {
             json_decref(root);
             snprintf(error, error_size, "source_invalid");
             return false;
@@ -184,6 +212,10 @@ bool scenario_load_json(const char *path, scenario_t *scenario, char *error, siz
             snprintf(error, error_size, "source_unsupported");
             return false;
         }
+        if (!parse_passthrough_variants(src, out, error, error_size)) {
+            json_decref(root);
+            return false;
+        }
         if (out->source_kind == SCENARIO_SOURCE_IQ_FILE) {
             if (!get_json_string(src, "byte_order", out->byte_order, sizeof(out->byte_order)) ||
                 !get_json_string(src, "iq_layout", out->iq_layout, sizeof(out->iq_layout))) {
@@ -191,6 +223,20 @@ bool scenario_load_json(const char *path, scenario_t *scenario, char *error, siz
                 snprintf(error, error_size, "source_invalid");
                 return false;
             }
+        }
+        if (out->passthrough_variant_count > 0) {
+            /* Variant source: the top-level file/rate/bandwidth are unused (each variant carries
+             * its own). nominal_level is optional and irrelevant to verbatim passthrough. */
+            get_json_double(src, "nominal_level_dbfs", &out->nominal_level_dbfs);
+            continue;
+        }
+        if (!get_json_string(src, "file", out->file, sizeof(out->file)) ||
+            !get_json_u32(src, "sample_rate_hz", &out->sample_rate_hz) ||
+            !get_json_u32(src, "bandwidth_hz", &out->bandwidth_hz) ||
+            !get_json_double(src, "nominal_level_dbfs", &out->nominal_level_dbfs)) {
+            json_decref(root);
+            snprintf(error, error_size, "source_invalid");
+            return false;
         }
         if (!get_json_u64(src, "sample_count", &out->sample_count)) {
             out->sample_count = 0;
@@ -358,6 +404,37 @@ bool scenario_validate(scenario_t *scenario, const char *base_dir, char *error, 
                 return false;
             }
         }
+        /* Passthrough variant source: validate each rate variant's file instead of a single
+         * top-level file, and require the sample rates to be distinct (they key the runtime
+         * variant selection). */
+        if (source->source_kind == SCENARIO_SOURCE_IQ_FILE && source->passthrough_variant_count > 0) {
+            if (strcmp(source->format, "ci16") != 0 || strcmp(source->byte_order, "little_endian") != 0 ||
+                strcmp(source->iq_layout, "interleaved_iq") != 0) {
+                snprintf(error, error_size, "source_unsupported");
+                return false;
+            }
+            for (size_t k = 0; k < source->passthrough_variant_count; k++) {
+                scenario_passthrough_variant_t *v = &source->passthrough_variants[k];
+                if (v->sample_rate_hz == 0) {
+                    snprintf(error, error_size, "source_unsupported");
+                    return false;
+                }
+                for (size_t j = k + 1; j < source->passthrough_variant_count; j++) {
+                    if (source->passthrough_variants[j].sample_rate_hz == v->sample_rate_hz) {
+                        snprintf(error, error_size, "passthrough_variant_duplicate_rate");
+                        return false;
+                    }
+                }
+                resolve_asset_path(v->file, sizeof(v->file), base_dir);
+                iq_file_reader_t reader;
+                if (!iq_file_reader_open(&reader, v->file, v->sample_count, error, error_size)) {
+                    return false;
+                }
+                v->sample_count = reader.sample_count;
+                iq_file_reader_close(&reader);
+            }
+            continue;
+        }
         if (source->sample_rate_hz == 0) {
             snprintf(error, error_size, "source_unsupported");
             return false;
@@ -454,6 +531,19 @@ bool scenario_validate(scenario_t *scenario, const char *base_dir, char *error, 
                 snprintf(error, error_size, "passthrough_requires_loop");
                 return false;
             }
+            /* Passthrough streams a rate-matched capture verbatim and never resamples, so the
+             * source must supply one file per supported channel rate. A channel tuned to a
+             * bandwidth with no matching variant renders silence (handled in the renderer). */
+            if (source->passthrough_variant_count == 0) {
+                snprintf(error, error_size, "passthrough_requires_variants");
+                return false;
+            }
+        }
+        /* A variant source only makes sense for passthrough; the mixer path has no single file
+         * to read from it. */
+        if (source->passthrough_variant_count > 0 && !signal->passthrough) {
+            snprintf(error, error_size, "variant_source_requires_passthrough");
+            return false;
         }
         if (source->source_kind == SCENARIO_SOURCE_IQ_FILE && signal->modulation != SCENARIO_MODULATION_IQ) {
             snprintf(error, error_size, "signal_modulation_source_mismatch");

@@ -6,7 +6,9 @@ schema_version: 1
 instance_id: "sim_instance_replay"
 scenario_file: "simulator/scenarios/replay_range_shift.json"
 log_path: "logs/instance_replay.log"
-stream_block_samples: 1024
+# 1536-sample blocks: at 98.304 MS/s, 1024 fires the per-block pacing 96k times/s and can't
+# sustain an 80 MHz stream (~76 MS/s); 1536 drops it to 64k/s and reaches full real-time rate.
+stream_block_samples: 1536
 # Default asset budget is 16 GiB; IQ files beyond it are mmap-backed instead of RAM-copied.
 # Uncomment to override (0 = unlimited RAM, legacy behaviour):
 # asset_cache_max_bytes: 0

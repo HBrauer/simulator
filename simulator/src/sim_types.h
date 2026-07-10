@@ -11,6 +11,7 @@
 #define SIM_MAX_PROFILE_NAME 24
 #define SIM_MAX_SOURCES 64
 #define SIM_MAX_SIGNALS 256
+#define SIM_MAX_PASSTHROUGH_VARIANTS 8
 #define SIM_MAX_PATH 256
 #define SIM_MAX_ID 64
 #define SIM_RECEIVER_BANDWIDTH_HZ 80000000ULL
@@ -116,6 +117,16 @@ typedef struct {
     receiver_config_t receivers[SIM_MAX_RECEIVERS];
 } simulator_config_t;
 
+/* One rate-specific capture of a passthrough source. A passthrough channel selects the variant
+ * whose sample_rate_hz matches its own rate and streams it verbatim; a channel bandwidth with no
+ * matching variant renders silence (passthrough never resamples). */
+typedef struct {
+    char file[SIM_MAX_PATH];
+    uint32_t sample_rate_hz;
+    uint32_t bandwidth_hz;
+    uint64_t sample_count; /* filled in from the file at validation */
+} scenario_passthrough_variant_t;
+
 typedef struct {
     char id[SIM_MAX_ID];
     char source_type[32];
@@ -129,6 +140,10 @@ typedef struct {
     int64_t center_frequency_hz;
     uint64_t sample_count;
     double nominal_level_dbfs;
+    /* Optional: a passthrough source carries one capture per bandwidth here instead of a single
+     * top-level `file`. When non-empty, `file`/`sample_rate_hz` are unused for replay. */
+    size_t passthrough_variant_count;
+    scenario_passthrough_variant_t passthrough_variants[SIM_MAX_PASSTHROUGH_VARIANTS];
 } scenario_source_t;
 
 typedef struct {

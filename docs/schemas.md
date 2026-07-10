@@ -104,17 +104,36 @@ Source fields:
 | --- | --- | --- | --- |
 | `id` | string | yes | Unique source ID. |
 | `source_type` | string | yes | `iq_file` or `audio_file`. |
-| `file` | string | yes | Path to the IQ or audio asset. |
+| `file` | string | yes¹ | Path to the IQ or audio asset. |
 | `format` | string | yes | `ci16` for IQ files, `wav` for audio files. |
 | `byte_order` | string | IQ only | Currently `little_endian`. |
 | `iq_layout` | string | IQ only | Currently `interleaved_iq`. |
-| `sample_rate_hz` | integer | yes | Source sample rate. |
-| `bandwidth_hz` | integer | yes | Source bandwidth. |
-| `center_frequency_hz` | integer | yes | Source-relative center; current sample scenarios use `0`. |
+| `sample_rate_hz` | integer | yes¹ | Source sample rate. |
+| `bandwidth_hz` | integer | yes¹ | Source bandwidth. |
+| `center_frequency_hz` | integer | yes¹ | Source-relative center; current sample scenarios use `0`. |
 | `sample_count` | integer | no | Number of complex/audio samples in the file. CI16 and WAV sources can derive this from file size. |
-| `nominal_level_dbfs` | number | yes | Source nominal digital level. |
+| `nominal_level_dbfs` | number | yes¹ | Source nominal digital level. |
+| `passthrough_variants` | array | no | One capture per channel rate for passthrough replay (see below). When present, the top-level `file`/`sample_rate_hz`/`bandwidth_hz`/`center_frequency_hz`/`nominal_level_dbfs` are unused. |
+
+¹ Not required when `passthrough_variants` is present.
 
 `audio_file` sources currently support PCM16 WAV, mono or stereo. Stereo is folded to mono in the asset cache.
+
+**`passthrough_variants`** — an IQ-file source that feeds a `passthrough` signal supplies one capture per channel sample rate instead of a single `file`. Each entry is `{ "sample_rate_hz": ..., "bandwidth_hz": ..., "file": ... }` (plus optional `sample_count`); the rates must be distinct. At render time the passthrough path selects the variant whose `sample_rate_hz` matches the channel's current rate and streams it verbatim; a channel bandwidth with no matching variant is silent. Example:
+
+```json
+{
+  "id": "capture_fm",
+  "source_type": "iq_file",
+  "format": "ci16",
+  "byte_order": "little_endian",
+  "iq_layout": "interleaved_iq",
+  "passthrough_variants": [
+    { "sample_rate_hz": 1536000,  "bandwidth_hz": 1000000,  "file": "assets/cap_1m.c16" },
+    { "sample_rate_hz": 24576000, "bandwidth_hz": 20000000, "file": "assets/cap_20m.c16" }
+  ]
+}
+```
 
 Signal fields:
 
@@ -133,7 +152,7 @@ Signal fields:
 | `replay_mode` | string | no | `fixed` (default), `range`, or `shift`. See below. |
 | `frequency_range` | object | range/shift | `{ "start_hz": ..., "stop_hz": ... }`. The tune interval in which the signal is active. |
 | `loop` | bool | no | Continuous epoch-anchored looping of the file (no silent gap). Defaults to `true` for `range`/`shift`, `false` for `fixed`. IQ-file sources only. |
-| `passthrough` | bool | no | Bypasses the mixer entirely for a channel dedicated to this one signal (see below). Requires `replay_mode` `range` or `shift` and `loop: true`. Defaults to `false`. |
+| `passthrough` | bool | no | Bypasses the mixer entirely for a channel dedicated to this one capture (see below). Requires `replay_mode` `range`/`shift`, `loop: true`, and a source with `passthrough_variants`. Defaults to `false`. |
 
 Replay modes (IQ-file sources with `iq` modulation only):
 
@@ -143,9 +162,11 @@ Replay modes (IQ-file sources with `iq` modulation only):
 
 Looping playback position is an exact function of the absolute epoch-derived sample index (`position = output_sample_index * source_rate / output_rate mod file_length`), so independently started simulator instances emit identical samples at identical wall-clock times. The position wraps at midnight UTC together with the day-anchored timebase.
 
-**`passthrough`** — for a channel whose only job is to replay one capture, the general renderer (float mix bus, per-signal passband/gain machinery, noise floor) is overhead the use case doesn't need. Setting `passthrough: true` on a `range`/`shift` signal makes it bypass the mixer entirely whenever it's active *and* the channel's sample rate exactly matches the source's: the samples are written straight to the output (a literal `memcpy` when `power_dbm == rf_reference_power_dbm` and `output_scale == 1.0`; a scaled copy otherwise; a frequency-rotated copy for shift mode away from its nominal center). This is meaningfully cheaper than even the mixer's own direct-copy fast path — roughly 15x less render time per block in local measurements — because it also skips the mix-bus zero/accumulate/saturate round trip and the noise-floor/other-signal bookkeeping the mixer always performs.
+**`passthrough`** — for a channel whose only job is to replay one capture, the general renderer (float mix bus, per-signal passband/gain machinery, noise floor) is overhead the use case doesn't need. A passthrough signal references a **variant source** (see `passthrough_variants` below): one capture file per supported channel sample rate. Whenever the signal is active for the tune, the renderer picks the variant whose `sample_rate_hz` equals the channel's current rate and streams it verbatim — a literal `memcpy` when `power_dbm == rf_reference_power_dbm` and `output_scale == 1.0`; a scaled copy otherwise; a frequency-rotated copy for shift mode away from its nominal center. It **never resamples**: passthrough is a copy, not a DSP path. This is meaningfully cheaper than even the mixer's own direct-copy fast path — roughly 15x less render time per block in local measurements — because it also skips the mix-bus zero/accumulate/saturate round trip and the noise-floor/other-signal bookkeeping the mixer always performs.
 
-Because a passthrough channel bypasses the mixer completely, **any other signal that would otherwise be active for the same channel window is silently not rendered** while the passthrough signal is active — passthrough is exclusive by design, not an overlay. If you want to combine a replay capture with other signals or a noise floor, leave `passthrough` unset (or `false`) and use the general renderer instead; `range`/`shift` semantics and epoch-anchored looping work identically either way. When the channel's sample rate doesn't match the source (e.g. a wideband channel spanning many signals), the fast path silently declines and the general renderer handles that channel/block as usual — so a scenario is never *incorrect* for having `passthrough: true` on a signal also visible to a non-matching-rate channel, just not accelerated there.
+A channel whose current rate has **no matching variant** renders **silence** (all-zero payload), not a resampled approximation — so an 80 MHz channel replaying a capture set that only contains a 1 MHz and 20 MHz rendition simply goes quiet at 80 MHz. This makes bandwidth support explicit: you provide a file for each bandwidth you want to play back, and only those bandwidths produce output.
+
+Because a passthrough channel bypasses the mixer completely, **any other signal that would otherwise be active for the same channel window is not rendered** while the passthrough signal is active — passthrough is exclusive by design, not an overlay. If you want to combine a replay capture with other signals or a noise floor, leave `passthrough` unset (or `false`) and use the general renderer instead (which resamples as needed); `range`/`shift` semantics and epoch-anchored looping work identically either way.
 
 Optional `noise_floor` object:
 
@@ -182,5 +203,10 @@ Validation error codes include:
 - `loop_source_unsupported`
 - `passthrough_requires_replay_mode`
 - `passthrough_requires_loop`
+- `passthrough_requires_variants`
+- `variant_source_requires_passthrough`
+- `passthrough_variants_invalid`
+- `passthrough_variant_invalid`
+- `passthrough_variant_duplicate_rate`
 - `noise_floor_invalid`
 - `noise_floor_conflicting_power`
