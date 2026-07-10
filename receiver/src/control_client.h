@@ -39,6 +39,11 @@ typedef struct {
     uint64_t frequency_min_hz;
     uint64_t frequency_max_hz;
     uint64_t frontend_bandwidth_hz;
+    /* Current receiver tuner span (fixed-mode center is its midpoint). Populated from the
+     * capabilities `tuner` object and refreshed whenever the range is changed. */
+    uint64_t tuner_start_hz;
+    uint64_t tuner_stop_hz;
+    double scan_rate_hz_per_s;
     char udp_output_host[CONTROL_MAX_HOST];
     size_t profile_count;
     control_profile_t profiles[CONTROL_MAX_PROFILES];
@@ -58,5 +63,9 @@ bool control_client_set_channel(control_client_t *client, uint32_t channel_id, c
 
 /* POST the channel's stream enable flag. */
 bool control_client_set_stream(control_client_t *client, uint32_t channel_id, bool enabled, char *error, size_t error_size);
+
+/* POST a new receiver tuner range (moves the front-end window; tuner-tracking channels follow).
+ * On success the client's cached tuner_start_hz/tuner_stop_hz are updated from the response. */
+bool control_client_set_frequency_range(control_client_t *client, uint64_t start_hz, uint64_t stop_hz, char *error, size_t error_size);
 
 #endif

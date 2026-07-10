@@ -269,6 +269,15 @@ bool control_client_init(control_client_t *client, const char *base_url, char *e
     client->frequency_min_hz = json_u64(capabilities, "frequency_min_hz");
     client->frequency_max_hz = json_u64(capabilities, "frequency_max_hz");
     client->frontend_bandwidth_hz = json_u64(capabilities, "frontend_bandwidth_hz");
+    json_t *tuner = json_object_get(capabilities, "tuner");
+    if (json_is_object(tuner)) {
+        client->tuner_start_hz = json_u64(tuner, "frequency_start_hz");
+        client->tuner_stop_hz = json_u64(tuner, "frequency_stop_hz");
+        json_t *scan_rate = json_object_get(tuner, "scan_rate_hz_per_s");
+        if (json_is_number(scan_rate)) {
+            client->scan_rate_hz_per_s = json_number_value(scan_rate);
+        }
+    }
     json_t *udp_host = json_object_get(capabilities, "udp_output_host");
     if (json_is_string(udp_host)) {
         snprintf(client->udp_output_host, sizeof(client->udp_output_host), "%s", json_string_value(udp_host));
@@ -322,6 +331,26 @@ bool control_client_set_channel(control_client_t *client, uint32_t channel_id, c
         set_error(error, error_size, "unexpected channel response");
     }
     return ok;
+}
+
+bool control_client_set_frequency_range(control_client_t *client, uint64_t start_hz, uint64_t stop_hz, char *error, size_t error_size)
+{
+    char body[128];
+    snprintf(body, sizeof(body), "{\"frequency_start_hz\":%llu,\"frequency_stop_hz\":%llu}", (unsigned long long)start_hz, (unsigned long long)stop_hz);
+    json_t *response = request_json(client, "POST", "/api/v1/frequency-range", body, error, error_size);
+    if (response == NULL) {
+        return false;
+    }
+    const uint64_t new_start = json_u64(response, "frequency_start_hz");
+    const uint64_t new_stop = json_u64(response, "frequency_stop_hz");
+    json_decref(response);
+    if (new_start == 0U || new_stop <= new_start) {
+        set_error(error, error_size, "unexpected frequency-range response");
+        return false;
+    }
+    client->tuner_start_hz = new_start;
+    client->tuner_stop_hz = new_stop;
+    return true;
 }
 
 bool control_client_set_stream(control_client_t *client, uint32_t channel_id, bool enabled, char *error, size_t error_size)

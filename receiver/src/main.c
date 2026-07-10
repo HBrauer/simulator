@@ -197,9 +197,10 @@ static void usage(const char *argv0)
             "                              --port and --sample-rate-hz are then not needed.\n"
             "  --channel N                 Initial channel to receive (with --control-url), default 0\n"
             "\n"
-            "Controls (with --control-url): channel and bandwidth combo boxes in the toolbar,\n"
-            "and a center-frequency field (click, type MHz, Enter commits, Esc cancels).\n"
-            "Keys: PgUp/PgDn or 0-7 select channel, Left/Right retune (Shift = x10),\n"
+            "Controls (with --control-url): an RX field that moves the receiver tuner (span\n"
+            "preserved; tuner-tracking channels follow), channel and bandwidth combo boxes, and a\n"
+            "channel center-frequency field. Click a field, type MHz, Enter commits, Esc cancels.\n"
+            "Keys: PgUp/PgDn or 0-7 select channel, Left/Right retune the channel (Shift = x10),\n"
             "B cycles the bandwidth profile.\n",
             argv0);
 }
@@ -608,6 +609,54 @@ static void control_step_frequency(control_state_t *control, rx_stats_t *stats, 
     control_set_center(control, stats, center);
 }
 
+/* Fixed-mode receiver center: the midpoint of the tuner span (matches the simulator's
+ * receiver_fixed_center_hz, including its round-half-up on two odd endpoints). */
+static uint64_t control_receiver_center_hz(const control_state_t *control)
+{
+    const control_client_t *client = &control->client;
+    return client->tuner_start_hz / 2U + client->tuner_stop_hz / 2U +
+        ((client->tuner_start_hz & 1U) && (client->tuner_stop_hz & 1U) ? 1U : 0U);
+}
+
+/* Move the receiver tuner to a new center, preserving the current span (clamped to the
+ * receiver's frequency limits). Tuner-tracking channels follow automatically, so the channel
+ * list is re-read afterwards to update their reported center and in-window flags. */
+static void control_set_receiver_center(control_state_t *control, rx_stats_t *stats, uint64_t center_hz)
+{
+    control_client_t *client = &control->client;
+    const uint64_t span = client->tuner_stop_hz > client->tuner_start_hz
+        ? client->tuner_stop_hz - client->tuner_start_hz
+        : 0U;
+    const uint64_t low_half = span / 2U;
+    const uint64_t high_half = span - low_half;
+    if (center_hz < client->frequency_min_hz + low_half) {
+        center_hz = client->frequency_min_hz + low_half;
+    }
+    if (client->frequency_max_hz > 0U && center_hz + high_half > client->frequency_max_hz) {
+        center_hz = client->frequency_max_hz - high_half;
+    }
+    const uint64_t start = center_hz - low_half;
+    const uint64_t stop = center_hz + high_half;
+
+    char error[CONTROL_MAX_ERROR];
+    if (!control_client_set_frequency_range(client, start, stop, error, sizeof(error))) {
+        fprintf(stderr, "control: %s\n", error);
+        return;
+    }
+    /* Channel 0 (and any other tuner-tracking channel) just moved with the tuner; refresh so
+     * the frequency field and out-of-window flags reflect it. Best-effort: a failed refresh
+     * still leaves the tuner moved. */
+    if (!control_client_refresh(client, error, sizeof(error))) {
+        fprintf(stderr, "control: %s\n", error);
+    }
+    if (stats != 0 && control_current(control)->track_tuner) {
+        stats->stream_center_hz = control_current(control)->center_frequency_hz;
+    }
+    fprintf(stderr, "receiver center %.6f MHz (span %.3f MHz)\n",
+            (double)control_receiver_center_hz(control) / 1000000.0,
+            (double)span / 1000000.0);
+}
+
 /* Switch the channel to a supported bandwidth profile. The paired sample rate is
  * applied by the server; the waterfall follows it. */
 static void control_set_bandwidth(app_config_t *config, control_state_t *control, waterfall_t *wf, frame_sampler_t *sampler, rx_stats_t *stats, uint32_t bandwidth_hz)
@@ -770,12 +819,15 @@ typedef struct {
     SDL_Rect history_minus_button;
     SDL_Rect history_plus_button;
     /* Control widgets (drawn and hit-tested only with --control-url). */
+    SDL_Rect rx_freq_field;
     SDL_Rect channel_combo;
     SDL_Rect freq_field;
     SDL_Rect bandwidth_combo;
     int open_combo; /* 0 = none, 1 = channel, 2 = bandwidth */
     bool freq_editing;
     char freq_edit[UI_FREQ_EDIT_MAX];
+    bool rx_freq_editing;
+    char rx_freq_edit[UI_FREQ_EDIT_MAX];
 } ui_t;
 
 #define UI_COMBO_NONE 0
@@ -1018,9 +1070,12 @@ static void ui_layout(ui_t *ui, int window_width)
         .h = UI_BUTTON_SIZE,
     };
 
-    /* Control group on the left: channel combo, frequency input field + MHz label,
-     * bandwidth combo. */
+    /* Control group on the left: receiver-tuner field ("RX"), channel combo, channel
+     * frequency input field + MHz label, bandwidth combo. */
     int x = UI_BUTTON_MARGIN;
+    x += ui_text_width(UI_TEXT_SCALE, "RX") + 4;
+    ui->rx_freq_field = (SDL_Rect){.x = x, .y = button_y, .w = UI_FREQ_FIELD_WIDTH, .h = UI_BUTTON_SIZE};
+    x += UI_FREQ_FIELD_WIDTH + 4 + ui_text_width(UI_TEXT_SCALE, "MHZ") + 2 * UI_BUTTON_MARGIN;
     ui->channel_combo = (SDL_Rect){.x = x, .y = button_y, .w = UI_CHANNEL_COMBO_WIDTH, .h = UI_BUTTON_SIZE};
     x += UI_CHANNEL_COMBO_WIDTH + 2 * UI_BUTTON_MARGIN;
     ui->freq_field = (SDL_Rect){.x = x, .y = button_y, .w = UI_FREQ_FIELD_WIDTH, .h = UI_BUTTON_SIZE};
@@ -1233,27 +1288,60 @@ static void freq_edit_commit(ui_t *ui, control_state_t *control, rx_stats_t *sta
     control_set_center(control, stats, (uint64_t)llround(mhz * 1000000.0));
 }
 
-static void freq_edit_append(ui_t *ui, const char *text)
+/* Append the digits/decimal point of `text` to a frequency-edit buffer (shared by the channel
+ * and receiver fields). */
+static void freq_text_append(char *buffer, size_t buffer_size, const char *text)
 {
     for (const char *p = text; *p != '\0'; p++) {
         if ((*p < '0' || *p > '9') && *p != '.') {
             continue;
         }
-        const size_t len = strlen(ui->freq_edit);
-        if (len + 1U >= sizeof(ui->freq_edit)) {
+        const size_t len = strlen(buffer);
+        if (len + 1U >= buffer_size) {
             return;
         }
-        ui->freq_edit[len] = *p;
-        ui->freq_edit[len + 1U] = '\0';
+        buffer[len] = *p;
+        buffer[len + 1U] = '\0';
     }
 }
 
-static void freq_edit_backspace(ui_t *ui)
+static void freq_text_backspace(char *buffer)
 {
-    const size_t len = strlen(ui->freq_edit);
+    const size_t len = strlen(buffer);
     if (len > 0U) {
-        ui->freq_edit[len - 1U] = '\0';
+        buffer[len - 1U] = '\0';
     }
+}
+
+/* Receiver-tuner field edit lifecycle, mirroring the channel frequency field. The receiver can
+ * always be moved (no tuner-tracking restriction), so this field is never disabled. */
+static void rx_freq_edit_begin(ui_t *ui, const control_state_t *control)
+{
+    snprintf(ui->rx_freq_edit, sizeof(ui->rx_freq_edit), "%.6f", (double)control_receiver_center_hz(control) / 1000000.0);
+    ui->rx_freq_editing = true;
+    ui->freq_editing = false;
+    ui->open_combo = UI_COMBO_NONE;
+    SDL_StartTextInput();
+}
+
+static void rx_freq_edit_cancel(ui_t *ui)
+{
+    if (ui->rx_freq_editing) {
+        ui->rx_freq_editing = false;
+        SDL_StopTextInput();
+    }
+}
+
+static void rx_freq_edit_commit(ui_t *ui, control_state_t *control, rx_stats_t *stats)
+{
+    const double mhz = strtod(ui->rx_freq_edit, 0);
+    const bool valid = mhz > 0.0;
+    rx_freq_edit_cancel(ui);
+    if (!valid) {
+        fprintf(stderr, "control: invalid receiver frequency '%s'\n", ui->rx_freq_edit);
+        return;
+    }
+    control_set_receiver_center(control, stats, (uint64_t)llround(mhz * 1000000.0));
 }
 
 /* When the in-band VITA context reports a configuration that contradicts the cached REST
@@ -1295,6 +1383,20 @@ static void ui_draw_toolbar(ui_t *ui, const app_config_t *config, const control_
 
     if (control->enabled) {
         const control_channel_t *channel = control_current(control);
+
+        /* Receiver tuner field ("RX"): moves the whole front-end window; tuner-tracking
+         * channels follow. Always editable. */
+        SDL_SetRenderDrawColor(ui->renderer, 160, 172, 186, 255);
+        ui_text_draw(ui->renderer, ui->rx_freq_field.x - ui_text_width(UI_TEXT_SCALE, "RX") - 4, ui_widget_text_y(ui->rx_freq_field), UI_TEXT_SCALE, "RX");
+        char rx_text[UI_FREQ_EDIT_MAX];
+        if (ui->rx_freq_editing) {
+            snprintf(rx_text, sizeof(rx_text), "%s", ui->rx_freq_edit);
+        } else {
+            snprintf(rx_text, sizeof(rx_text), "%.6f", (double)control_receiver_center_hz(control) / 1000000.0);
+        }
+        ui_draw_freq_field(ui->renderer, ui->rx_freq_field, rx_text, ui->rx_freq_editing, true);
+        SDL_SetRenderDrawColor(ui->renderer, 160, 172, 186, 255);
+        ui_text_draw(ui->renderer, ui->rx_freq_field.x + ui->rx_freq_field.w + 6, ui_widget_text_y(ui->rx_freq_field), UI_TEXT_SCALE, "MHZ");
 
         char channel_label[16];
         snprintf(channel_label, sizeof(channel_label), "CH%u", control->channel);
@@ -1620,19 +1722,28 @@ int main(int argc, char **argv)
                         keep_running = 0;
                     }
                     ui_needs_redraw = true;
-                } else if (event.type == SDL_TEXTINPUT && ui.freq_editing) {
-                    freq_edit_append(&ui, event.text.text);
+                } else if (event.type == SDL_TEXTINPUT && (ui.freq_editing || ui.rx_freq_editing)) {
+                    if (ui.freq_editing) {
+                        freq_text_append(ui.freq_edit, sizeof(ui.freq_edit), event.text.text);
+                    } else {
+                        freq_text_append(ui.rx_freq_edit, sizeof(ui.rx_freq_edit), event.text.text);
+                    }
                     ui_needs_redraw = true;
-                } else if (event.type == SDL_KEYDOWN && ui.freq_editing) {
-                    /* The frequency field swallows all keys while editing, so digits and
+                } else if (event.type == SDL_KEYDOWN && (ui.freq_editing || ui.rx_freq_editing)) {
+                    /* A frequency field swallows all keys while editing, so digits and
                      * `B` do not double as channel/bandwidth shortcuts. */
                     const SDL_Keycode sym = event.key.keysym.sym;
                     if (sym == SDLK_RETURN || sym == SDLK_KP_ENTER) {
-                        freq_edit_commit(&ui, &control, &stats);
+                        if (ui.freq_editing) {
+                            freq_edit_commit(&ui, &control, &stats);
+                        } else {
+                            rx_freq_edit_commit(&ui, &control, &stats);
+                        }
                     } else if (sym == SDLK_ESCAPE) {
                         freq_edit_cancel(&ui);
+                        rx_freq_edit_cancel(&ui);
                     } else if (sym == SDLK_BACKSPACE) {
-                        freq_edit_backspace(&ui);
+                        freq_text_backspace(ui.freq_editing ? ui.freq_edit : ui.rx_freq_edit);
                     }
                     ui_needs_redraw = true;
                 } else if (event.type == SDL_KEYDOWN) {
@@ -1698,15 +1809,23 @@ int main(int argc, char **argv)
                         }
                     } else if (control.enabled && ui.freq_editing && !ui_point_in_rect(mx, my, &ui.freq_field)) {
                         freq_edit_cancel(&ui);
+                    } else if (control.enabled && ui.rx_freq_editing && !ui_point_in_rect(mx, my, &ui.rx_freq_field)) {
+                        rx_freq_edit_cancel(&ui);
                     } else if (ui_point_in_rect(mx, my, &ui.history_minus_button)) {
                         set_history_seconds(&config, config.history_seconds - 1.0, &sampler);
                     } else if (ui_point_in_rect(mx, my, &ui.history_plus_button)) {
                         set_history_seconds(&config, config.history_seconds + 1.0, &sampler);
+                    } else if (control.enabled && ui_point_in_rect(mx, my, &ui.rx_freq_field)) {
+                        if (!ui.rx_freq_editing) {
+                            rx_freq_edit_begin(&ui, &control);
+                        }
                     } else if (control.enabled && ui_point_in_rect(mx, my, &ui.channel_combo)) {
                         freq_edit_cancel(&ui);
+                        rx_freq_edit_cancel(&ui);
                         ui.open_combo = UI_COMBO_CHANNEL;
                     } else if (control.enabled && ui_point_in_rect(mx, my, &ui.bandwidth_combo)) {
                         freq_edit_cancel(&ui);
+                        rx_freq_edit_cancel(&ui);
                         ui.open_combo = UI_COMBO_BANDWIDTH;
                     } else if (control.enabled && ui_point_in_rect(mx, my, &ui.freq_field)) {
                         if (!ui.freq_editing) {
