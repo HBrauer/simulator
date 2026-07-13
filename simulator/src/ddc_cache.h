@@ -51,6 +51,11 @@ ddc_cache_t *ddc_cache_create(size_t max_bytes);
 void ddc_cache_destroy(ddc_cache_t *cache);
 size_t ddc_cache_used_bytes(ddc_cache_t *cache);
 
+/* Builds are sliced across threads (default: online CPUs, capped at 8); entry content is
+ * bit-identical for any thread count, because rotation is anchored to an absolute chunk grid
+ * and every output is a single dot product. 0 restores the auto default. */
+void ddc_cache_set_build_threads(unsigned threads);
+
 /* Get-or-build the intermediate for `shift_hz` (snapped as described above). Returns a
  * pinned entry -- pair every successful acquire with ddc_cache_release. Returns NULL when
  * the loop length is not divisible by the front decimation (a circular build would smear

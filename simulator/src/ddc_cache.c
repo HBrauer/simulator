@@ -10,9 +10,25 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
-/* Source samples gathered/rotated per executor push during a build. */
+/* Source samples gathered/rotated per executor push during a build. Also the absolute
+ * oscillator re-anchor grid: the rotation of source index i is always computed by recurrence
+ * from the anchor at floor(i / CHUNK) * CHUNK, so rotated values -- and therefore entry
+ * content -- are bit-identical no matter how a build is sliced across threads. */
 #define DDC_CACHE_BUILD_CHUNK 65536U
+/* Builds run one full loop through the front cascade at the source rate (the expensive part
+ * of a cold retune). Slices are independent thanks to history re-priming, so they parallelize
+ * across threads; each slice must be large enough that its re-primed history is noise. */
+#define DDC_CACHE_BUILD_MAX_THREADS 8U
+#define DDC_CACHE_BUILD_MIN_SLICE 16384U /* intermediate samples per slice, minimum */
+
+static unsigned g_ddc_cache_build_threads = 0; /* 0 = auto (online CPUs, capped) */
+
+void ddc_cache_set_build_threads(unsigned threads)
+{
+    g_ddc_cache_build_threads = threads;
+}
 
 struct ddc_cache {
     pthread_mutex_t lock;
@@ -94,19 +110,101 @@ static bool ddc_cache_make_room(ddc_cache_t *cache, size_t needed)
     return true;
 }
 
-/* One pass over the loop: gather (modulo the seam), rotate, run the front cascade, quantize
- * to half-scale ci16. Runs without the cache lock held. */
-static bool ddc_cache_build(ddc_cache_entry_t *entry,
-                            const iq_ci16_t *source_samples,
-                            uint64_t source_sample_count,
-                            uint32_t source_rate_hz,
-                            const ddc_plan_t *front_plan)
+static int64_t ddc_cache_floor_div(int64_t numerator, int64_t denominator)
 {
-    const int64_t loop_samples = (int64_t)source_sample_count;
-    const int64_t ratio = (int64_t)front_plan->ratio;
-    const int64_t reach = (int64_t)front_plan->history_source_samples;
-    const int64_t feed_start = -reach;
-    const int64_t feed_total = ((int64_t)entry->sample_count - 1) * ratio + 2 * reach + 1;
+    const int64_t quotient = numerator / denominator;
+    return (numerator % denominator != 0 && (numerator < 0) != (denominator < 0))
+        ? quotient - 1
+        : quotient;
+}
+
+/* Gather and rotate the absolute source range [start, start + count) into dst, wrapping the
+ * loop seam. The oscillator recurrence is always replayed from the absolute anchor at
+ * floor(i / CHUNK) * CHUNK, so a given index rotates to bit-identical values regardless of
+ * where a build slice begins (the idle replay to mid-chunk starts is at most one chunk). */
+static void ddc_cache_rotate_range(float complex *dst,
+                                   const iq_ci16_t *source_samples,
+                                   int64_t loop_samples,
+                                   uint64_t step_q64,
+                                   double step_c,
+                                   double step_s,
+                                   int64_t start,
+                                   size_t count)
+{
+    size_t filled = 0;
+    while (filled < count) {
+        const int64_t index = start + (int64_t)filled;
+        const int64_t anchor = ddc_cache_floor_div(index, (int64_t)DDC_CACHE_BUILD_CHUNK)
+            * (int64_t)DDC_CACHE_BUILD_CHUNK;
+        const int64_t segment_end = anchor + (int64_t)DDC_CACHE_BUILD_CHUNK;
+        const size_t segment = (size_t)(segment_end - index) < count - filled
+            ? (size_t)(segment_end - index)
+            : count - filled;
+
+        const double phase0 = nco_phase_rad_at(step_q64, (uint64_t)anchor);
+        double osc_c = cos(phase0);
+        double osc_s = sin(phase0);
+        uint64_t k = 0;
+        for (int64_t idle = anchor; idle < index; idle++, k++) {
+            const double next_c = osc_c * step_c - osc_s * step_s;
+            const double next_s = osc_s * step_c + osc_c * step_s;
+            osc_c = next_c;
+            osc_s = next_s;
+            if ((k & 0xffU) == 0xffU) {
+                const double inv = 1.0 / sqrt(osc_c * osc_c + osc_s * osc_s);
+                osc_c *= inv;
+                osc_s *= inv;
+            }
+        }
+        int64_t wrapped = ((index % loop_samples) + loop_samples) % loop_samples;
+        for (size_t j = 0; j < segment; j++, k++) {
+            const double sample_i = (double)source_samples[wrapped].i;
+            const double sample_q = (double)source_samples[wrapped].q;
+            dst[filled + j] = CMPLXF((float)(sample_i * osc_c - sample_q * osc_s),
+                                     (float)(sample_i * osc_s + sample_q * osc_c));
+            wrapped++;
+            if (wrapped == loop_samples) {
+                wrapped = 0;
+            }
+            const double next_c = osc_c * step_c - osc_s * step_s;
+            const double next_s = osc_s * step_c + osc_c * step_s;
+            osc_c = next_c;
+            osc_s = next_s;
+            if ((k & 0xffU) == 0xffU) {
+                const double inv = 1.0 / sqrt(osc_c * osc_c + osc_s * osc_s);
+                osc_c *= inv;
+                osc_s *= inv;
+            }
+        }
+        filled += segment;
+    }
+}
+
+typedef struct {
+    ddc_cache_entry_t *entry;
+    const iq_ci16_t *source_samples;
+    int64_t loop_samples;
+    const ddc_plan_t *front_plan;
+    uint64_t step_q64;
+    double step_c;
+    double step_s;
+    uint64_t out_first; /* intermediate output range [out_first, out_last) of this slice */
+    uint64_t out_last;
+    bool ok;
+} ddc_cache_build_slice_t;
+
+/* Build one contiguous slice of the intermediate: prime a fresh executor with the slice's
+ * history and stream its span through the front cascade. Because every output is a single
+ * dot product over absolutely-anchored rotated values, slice boundaries do not affect the
+ * result. */
+static void *ddc_cache_build_slice(void *arg)
+{
+    ddc_cache_build_slice_t *slice = arg;
+    const ddc_plan_t *plan = slice->front_plan;
+    const int64_t ratio = (int64_t)plan->ratio;
+    const int64_t reach = (int64_t)plan->history_source_samples;
+    const int64_t feed_start = (int64_t)slice->out_first * ratio - reach;
+    const int64_t feed_total = ((int64_t)(slice->out_last - slice->out_first) - 1) * ratio + 2 * reach + 1;
 
     ddc_exec_t *exec = malloc(sizeof(*exec));
     float complex *rotated = malloc(DDC_CACHE_BUILD_CHUNK * sizeof(*rotated));
@@ -115,67 +213,96 @@ static bool ddc_cache_build(ddc_cache_entry_t *entry,
     bool ok = exec != NULL && rotated != NULL && out != NULL;
 
     if (ok) {
-        ddc_exec_init(exec, front_plan, feed_start);
-        const uint64_t step_q64 = nco_phase_step_q64(entry->applied_shift_hz, (double)source_rate_hz);
-        uint64_t written = 0;
+        ddc_exec_init(exec, plan, feed_start);
+        uint64_t written = slice->out_first;
         for (int64_t done = 0; done < feed_total && ok; done += (int64_t)DDC_CACHE_BUILD_CHUNK) {
             const int64_t remaining = feed_total - done;
             const size_t chunk = remaining < (int64_t)DDC_CACHE_BUILD_CHUNK
                 ? (size_t)remaining
                 : DDC_CACHE_BUILD_CHUNK;
-            /* Oscillator re-anchored per chunk at the wrapped source index: the applied shift
-             * is a whole number of cycles per loop, so the phase is the same function of the
-             * wrapped and the unwrapped index, and the recurrence never drifts more than a
-             * chunk's worth of rounding. */
-            const int64_t chunk_start = feed_start + done;
-            const uint64_t wrapped_start =
-                (uint64_t)(((chunk_start % loop_samples) + loop_samples) % loop_samples);
-            const double phase0 = nco_phase_rad_at(step_q64, wrapped_start);
-            double osc_c = cos(phase0);
-            double osc_s = sin(phase0);
-            const double step = 2.0 * M_PI * entry->applied_shift_hz / (double)source_rate_hz;
-            const double step_c = cos(step);
-            const double step_s = sin(step);
-            int64_t wrapped = (int64_t)wrapped_start;
-            for (size_t k = 0; k < chunk; k++) {
-                const iq_ci16_t sample = source_samples[wrapped];
-                wrapped++;
-                if (wrapped == loop_samples) {
-                    wrapped = 0;
-                }
-                const double sample_i = (double)sample.i;
-                const double sample_q = (double)sample.q;
-                rotated[k] = CMPLXF((float)(sample_i * osc_c - sample_q * osc_s),
-                                    (float)(sample_i * osc_s + sample_q * osc_c));
-                const double next_c = osc_c * step_c - osc_s * step_s;
-                const double next_s = osc_s * step_c + osc_c * step_s;
-                osc_c = next_c;
-                osc_s = next_s;
-                if ((k & 0xffU) == 0xffU) {
-                    const double inv = 1.0 / sqrt(osc_c * osc_c + osc_s * osc_s);
-                    osc_c *= inv;
-                    osc_s *= inv;
-                }
-            }
+            ddc_cache_rotate_range(rotated, slice->source_samples, slice->loop_samples,
+                                   slice->step_q64, slice->step_c, slice->step_s,
+                                   feed_start + done, chunk);
             const size_t produced = ddc_exec_push(exec, rotated, chunk, out, out_capacity);
-            if (written + produced > entry->sample_count) {
+            if (written + produced > slice->out_last) {
                 ok = false; /* alignment bug guard; must never happen */
                 break;
             }
             for (size_t k = 0; k < produced; k++) {
-                entry->samples[written + k].i =
+                slice->entry->samples[written + k].i =
                     sim_clip_i16(DDC_CACHE_SAMPLE_SCALE * (double)crealf(out[k]));
-                entry->samples[written + k].q =
+                slice->entry->samples[written + k].q =
                     sim_clip_i16(DDC_CACHE_SAMPLE_SCALE * (double)cimagf(out[k]));
             }
             written += produced;
         }
-        ok = ok && written == entry->sample_count;
+        ok = ok && written == slice->out_last;
     }
 
     free(out);
     free(rotated);
     free(exec);
+    slice->ok = ok;
+    return NULL;
+}
+
+/* One pass over the loop: gather (modulo the seam), rotate, run the front cascade, quantize
+ * to half-scale ci16. Runs without the cache lock held. Sliced across threads (history
+ * re-priming makes slices independent); content is bit-identical for any thread count. */
+static bool ddc_cache_build(ddc_cache_entry_t *entry,
+                            const iq_ci16_t *source_samples,
+                            uint64_t source_sample_count,
+                            uint32_t source_rate_hz,
+                            const ddc_plan_t *front_plan)
+{
+    unsigned threads = g_ddc_cache_build_threads;
+    if (threads == 0) {
+        const long online = sysconf(_SC_NPROCESSORS_ONLN);
+        threads = online > 0 ? (unsigned)online : 1U;
+    }
+    if (threads > DDC_CACHE_BUILD_MAX_THREADS) {
+        threads = DDC_CACHE_BUILD_MAX_THREADS;
+    }
+    const uint64_t max_slices = entry->sample_count / DDC_CACHE_BUILD_MIN_SLICE;
+    if ((uint64_t)threads > max_slices) {
+        threads = max_slices > 0 ? (unsigned)max_slices : 1U;
+    }
+
+    const double step = 2.0 * M_PI * entry->applied_shift_hz / (double)source_rate_hz;
+    ddc_cache_build_slice_t slices[DDC_CACHE_BUILD_MAX_THREADS];
+    pthread_t slice_threads[DDC_CACHE_BUILD_MAX_THREADS];
+    for (unsigned t = 0; t < threads; t++) {
+        slices[t] = (ddc_cache_build_slice_t){
+            .entry = entry,
+            .source_samples = source_samples,
+            .loop_samples = (int64_t)source_sample_count,
+            .front_plan = front_plan,
+            .step_q64 = nco_phase_step_q64(entry->applied_shift_hz, (double)source_rate_hz),
+            .step_c = cos(step),
+            .step_s = sin(step),
+            .out_first = entry->sample_count * t / threads,
+            .out_last = entry->sample_count * (t + 1U) / threads,
+            .ok = false,
+        };
+    }
+    unsigned started = 0;
+    for (unsigned t = 1; t < threads; t++) {
+        if (pthread_create(&slice_threads[t], NULL, ddc_cache_build_slice, &slices[t]) != 0) {
+            break;
+        }
+        started = t;
+    }
+    ddc_cache_build_slice(&slices[0]);
+    bool ok = slices[0].ok;
+    for (unsigned t = 1; t <= started; t++) {
+        pthread_join(slice_threads[t], NULL);
+        ok = ok && slices[t].ok;
+    }
+    /* If some worker threads never started, run their slices inline. */
+    for (unsigned t = started + 1U; t < threads; t++) {
+        ddc_cache_build_slice(&slices[t]);
+        ok = ok && slices[t].ok;
+    }
     return ok;
 }
 

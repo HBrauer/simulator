@@ -157,3 +157,33 @@ Two things make replay *look* worse than generation even though its render is fa
    request it with `setsockopt(SO_RCVBUF, ~8 MB)` -- a socket only gets a big buffer if it asks *and*
    the ceiling allows it. With a single 80 MHz stream and an adequate receive buffer the waterfall
    sees the full ~98.3 MS/s.
+
+## DDC sub-band channels from wideband recordings (ddc.c / ddc_cache.c)
+
+Load: `renderer_ddc_channels` benchmark — `instance_ddc.yaml` (one 80 MHz track-tuner channel +
+20 narrow DDC channels, 500 kHz .. 1 kHz) extracting from a shift-mode 80 MHz loop replay
+(`benchmark_ddc.json`, the committed 10 ms capture). This entry uses `--sum-rates`, so the
+printed ratio credits every channel's own stream time (the right measure for mixed-rate loads),
+unlike the wideband-only crediting of the older entries above.
+
+Measured on a 2-core codespace, default build (`simrender` at -O3, no `-march=native`):
+
+| Measurement | Value |
+| --- | --- |
+| Steady state, all 21 channels (`--sum-rates` ratio) | ~480x real time aggregate |
+| Wideband channel alone | 3.6x real time |
+| Per-DDC-channel block cost (steady state, cache hit) | ~0.6 ms per 4096-sample block |
+| Cold cache build (front cascade over one full loop) | ~1.1 s of loop per wall-second per thread |
+
+Steady state is dominated by the tail cascade's final-stage dot products (a few hundred taps at
+the channel rate) — 20 dwelling DDC channels together cost a small fraction of the wideband
+channel. The number that matters operationally is the **cold build**: retuning a DDC channel to
+an uncached tune area runs the shifted front cascade over one entire source loop, costing
+~1 second of wall time per second of recording per thread on this box (scalar rotation dominates;
+expect 2-3x better with `-Dnative_optimizations=true` on real hardware). Builds are sliced across
+up to 8 threads (`ddc_cache_set_build_threads`, bit-identical content for any thread count), so a
+60 s recording costs roughly 60 / (threads x per-thread rate) seconds of one-time stall per new
+tune area — prewarmed at startup for configured centers, amortized by the LRU cache for revisits.
+Future headroom if cold retunes need to get faster: fold the shift into complex-bandpass
+first-stage taps (removes the per-sample oscillator, the current build bottleneck) and/or a VOLK
+rotator on the build gather path.

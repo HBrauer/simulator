@@ -196,6 +196,45 @@ START_TEST(lru_eviction_keeps_budget_and_rebuilds_on_demand)
 }
 END_TEST
 
+START_TEST(parallel_build_is_bit_identical_to_single_thread)
+{
+    /* A loop long enough to split into multiple build slices (>= 4 x 16384 intermediate
+     * samples). Rotation anchors sit on an absolute chunk grid, so the slicing must not
+     * change a single bit of the entry. */
+    enum { LONG_LOOP = 524288 };
+    static iq_ci16_t source[LONG_LOOP];
+    for (size_t p = 0; p < LONG_LOOP; p++) {
+        const double phase = 2.0 * M_PI * 10000.0 * (double)p / (double)TEST_SOURCE_RATE;
+        source[p].i = (int16_t)lrint(TEST_TONE_AMPLITUDE * cos(phase));
+        source[p].q = (int16_t)lrint(TEST_TONE_AMPLITUDE * sin(phase));
+    }
+
+    ddc_cache_set_build_threads(1);
+    ddc_cache_t *single = ddc_cache_create(1U << 20);
+    const ddc_cache_entry_t *single_entry = ddc_cache_acquire(
+        single, "src", source, LONG_LOOP, TEST_SOURCE_RATE,
+        3000.0, TEST_INTERMEDIATE_RATE, front_plan());
+    ck_assert_ptr_nonnull(single_entry);
+
+    ddc_cache_set_build_threads(4);
+    ddc_cache_t *parallel = ddc_cache_create(1U << 20);
+    const ddc_cache_entry_t *parallel_entry = ddc_cache_acquire(
+        parallel, "src", source, LONG_LOOP, TEST_SOURCE_RATE,
+        3000.0, TEST_INTERMEDIATE_RATE, front_plan());
+    ck_assert_ptr_nonnull(parallel_entry);
+    ddc_cache_set_build_threads(0);
+
+    ck_assert_uint_eq(single_entry->sample_count, parallel_entry->sample_count);
+    ck_assert_int_eq(memcmp(single_entry->samples, parallel_entry->samples,
+                            (size_t)single_entry->sample_count * sizeof(iq_ci16_t)), 0);
+
+    ddc_cache_release(single, single_entry);
+    ddc_cache_release(parallel, parallel_entry);
+    ddc_cache_destroy(single);
+    ddc_cache_destroy(parallel);
+}
+END_TEST
+
 START_TEST(acquire_rejects_impossible_requests)
 {
     fill_source_tone();
@@ -225,6 +264,7 @@ Suite *ddc_cache_suite(void)
     tcase_add_test(tc, build_matches_direct_circular_convolution_at_the_seam);
     tcase_add_test(tc, nearby_shifts_snap_to_the_same_entry);
     tcase_add_test(tc, lru_eviction_keeps_budget_and_rebuilds_on_demand);
+    tcase_add_test(tc, parallel_build_is_bit_identical_to_single_thread);
     tcase_add_test(tc, acquire_rejects_impossible_requests);
     suite_add_tcase(suite, tc);
     return suite;

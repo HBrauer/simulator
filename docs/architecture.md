@@ -72,7 +72,9 @@ The deterministic inputs are:
 - scenario time.
 - receiver tuner/channel configuration at that scenario time.
 
-Given the same inputs, `renderer_render_channel_block` emits the same CI16 samples. Integration tests parse the VITA 49.2 wrapper and compare the IQ payload against `--render-once-samples` output (channel 0) for the same scenario time.
+Given the same inputs, `renderer_render_channel_block` emits the same CI16 samples. Integration tests parse the VITA 49.2 wrapper and compare the IQ payload against `--render-once-samples` output (channel selectable with `--render-channel`) for the same scenario time.
+
+The DDC sub-band path (narrow channels extracting from wideband loop replays, `ddc.c`/`ddc_cache.c`) preserves this model with two mechanisms. Per block, the multi-stage decimation cascade is re-initialized and primed with its full filter history from the in-memory loop (the generalization of the resampler's kernel-radius history), so no DSP state survives between blocks and any block index renders identically in isolation. The cached intermediate sub-bands are themselves pure functions of (source samples, applied shift, intermediate rate, front filter plan): the applied shift is snapped to whole cycles per loop so the circular build is exactly periodic, rotation is anchored to an absolute chunk grid so builds are bit-identical for any build-thread count, and the sub-Hz snap remainder is carried by the per-block residual NCO anchored to the absolute sample index. A cold cache build stalls only the requesting channel's render thread (delivery timing, like any real-time overrun); the content of every delivered block is unaffected.
 
 ## Data Format
 
@@ -86,4 +88,4 @@ UDP datagrams contain VITA 49.2 IF-data packets. The simulator emits:
 CI16 payload: I0:int16 Q0:int16 I1:int16 Q1:int16 ...
 ```
 
-The CI16 payload remains little-endian interleaved IQ. The packet payload sample count is `stream_block_samples`. The default is 1024 samples and the supported range is 1 to 4096 samples. Interleaved IF-context packets (packet type 4) carry the channel's RF reference frequency, bandwidth, and sample rate; see [vita49_udp.md](vita49_udp.md).
+The CI16 payload remains little-endian interleaved IQ. The packet payload sample count is `stream_block_samples` (default 1024, supported range 1 to 4096), except on low-rate channels, where it shrinks to the largest power of two keeping at least ~4 blocks per second (floor 64) — a 2 kS/s DDC channel emits 256-sample / 128 ms packets so pacing and the context heartbeat stay bounded. Interleaved IF-context packets (packet type 4) carry the channel's RF reference frequency, bandwidth, and sample rate; see [vita49_udp.md](vita49_udp.md).

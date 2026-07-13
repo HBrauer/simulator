@@ -49,6 +49,7 @@ int main(int argc, char **argv)
     size_t samples_per_block = 4096;
     size_t receivers = 1;
     bool all_channels = false;
+    bool sum_rates = false;
     double assert_realtime = 0.0;
     const char *config_path = "simulator/configs/instance_001.yaml";
     const char *scenario_path = "simulator/scenarios/test_scenario_001.json";
@@ -62,6 +63,8 @@ int main(int argc, char **argv)
     for (int i = 3; i < argc; i++) {
         if (strcmp(argv[i], "--all-channels") == 0 || strcmp(argv[i], "--with-ddc") == 0) {
             all_channels = true;
+        } else if (strcmp(argv[i], "--sum-rates") == 0) {
+            sum_rates = true;
         } else if (i + 1 < argc && strcmp(argv[i], "--json") == 0) {
             json_path = argv[++i];
         } else if (i + 1 < argc && strcmp(argv[i], "--receivers") == 0) {
@@ -127,8 +130,17 @@ int main(int argc, char **argv)
     const double samples_per_second = seconds > 0.0 ? samples / seconds : 0.0;
     /* Wall-clock time these blocks represent for the wideband stream. If the machine renders the
      * whole configured load (all receivers, wideband + DDCs) in less than this, one core sustains
-     * it in real time; the ratio is the headroom (>=1.3 == the P9 target of 30% headroom). */
-    const double represented_seconds = (double)blocks * (double)samples_per_block / (double)config.receivers[0].channels[0].sample_rate_hz;
+     * it in real time; the ratio is the headroom (>=1.3 == the P9 target of 30% headroom).
+     * With --sum-rates the represented time sums every rendered channel's own rate instead --
+     * the right measure for mixed-rate loads (e.g. one wideband channel plus many narrow DDC
+     * channels, where a low-rate block represents far more stream time than a wideband one). */
+    double represented_seconds = (double)blocks * (double)samples_per_block / (double)config.receivers[0].channels[0].sample_rate_hz;
+    if (sum_rates && all_channels) {
+        for (size_t c = 1; c < config.receivers[0].channel_count; c++) {
+            represented_seconds += (double)blocks * (double)samples_per_block / (double)config.receivers[0].channels[c].sample_rate_hz;
+        }
+        represented_seconds *= (double)receivers;
+    }
     const double realtime_ratio = seconds > 0.0 ? represented_seconds / seconds : 0.0;
     printf("blocks=%zu samples_per_block=%zu receivers=%zu all_channels=%s seconds=%.6f samples_per_second=%.3f realtime_ratio=%.2f\n",
            blocks, samples_per_block, receivers, all_channels ? "yes" : "no", seconds, samples_per_second, realtime_ratio);
