@@ -27,6 +27,10 @@ typedef struct {
 bool streamer_manager_start(streamer_manager_t **manager, const streamer_config_t *config);
 void streamer_manager_stop(streamer_manager_t *manager);
 uint64_t streamer_block_duration_ns(size_t block_samples, uint32_t sample_rate_hz);
+/* Effective per-block sample count for a channel rate: low rates shrink below the configured
+ * block size (largest power of two keeping >= ~4 blocks/s, floor 64) so a 2 kS/s DDC channel
+ * doesn't emit multi-second packets or starve the ~1 s context heartbeat. */
+size_t streamer_block_samples_for_rate(size_t configured_block_samples, uint32_t sample_rate_hz);
 
 /* Deterministic block grid. Block boundaries are anchored to the start of the current
  * UTC day so any two instances with the same sample rate agree on which samples belong

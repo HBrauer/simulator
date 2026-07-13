@@ -21,6 +21,17 @@
 #define RINGBUFFER_PACKET_CAPACITY 8U
 #define STREAM_SEND_BATCH_SIZE 16U
 #define CONTEXT_PACKET_INTERVAL_NS 1000000000ULL
+/* Low-rate channels shrink their block below the configured size so block latency, pacing,
+ * and the context heartbeat stay bounded (~>= 4 blocks/s); never below this floor. */
+#define STREAM_MIN_BLOCK_SAMPLES 64U
+
+/* Ringbuffer record: rendered payload prefixed with its actual sample count, which can be
+ * below the configured block size for low-rate channels (and can change on a REST rate
+ * switch while records are still in flight to the UDP thread). */
+typedef struct {
+    uint64_t sample_count;
+    iq_ci16_t samples[];
+} stream_block_record_t;
 
 typedef struct {
     atomic_bool *running;
@@ -51,6 +62,20 @@ struct streamer_manager {
     size_t worker_count;
     stream_worker_t workers[SIM_MAX_RECEIVERS * SIM_MAX_CHANNELS];
 };
+
+size_t streamer_block_samples_for_rate(size_t configured_block_samples, uint32_t sample_rate_hz)
+{
+    if (configured_block_samples == 0 || sample_rate_hz == 0) {
+        return configured_block_samples;
+    }
+    /* Largest power of two giving at least ~4 blocks per second (<= rate/4 samples),
+     * floored at STREAM_MIN_BLOCK_SAMPLES. Only rates below 4 * configured shrink. */
+    size_t cap = STREAM_MIN_BLOCK_SAMPLES;
+    while (cap * 2U <= (size_t)(sample_rate_hz / 4U)) {
+        cap *= 2U;
+    }
+    return configured_block_samples < cap ? configured_block_samples : cap;
+}
 
 uint64_t streamer_block_duration_ns(size_t block_samples, uint32_t sample_rate_hz)
 {
@@ -170,30 +195,30 @@ static void record_worker_error(stream_worker_t *worker, const char *reason)
     fprintf(stderr, "error: stream worker (receiver %u, channel %zu) failed: %s\n", worker->receiver->id, worker->channel_index, reason);
 }
 
-static void record_overrun(stream_worker_t *worker)
+static void record_overrun(stream_worker_t *worker, uint64_t block_samples)
 {
     atomic_fetch_add(&worker->metrics->ringbuffer_overruns, 1);
-    atomic_fetch_add(&worker->metrics->samples_dropped, worker->block_samples);
+    atomic_fetch_add(&worker->metrics->samples_dropped, block_samples);
     atomic_fetch_add(&worker->stream_metrics->ringbuffer_overruns, 1);
-    atomic_fetch_add(&worker->stream_metrics->samples_dropped, worker->block_samples);
+    atomic_fetch_add(&worker->stream_metrics->samples_dropped, block_samples);
 }
 
-static void record_underrun(stream_worker_t *worker)
+static void record_underrun(stream_worker_t *worker, uint64_t block_samples)
 {
     atomic_fetch_add(&worker->metrics->ringbuffer_underruns, 1);
-    atomic_fetch_add(&worker->metrics->samples_missed, worker->block_samples);
+    atomic_fetch_add(&worker->metrics->samples_missed, block_samples);
     atomic_fetch_add(&worker->stream_metrics->ringbuffer_underruns, 1);
-    atomic_fetch_add(&worker->stream_metrics->samples_missed, worker->block_samples);
+    atomic_fetch_add(&worker->stream_metrics->samples_missed, block_samples);
 }
 
-static void record_send_drop(stream_worker_t *worker, int error_code)
+static void record_send_drop(stream_worker_t *worker, int error_code, uint64_t block_samples)
 {
     atomic_fetch_add(&worker->metrics->udp_send_errors, 1);
-    atomic_fetch_add(&worker->metrics->samples_dropped, worker->block_samples);
-    atomic_fetch_add(&worker->metrics->samples_send_dropped, worker->block_samples);
+    atomic_fetch_add(&worker->metrics->samples_dropped, block_samples);
+    atomic_fetch_add(&worker->metrics->samples_send_dropped, block_samples);
     atomic_fetch_add(&worker->stream_metrics->udp_send_errors, 1);
-    atomic_fetch_add(&worker->stream_metrics->samples_dropped, worker->block_samples);
-    atomic_fetch_add(&worker->stream_metrics->samples_send_dropped, worker->block_samples);
+    atomic_fetch_add(&worker->stream_metrics->samples_dropped, block_samples);
+    atomic_fetch_add(&worker->stream_metrics->samples_send_dropped, block_samples);
     if (error_code == EAGAIN || error_code == EWOULDBLOCK) {
         atomic_fetch_add(&worker->metrics->udp_send_would_block, 1);
         atomic_fetch_add(&worker->stream_metrics->udp_send_would_block, 1);
@@ -246,8 +271,8 @@ static void *stream_render_thread_main(void *arg)
 {
     stream_worker_t *worker = arg;
     apply_stream_affinity(worker->render_cpu);
-    iq_ci16_t *buffer = calloc(worker->block_samples, sizeof(*buffer));
-    if (buffer == NULL) {
+    stream_block_record_t *record = calloc(1, sizeof(*record) + worker->packet_bytes);
+    if (record == NULL) {
         record_worker_error(worker, "render buffer allocation failed");
         return NULL;
     }
@@ -261,20 +286,24 @@ static void *stream_render_thread_main(void *arg)
         channel_config_t channel_snapshot;
         snapshot_worker_config(worker, &receiver_snapshot, &channel_snapshot);
         const uint32_t sample_rate_hz = channel_snapshot.sample_rate_hz;
+        /* Low rates render shorter blocks than configured (see
+         * streamer_block_samples_for_rate); buffers stay sized for the configured maximum. */
+        const size_t block_samples = streamer_block_samples_for_rate(worker->block_samples, sample_rate_hz);
 
         if (!channel_snapshot.stream_enabled) {
             stream_worker_set_active(worker, false);
             grid_initialized = false;
-            sleep_for_block(worker->block_samples, sample_rate_hz);
+            sleep_for_block(block_samples, sample_rate_hz);
             continue;
         }
         stream_worker_set_active(worker, true);
 
         /* Re-anchor the grid to the current time-of-day whenever we (re)start streaming or
-         * the sample rate changes; otherwise advance block-by-block so the rendered content
-         * is a pure function of the block index (and therefore identical across instances). */
+         * the sample rate changes (which also re-derives the block size); otherwise advance
+         * block-by-block so the rendered content is a pure function of the block index (and
+         * therefore identical across instances). */
         if (!grid_initialized || sample_rate_hz != last_rate_hz) {
-            block_index = streamer_block_index_from_time_ns(timebase_now_ns(worker->timebase), worker->block_samples, sample_rate_hz);
+            block_index = streamer_block_index_from_time_ns(timebase_now_ns(worker->timebase), block_samples, sample_rate_hz);
             last_rate_hz = sample_rate_hz;
             grid_initialized = true;
         }
@@ -285,18 +314,19 @@ static void *stream_render_thread_main(void *arg)
             continue;
         }
 
-        const uint64_t render_time_ns = streamer_block_start_ns(block_index, worker->block_samples, sample_rate_hz);
+        const uint64_t render_time_ns = streamer_block_start_ns(block_index, block_samples, sample_rate_hz);
         render_stats_t stats;
-        renderer_render_channel_block(worker->scenario, worker->asset_cache, &receiver_snapshot, &channel_snapshot, render_time_ns, buffer, worker->block_samples, &stats);
+        renderer_render_channel_block(worker->scenario, worker->asset_cache, &receiver_snapshot, &channel_snapshot, render_time_ns, record->samples, block_samples, &stats);
+        record->sample_count = block_samples;
 
-        if (!ringbuffer_try_push(&worker->ringbuffer, render_time_ns, buffer)) {
-            record_overrun(worker);
+        if (!ringbuffer_try_push(&worker->ringbuffer, render_time_ns, record)) {
+            record_overrun(worker, block_samples);
         }
 
-        block_index = streamer_next_block_index(block_index, worker->block_samples, sample_rate_hz);
+        block_index = streamer_next_block_index(block_index, block_samples, sample_rate_hz);
     }
 
-    free(buffer);
+    free(record);
     return NULL;
 }
 
@@ -387,8 +417,9 @@ static void *stream_udp_thread_main(void *arg)
         udp_output_close(&udp);
         return NULL;
     }
-    uint8_t *payloads = calloc(STREAM_SEND_BATCH_SIZE, worker->packet_bytes);
-    if (payloads == NULL) {
+    const size_t record_stride = sizeof(stream_block_record_t) + worker->packet_bytes;
+    uint8_t *records = calloc(STREAM_SEND_BATCH_SIZE, record_stride);
+    if (records == NULL) {
         record_worker_error(worker, "payload buffer allocation failed");
         free(packets);
         udp_output_close(&udp);
@@ -400,62 +431,73 @@ static void *stream_udp_thread_main(void *arg)
 
     while (atomic_load(worker->running)) {
         snapshot_worker_config(worker, &receiver_snapshot, &channel_snapshot);
+        const size_t block_samples = streamer_block_samples_for_rate(worker->block_samples, channel_snapshot.sample_rate_hz);
 
         if (!channel_snapshot.stream_enabled) {
             ringbuffer_drain(&worker->ringbuffer);
             next_send_ns = monotonic_now_ns();
             context_state.sent = false; /* re-announce the configuration on re-enable */
-            sleep_for_block(worker->block_samples, channel_snapshot.sample_rate_hz);
+            sleep_for_block(block_samples, channel_snapshot.sample_rate_hz);
             continue;
         }
-        const uint64_t block_duration_ns = streamer_block_duration_ns(worker->block_samples, channel_snapshot.sample_rate_hz);
+        const uint64_t block_duration_ns = streamer_block_duration_ns(block_samples, channel_snapshot.sample_rate_hz);
 
         maybe_send_context_packet(worker, &udp, &receiver_snapshot, &channel_snapshot, &context_state);
 
         size_t batch_count = 0;
         while (batch_count < STREAM_SEND_BATCH_SIZE) {
-            uint8_t *payload = payloads + batch_count * worker->packet_bytes;
-            if (!ringbuffer_try_pop(&worker->ringbuffer, &payload_timestamps[batch_count], payload)) {
+            uint8_t *record = records + batch_count * record_stride;
+            if (!ringbuffer_try_pop(&worker->ringbuffer, &payload_timestamps[batch_count], record)) {
                 break;
             }
             batch_count++;
         }
 
         if (batch_count == 0U) {
-            record_underrun(worker);
-            pace_or_record_late(worker, &next_send_ns, block_duration_ns, worker->block_samples);
+            record_underrun(worker, block_samples);
+            pace_or_record_late(worker, &next_send_ns, block_duration_ns, block_samples);
             continue;
         }
 
         const void *send_data[STREAM_SEND_BATCH_SIZE];
         size_t send_lengths[STREAM_SEND_BATCH_SIZE];
+        uint64_t send_samples[STREAM_SEND_BATCH_SIZE];
         size_t sent_messages = 0;
         size_t sent_bytes = 0;
         int send_error = 0;
         size_t prepared_count = 0;
+        uint64_t batch_samples = 0;
         const uint32_t stream_id = vita49_stream_id(receiver_snapshot.id, channel_snapshot.id);
         for (size_t i = 0; i < batch_count; i++) {
             uint8_t *packet = packets + i * send_capacity;
-            const uint8_t *payload = payloads + i * worker->packet_bytes;
+            /* Each record carries the sample count it was rendered with, which may differ
+             * from the current snapshot across a rate change. */
+            const stream_block_record_t *record = (const stream_block_record_t *)(records + i * record_stride);
+            batch_samples += record->sample_count;
             const vita49_if_data_packet_t vita_packet = {
                 .stream_id = stream_id,
                 .sequence = (uint8_t)((worker->vita_sequence + (uint8_t)i) & 0x0fU),
                 .timestamp_ns = payload_timestamps[i],
-                .payload = (const iq_ci16_t *)payload,
-                .payload_samples = worker->block_samples,
+                .payload = record->samples,
+                .payload_samples = (size_t)record->sample_count,
             };
             size_t send_bytes = 0;
             if (!vita49_write_if_data_packet(&vita_packet, packet, send_capacity, &send_bytes)) {
-                record_send_drop(worker, EINVAL);
+                record_send_drop(worker, EINVAL, record->sample_count);
                 continue;
             }
             send_data[prepared_count] = packet;
             send_lengths[prepared_count] = send_bytes;
+            send_samples[prepared_count] = record->sample_count;
             prepared_count++;
         }
 
-        if (prepared_count > 0U && udp_output_send_batch(&udp, send_data, send_lengths, prepared_count, &sent_messages, &sent_bytes, &send_error)) {
-            const uint64_t sent_samples = worker->block_samples * (uint64_t)sent_messages;
+        bool batch_ok = prepared_count > 0U && udp_output_send_batch(&udp, send_data, send_lengths, prepared_count, &sent_messages, &sent_bytes, &send_error);
+        if (sent_messages > 0U || batch_ok) {
+            uint64_t sent_samples = 0;
+            for (size_t i = 0; i < sent_messages; i++) {
+                sent_samples += send_samples[i];
+            }
             worker->vita_sequence = (uint8_t)((worker->vita_sequence + sent_messages) & 0x0fU);
             atomic_fetch_add(&worker->metrics->udp_packets_sent, sent_messages);
             atomic_fetch_add(&worker->metrics->udp_bytes_sent, sent_bytes);
@@ -465,30 +507,17 @@ static void *stream_udp_thread_main(void *arg)
             atomic_fetch_add(&worker->stream_metrics->udp_bytes_sent, sent_bytes);
             atomic_fetch_add(&worker->stream_metrics->samples_rendered, sent_samples);
             atomic_fetch_add(&worker->stream_metrics->samples_sent, sent_samples);
-        } else {
-            if (sent_messages > 0U) {
-                const uint64_t sent_samples = worker->block_samples * (uint64_t)sent_messages;
-                worker->vita_sequence = (uint8_t)((worker->vita_sequence + sent_messages) & 0x0fU);
-                atomic_fetch_add(&worker->metrics->udp_packets_sent, sent_messages);
-                atomic_fetch_add(&worker->metrics->udp_bytes_sent, sent_bytes);
-                atomic_fetch_add(&worker->metrics->samples_rendered, sent_samples);
-                atomic_fetch_add(&worker->metrics->samples_sent, sent_samples);
-                atomic_fetch_add(&worker->stream_metrics->udp_packets_sent, sent_messages);
-                atomic_fetch_add(&worker->stream_metrics->udp_bytes_sent, sent_bytes);
-                atomic_fetch_add(&worker->stream_metrics->samples_rendered, sent_samples);
-                atomic_fetch_add(&worker->stream_metrics->samples_sent, sent_samples);
-            }
-            const size_t dropped_messages = prepared_count - sent_messages;
-            for (size_t i = 0; i < dropped_messages; i++) {
-                record_send_drop(worker, send_error);
+        }
+        if (!batch_ok) {
+            for (size_t i = sent_messages; i < prepared_count; i++) {
+                record_send_drop(worker, send_error, send_samples[i]);
             }
         }
-        const uint64_t batch_duration_ns = block_duration_ns * (uint64_t)batch_count;
-        const uint64_t batch_samples = worker->block_samples * (uint64_t)batch_count;
+        const uint64_t batch_duration_ns = streamer_block_duration_ns((size_t)batch_samples, channel_snapshot.sample_rate_hz);
         pace_or_record_late(worker, &next_send_ns, batch_duration_ns, batch_samples);
     }
 
-    free(payloads);
+    free(records);
     free(packets);
     udp_output_close(&udp);
     return NULL;
@@ -497,7 +526,7 @@ static void *stream_udp_thread_main(void *arg)
 static bool stream_worker_start(stream_worker_t *worker)
 {
     worker->packet_bytes = worker->block_samples * sizeof(iq_ci16_t);
-    if (!ringbuffer_init(&worker->ringbuffer, worker->packet_bytes, RINGBUFFER_PACKET_CAPACITY)) {
+    if (!ringbuffer_init(&worker->ringbuffer, sizeof(stream_block_record_t) + worker->packet_bytes, RINGBUFFER_PACKET_CAPACITY)) {
         return false;
     }
     worker->ringbuffer_initialized = true;

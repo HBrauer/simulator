@@ -76,6 +76,40 @@ START_TEST(block_grid_is_independent_of_query_phase)
 }
 END_TEST
 
+START_TEST(low_rate_channels_shrink_block_size)
+{
+    /* High rates keep the configured size... */
+    ck_assert_uint_eq(streamer_block_samples_for_rate(1536, 98304000U), 1536);
+    ck_assert_uint_eq(streamer_block_samples_for_rate(1536, 128000U), 1536);
+    /* ...low rates cap at the largest power of two keeping >= ~4 blocks/s... */
+    ck_assert_uint_eq(streamer_block_samples_for_rate(1536, 16000U), 1536);
+    ck_assert_uint_eq(streamer_block_samples_for_rate(1536, 6000U), 1024);
+    ck_assert_uint_eq(streamer_block_samples_for_rate(1536, 2000U), 256);
+    /* ...never below the 64-sample floor, and degenerate inputs pass through. */
+    ck_assert_uint_eq(streamer_block_samples_for_rate(4096, 100U), 64);
+    ck_assert_uint_eq(streamer_block_samples_for_rate(1536, 0U), 1536);
+    ck_assert_uint_eq(streamer_block_samples_for_rate(0, 2000U), 0);
+    /* A 2 kS/s DDC channel now emits 128 ms blocks instead of 768 ms ones. */
+    ck_assert_uint_eq(streamer_block_duration_ns(256, 2000U), 128000000ULL);
+}
+END_TEST
+
+START_TEST(block_grid_works_at_ddc_low_rates)
+{
+    /* The shrunken grid at a 2 kS/s DDC rate: exact round trip, no drift, block contains
+     * its own start time. */
+    const uint32_t rate = 2000U;
+    const size_t block_samples = streamer_block_samples_for_rate(1536, rate);
+    uint64_t prev_start = 0;
+    for (uint64_t k = 1; k < 600000ULL; k += 997ULL) { /* spans a full day of 128 ms blocks */
+        const uint64_t start_ns = streamer_block_start_ns(k, block_samples, rate);
+        ck_assert_uint_gt(start_ns, prev_start);
+        prev_start = start_ns;
+        ck_assert_uint_eq(streamer_block_index_from_time_ns(start_ns, block_samples, rate), k);
+    }
+}
+END_TEST
+
 Suite *streamer_suite(void)
 {
     Suite *suite = suite_create("streamer");
@@ -86,6 +120,8 @@ Suite *streamer_suite(void)
     tcase_add_test(tc, block_grid_contains_time_and_is_monotonic_without_drift);
     tcase_add_test(tc, block_grid_start_matches_exact_sample_math);
     tcase_add_test(tc, block_grid_is_independent_of_query_phase);
+    tcase_add_test(tc, low_rate_channels_shrink_block_size);
+    tcase_add_test(tc, block_grid_works_at_ddc_low_rates);
     suite_add_tcase(suite, tc);
     return suite;
 }
