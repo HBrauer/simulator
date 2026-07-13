@@ -6,8 +6,10 @@
 #include <stdint.h>
 
 #define SIM_MAX_RECEIVERS 12
-#define SIM_MAX_CHANNELS 8
-#define SIM_MAX_PROFILES 16
+/* Sized for the wideband-plus-many-narrow-DDC use case: one track_tuner channel and ~20
+ * fixed DDC channels extracting from the same recording. */
+#define SIM_MAX_CHANNELS 24
+#define SIM_MAX_PROFILES 32
 #define SIM_MAX_PROFILE_NAME 24
 #define SIM_MAX_SOURCES 64
 #define SIM_MAX_SIGNALS 256
@@ -111,6 +113,7 @@ typedef struct {
     int stream_cpus[SIM_MAX_STREAM_CPUS];    /* CPUs the stream threads are spread across */
     size_t stream_cpu_count;                 /* 0 = no pinning */
     size_t asset_cache_max_bytes;
+    size_t ddc_cache_max_bytes; /* budget for precomputed DDC intermediates (0 disables caching) */
     double audio_prerender_oversample;    /* oversampling factor over content bandwidth (default 2.0) */
     uint32_t audio_prerender_max_rate_hz; /* ceiling on the intermediate pre-render rate (default 4 MHz) */
     size_t receiver_count;

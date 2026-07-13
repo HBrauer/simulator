@@ -192,6 +192,8 @@ static bool apply_scalar(simulator_config_t *config, parse_state_t *state, const
         parse_cpu_list(value, config->stream_cpus, SIM_MAX_STREAM_CPUS, &config->stream_cpu_count);
     } else if (strcmp(key, "asset_cache_max_bytes") == 0) {
         config->asset_cache_max_bytes = (size_t)parse_u64(value);
+    } else if (strcmp(key, "ddc_cache_max_bytes") == 0) {
+        config->ddc_cache_max_bytes = (size_t)parse_u64(value);
     } else if (strcmp(key, "audio_prerender_oversample") == 0) {
         config->audio_prerender_oversample = parse_double_value(value);
     } else if (strcmp(key, "audio_prerender_max_rate_hz") == 0) {
@@ -266,6 +268,7 @@ bool config_load_yaml(const char *path, simulator_config_t *config, char *error,
     memset(config, 0, sizeof(*config));
     config->stream_cpu = -1;
     config->asset_cache_max_bytes = SIZE_MAX; /* unset sentinel; config_validate applies the default */
+    config->ddc_cache_max_bytes = SIZE_MAX;   /* unset sentinel; config_validate applies the default */
     FILE *file = fopen(path, "rb");
     if (file == NULL) {
         snprintf(error, error_size, "config_not_found");
@@ -370,6 +373,17 @@ bool config_validate(simulator_config_t *config, char *error, size_t error_size)
         config->asset_cache_max_bytes = 16ULL << 30;
 #else
         config->asset_cache_max_bytes = SIZE_MAX / 2;
+#endif
+    }
+    /* Default budget for precomputed DDC intermediates (see ddc_cache.h). One entry holds a
+     * full source loop at its intermediate rate as ci16 (a 60 s loop at 1.536 MS/s is
+     * ~369 MB); an explicit 0 disables caching, so DDC channels run the direct full-rate
+     * cascade every block. */
+    if (config->ddc_cache_max_bytes == SIZE_MAX) {
+#if SIZE_MAX > 0xFFFFFFFFULL
+        config->ddc_cache_max_bytes = 2ULL << 30;
+#else
+        config->ddc_cache_max_bytes = SIZE_MAX / 4;
 #endif
     }
     for (size_t i = 0; i < config->receiver_count; i++) {

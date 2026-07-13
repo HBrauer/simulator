@@ -1,5 +1,6 @@
 #include "asset_cache.h"
 #include "config.h"
+#include "ddc.h"
 #include "metrics.h"
 #include "renderer.h"
 #include "rest_server.h"
@@ -32,6 +33,56 @@ static const char *arg_value(int argc, char **argv, const char *name)
         }
     }
     return NULL;
+}
+
+/* Warn once per (channel, looping IQ replay source) pair whose extraction quality or DDC
+ * cache eligibility is degraded, so misconfigured rate combinations surface at startup
+ * instead of as silent quality loss. */
+static void warn_ddc_rate_combinations(const simulator_config_t *config, const scenario_t *scenario)
+{
+    for (size_t r = 0; r < config->receiver_count; r++) {
+        const receiver_config_t *receiver = &config->receivers[r];
+        for (size_t c = 0; c < receiver->channel_count; c++) {
+            const uint32_t rate = receiver->channels[c].sample_rate_hz;
+            for (size_t s = 0; s < scenario->signal_count; s++) {
+                const scenario_signal_t *sig = &scenario->signals[s];
+                if (!sig->loop || sig->passthrough) {
+                    continue;
+                }
+                const scenario_source_t *src = scenario_find_source(scenario, sig->source_reference);
+                if (src == NULL || src->source_kind != SCENARIO_SOURCE_IQ_FILE ||
+                    src->sample_rate_hz == 0 || rate == 0 || src->sample_rate_hz <= rate) {
+                    continue;
+                }
+                if (src->sample_rate_hz % rate != 0) {
+                    if ((double)src->sample_rate_hz / (double)rate > (double)DDC_CASCADE_RATIO_THRESHOLD) {
+                        fprintf(stderr,
+                                "warning: receiver %u channel %u rate %u Hz does not divide source '%s' rate %u Hz; "
+                                "using the legacy resampler with reduced alias rejection\n",
+                                receiver->id, receiver->channels[c].id, rate, src->id, src->sample_rate_hz);
+                    }
+                    continue;
+                }
+                const uint32_t ratio = src->sample_rate_hz / rate;
+                if (ratio <= DDC_CASCADE_RATIO_THRESHOLD) {
+                    continue;
+                }
+                const uint32_t intermediate_hz = ddc_intermediate_rate_hz(src->sample_rate_hz, rate);
+                if (intermediate_hz == 0) {
+                    fprintf(stderr,
+                            "warning: receiver %u channel %u rate %u Hz from source '%s': no cached DDC "
+                            "intermediate for ratio %u; running the full-rate cascade every block\n",
+                            receiver->id, receiver->channels[c].id, rate, src->id, ratio);
+                } else if (src->sample_count % (src->sample_rate_hz / intermediate_hz) != 0) {
+                    fprintf(stderr,
+                            "warning: source '%s' length %llu is not divisible by the DDC front decimation %u; "
+                            "intermediate cache disabled for channel rate %u Hz (full-rate cascade every block)\n",
+                            src->id, (unsigned long long)src->sample_count,
+                            src->sample_rate_hz / intermediate_hz, rate);
+                }
+            }
+        }
+    }
 }
 
 int main(int argc, char **argv)
@@ -69,6 +120,8 @@ int main(int argc, char **argv)
         fprintf(stderr, "asset cache error: %s\n", error);
         return 4;
     }
+    renderer_ddc_cache_configure(config.ddc_cache_max_bytes);
+    warn_ddc_rate_combinations(&config, &scenario);
 
     timebase_t timebase;
     timebase_init(&timebase);
@@ -78,17 +131,40 @@ int main(int argc, char **argv)
 
     if (once_arg != NULL) {
         const size_t samples = (size_t)strtoull(once_arg, NULL, 10);
+        const char *channel_arg = arg_value(argc, argv, "--render-channel");
+        const size_t channel_index = channel_arg != NULL ? (size_t)strtoull(channel_arg, NULL, 10) : 0;
+        if (channel_index >= config.receivers[0].channel_count) {
+            fprintf(stderr, "invalid --render-channel\n");
+            asset_cache_free(&asset_cache);
+            return 5;
+        }
         iq_ci16_t *buffer = calloc(samples, sizeof(*buffer));
         if (buffer == NULL) {
             asset_cache_free(&asset_cache);
             return 4;
         }
         render_stats_t stats;
-        renderer_render_channel_block(&scenario, &asset_cache, &config.receivers[0], &config.receivers[0].channels[0], timebase_now_ns(&timebase), buffer, samples, &stats);
+        renderer_render_channel_block(&scenario, &asset_cache, &config.receivers[0], &config.receivers[0].channels[channel_index], timebase_now_ns(&timebase), buffer, samples, &stats);
         fwrite(buffer, sizeof(*buffer), samples, stdout);
         free(buffer);
         asset_cache_free(&asset_cache);
         return 0;
+    }
+
+    /* Prewarm the DDC intermediates for fixed-center channels so their streams start hot
+     * instead of stalling on the first block's cold cache build. Track-tuner channels stay
+     * lazy (their center moves with the scan). */
+    for (size_t i = 0; i < config.receiver_count; i++) {
+        for (size_t c = 0; c < config.receivers[i].channel_count; c++) {
+            const channel_config_t *channel = &config.receivers[i].channels[c];
+            if (channel->track_tuner) {
+                continue;
+            }
+            iq_ci16_t warm[64];
+            render_stats_t warm_stats;
+            renderer_render_channel_block(&scenario, &asset_cache, &config.receivers[i], channel,
+                                          timebase_now_ns(&timebase), warm, 64, &warm_stats);
+        }
     }
 
     signal(SIGINT, on_signal);

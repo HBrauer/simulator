@@ -444,6 +444,28 @@ START_TEST(channel_in_window_logic)
 }
 END_TEST
 
+START_TEST(ddc_cache_budget_defaults_to_2gib)
+{
+    simulator_config_t config;
+    char error[128];
+    /* Key absent -> 2 GiB default. */
+    const char *path = write_temp_config("");
+    ck_assert_ptr_nonnull(path);
+    ck_assert_msg(config_load_yaml(path, &config, error, sizeof(error)), "%s", error);
+    ck_assert_uint_eq(config.ddc_cache_max_bytes, 2ULL << 30);
+    /* Explicit 0 disables the intermediate cache (direct cascade every block). */
+    path = write_temp_config_body("ddc_cache_max_bytes: 0\n", default_channels_yaml());
+    ck_assert_ptr_nonnull(path);
+    ck_assert_msg(config_load_yaml(path, &config, error, sizeof(error)), "%s", error);
+    ck_assert_uint_eq(config.ddc_cache_max_bytes, 0);
+    /* Explicit values pass through. */
+    path = write_temp_config_body("ddc_cache_max_bytes: 536870912\n", default_channels_yaml());
+    ck_assert_ptr_nonnull(path);
+    ck_assert_msg(config_load_yaml(path, &config, error, sizeof(error)), "%s", error);
+    ck_assert_uint_eq(config.ddc_cache_max_bytes, 536870912);
+}
+END_TEST
+
 START_TEST(asset_cache_budget_defaults_to_16gib)
 {
     simulator_config_t config;
@@ -471,6 +493,7 @@ Suite *config_suite(void)
     Suite *suite = suite_create("config");
     TCase *tc = tcase_create("core");
     tcase_add_test(tc, asset_cache_budget_defaults_to_16gib);
+    tcase_add_test(tc, ddc_cache_budget_defaults_to_2gib);
     tcase_add_test(tc, loads_instance_config);
     tcase_add_test(tc, defaults_profiles_and_stream_block_samples);
     tcase_add_test(tc, channel_sample_rate_follows_profile);
