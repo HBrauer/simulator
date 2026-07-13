@@ -56,6 +56,7 @@ add_project_arguments(common_args, language: 'c')
 # even in the default (unoptimised) developer build the benchmark runs against.
 sim_render_sources = files(
   'simulator/src/ddc.c',
+  'simulator/src/ddc_cache.c',
   'simulator/src/nco.c',
   'simulator/src/renderer.c',
 )
@@ -124,6 +125,7 @@ unit_tests = executable(
     'simulator/tests/unit/test_config.c',
     'simulator/tests/unit/test_asset_cache.c',
     'simulator/tests/unit/test_ddc.c',
+    'simulator/tests/unit/test_ddc_cache.c',
     'simulator/tests/unit/test_iq_file_reader.c',
     'simulator/tests/unit/test_renderer.c',
     'simulator/tests/unit/test_ringbuffer.c',
