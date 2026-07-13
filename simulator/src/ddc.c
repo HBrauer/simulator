@@ -5,12 +5,18 @@
  * instances always build byte-identical plans -- a prerequisite for the renderer's
  * byte-identical-output invariant. */
 #include "ddc.h"
+#include "sim_config.h"
 
+#include <assert.h>
 #include <math.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
+
+#if SIM_HAVE_VOLK
+#include <volk/volk.h>
+#endif
 
 /* Transition bands are never allowed narrower than this fraction of the stage output rate,
  * so profiles with sample_rate close to bandwidth still get a bounded filter (the passband
@@ -244,6 +250,130 @@ bool ddc_plan_design(ddc_plan_t *plan,
     }
     plan->history_source_samples = reach;
     return true;
+}
+
+static int64_t ddc_ceil_div_i64(int64_t numerator, int64_t denominator)
+{
+    /* denominator > 0; exact ceiling for negative numerators too (early blocks feed the
+     * cascade from before source index 0 via the caller's zero-padding). */
+    if (numerator >= 0) {
+        return (numerator + denominator - 1) / denominator;
+    }
+    return -((-numerator) / denominator);
+}
+
+void ddc_exec_init(ddc_exec_t *exec, const ddc_plan_t *plan, int64_t first_input_index)
+{
+    exec->plan = plan;
+    int64_t in_start = first_input_index;
+    for (size_t k = 0; k < plan->stage_count; k++) {
+        ddc_exec_stage_t *stage_state = &exec->stages[k];
+        const int64_t half = (int64_t)((plan->stages[k].tap_count - 1U) / 2U);
+        const int64_t decim = (int64_t)plan->stages[k].decim;
+        stage_state->buf_start = in_start;
+        stage_state->next_in = in_start;
+        stage_state->buf_len = 0;
+        /* First output whose centered window [n*D - M, n*D + M] starts at or after the first
+         * available input. Feeding from that window's start onward, output n is exact. */
+        stage_state->next_out = ddc_ceil_div_i64(in_start + half, decim);
+        in_start = stage_state->next_out;
+    }
+}
+
+int64_t ddc_exec_next_output_index(const ddc_exec_t *exec)
+{
+    return exec->stages[exec->plan->stage_count - 1].next_out;
+}
+
+/* Append inputs to one stage and produce every output whose window is complete, dropping
+ * inputs no future window can reach. Returns outputs written to `out` (capped at capacity;
+ * production resumes on the next call where it paused). */
+static size_t ddc_stage_process(ddc_exec_stage_t *stage_state,
+                                const ddc_stage_t *stage,
+                                const float complex *in,
+                                size_t count,
+                                float complex *out,
+                                size_t out_capacity)
+{
+    assert(stage_state->buf_len + count <= DDC_EXEC_STAGE_CAPACITY);
+    memcpy(&stage_state->buf[stage_state->buf_len], in, count * sizeof(*in));
+    stage_state->buf_len += count;
+    stage_state->next_in += (int64_t)count;
+
+    const int64_t decim = (int64_t)stage->decim;
+    const int64_t half = (int64_t)((stage->tap_count - 1U) / 2U);
+    size_t produced = 0;
+    while (produced < out_capacity &&
+           stage_state->next_out * decim + half < stage_state->next_in) {
+        const int64_t window_start = stage_state->next_out * decim - half;
+        const float complex *window = &stage_state->buf[window_start - stage_state->buf_start];
+#if SIM_HAVE_VOLK
+        lv_32fc_t acc;
+        volk_32fc_32f_dot_prod_32fc(&acc, (const lv_32fc_t *)window, stage->taps, stage->tap_count);
+        out[produced] = acc;
+#else
+        float acc_re = 0.0f;
+        float acc_im = 0.0f;
+        for (uint32_t j = 0; j < stage->tap_count; j++) {
+            acc_re += crealf(window[j]) * stage->taps[j];
+            acc_im += cimagf(window[j]) * stage->taps[j];
+        }
+        out[produced] = acc_re + acc_im * I;
+#endif
+        produced++;
+        stage_state->next_out++;
+    }
+
+    /* Drop everything below the next window's start. */
+    const int64_t keep_from = stage_state->next_out * decim - half;
+    if (keep_from > stage_state->buf_start) {
+        const int64_t available_from = stage_state->next_in - (int64_t)stage_state->buf_len;
+        const int64_t drop_from = keep_from < stage_state->next_in ? keep_from : stage_state->next_in;
+        const size_t drop = (size_t)(drop_from - available_from);
+        if (drop > 0) {
+            stage_state->buf_len -= drop;
+            memmove(stage_state->buf, &stage_state->buf[drop], stage_state->buf_len * sizeof(stage_state->buf[0]));
+            stage_state->buf_start = drop_from;
+        }
+    }
+    return produced;
+}
+
+size_t ddc_exec_push(ddc_exec_t *exec,
+                     const float complex *in,
+                     size_t count,
+                     float complex *out,
+                     size_t out_capacity)
+{
+    const ddc_plan_t *plan = exec->plan;
+    size_t written = 0;
+    size_t offset = 0;
+    /* Ping-pong slice buffers: a stage's outputs are the next stage's inputs. A slice of
+     * DDC_EXEC_CHUNK inputs produces at most CHUNK/2 + 1 outputs (decim >= 2), so the
+     * fixed-size scratch always suffices and no stage buffer ever overflows. */
+    float complex scratch_a[DDC_EXEC_CHUNK / 2U + 2U];
+    float complex scratch_b[DDC_EXEC_CHUNK / 2U + 2U];
+    while (offset < count) {
+        const size_t slice = count - offset < DDC_EXEC_CHUNK ? count - offset : DDC_EXEC_CHUNK;
+        const float complex *stage_in = in + offset;
+        size_t stage_in_count = slice;
+        for (size_t k = 0; k < plan->stage_count; k++) {
+            const bool is_final = k + 1 == plan->stage_count;
+            float complex *stage_out = is_final ? out + written : (stage_in == scratch_a ? scratch_b : scratch_a);
+            const size_t capacity = is_final ? out_capacity - written : DDC_EXEC_CHUNK / 2U + 2U;
+            stage_in_count = ddc_stage_process(&exec->stages[k], &plan->stages[k],
+                                               stage_in, stage_in_count, stage_out, capacity);
+            if (is_final) {
+                written += stage_in_count;
+            }
+            stage_in = stage_out;
+            if (stage_in_count == 0 && !is_final) {
+                break; /* nothing propagated further this slice */
+            }
+        }
+        offset += slice;
+    }
+    return written;
 }
 
 #define DDC_PLAN_CACHE 32U

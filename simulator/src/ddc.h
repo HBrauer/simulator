@@ -1,6 +1,7 @@
 #ifndef DDC_H
 #define DDC_H
 
+#include <complex.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -63,6 +64,52 @@ bool ddc_plan_design(ddc_plan_t *plan,
 const ddc_plan_t *ddc_plan_cache_get(uint32_t source_rate_hz,
                                      uint32_t output_rate_hz,
                                      uint32_t bandwidth_hz);
+
+/* Streaming cascade executor.
+ *
+ * Stateless-per-use by construction: the caller re-initializes it for every block render and
+ * primes it by feeding plan->history_source_samples of history, so no filter state survives
+ * between blocks and block content stays a pure function of the absolute sample index.
+ *
+ * All positions are absolute grid indices (stage-k input index p corresponds to source index
+ * p * decim[0] * ... * decim[k-1]), so alignment is exact: initialized at
+ * first_input_index = m0 * ratio - history, the first emitted output is final-grid sample m0
+ * (each stage's kernel is centered, and the reach algebra telescopes). The caller handles
+ * looping/zero-padding when gathering input; the executor only sees a contiguous feed. */
+
+/* Input samples are pushed through the stages in slices of at most this many samples, which
+ * bounds every stage buffer at DDC_MAX_STAGE_TAPS history plus one slice. */
+#define DDC_EXEC_CHUNK 8192U
+#define DDC_EXEC_STAGE_CAPACITY (DDC_MAX_STAGE_TAPS + DDC_EXEC_CHUNK)
+
+typedef struct {
+    int64_t buf_start; /* absolute stage-input index of buf[0] */
+    int64_t next_in;   /* absolute stage-input index the next appended sample will get */
+    int64_t next_out;  /* absolute stage-output index of the next output to produce */
+    size_t buf_len;
+    float complex buf[DDC_EXEC_STAGE_CAPACITY];
+} ddc_exec_stage_t;
+
+typedef struct {
+    const ddc_plan_t *plan;
+    ddc_exec_stage_t stages[DDC_MAX_STAGES];
+} ddc_exec_t;
+
+/* first_input_index: absolute source-grid index of the first sample that will be pushed. */
+void ddc_exec_init(ddc_exec_t *exec, const ddc_plan_t *plan, int64_t first_input_index);
+
+/* Final-grid index of the next output ddc_exec_push will emit. */
+int64_t ddc_exec_next_output_index(const ddc_exec_t *exec);
+
+/* Feed `count` source samples, append producible final-rate outputs to `out`, return how
+ * many were written. out_capacity must cover everything the pushed input can produce
+ * (~count / ratio + 1); when it fills, production pauses and unconsumed input stays
+ * buffered for the next call. */
+size_t ddc_exec_push(ddc_exec_t *exec,
+                     const float complex *in,
+                     size_t count,
+                     float complex *out,
+                     size_t out_capacity);
 
 /* Cached-intermediate parameters. A DDC channel is served in two hops: a cached sub-band of
  * the recording at the intermediate rate (shifted to a grid-quantized center, front cascade),

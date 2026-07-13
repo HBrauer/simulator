@@ -214,6 +214,192 @@ START_TEST(grid_center_quantizes_to_nearest_step)
 }
 END_TEST
 
+/* Deterministic pseudo-random complex sample as a pure function of the absolute source
+ * index, so the executor and the reference evaluation see identical input. */
+static float complex test_input_sample(int64_t index)
+{
+    uint64_t x = (uint64_t)index * 6364136223846793005ULL + 1442695040888963407ULL;
+    x ^= x >> 33;
+    x *= 0xff51afd7ed558ccdULL;
+    x ^= x >> 33;
+    const float re = (float)((double)(x & 0xffffffffULL) / 2147483648.0 - 1.0);
+    const float im = (float)((double)(x >> 32) / 2147483648.0 - 1.0);
+    return CMPLXF(re, im);
+}
+
+static double complex reference_input(const float complex *in, int64_t in_start, size_t in_len, int64_t index)
+{
+    if (index < in_start || index >= in_start + (int64_t)in_len) {
+        return 0.0;
+    }
+    return (double complex)in[index - in_start];
+}
+
+/* Direct (non-streaming) evaluation of stage k's output at absolute index n: the centered
+ * dot product over the previous stage's outputs, recursively down to the raw input. Slow but
+ * obviously correct -- the oracle the executor must match. */
+static double complex reference_stage_output(const ddc_plan_t *plan,
+                                             size_t stage_index,
+                                             int64_t n,
+                                             const float complex *in,
+                                             int64_t in_start,
+                                             size_t in_len)
+{
+    const ddc_stage_t *stage = &plan->stages[stage_index];
+    const int64_t half = (int64_t)((stage->tap_count - 1U) / 2U);
+    const int64_t decim = (int64_t)stage->decim;
+    double complex acc = 0.0;
+    for (uint32_t j = 0; j < stage->tap_count; j++) {
+        const int64_t p = n * decim - half + (int64_t)j;
+        const double complex value = stage_index == 0
+            ? reference_input(in, in_start, in_len, p)
+            : reference_stage_output(plan, stage_index - 1, p, in, in_start, in_len);
+        acc += (double)stage->taps[j] * value;
+    }
+    return acc;
+}
+
+static ddc_exec_t g_exec; /* ~0.5 MB, too large for the check fork's stack */
+
+START_TEST(executor_matches_direct_evaluation_and_alignment)
+{
+    ddc_plan_t plan;
+    ck_assert(ddc_plan_design(&plan, 1024000U, 16000U, 12000U, DDC_STOPBAND_DB, NULL, 0));
+    ck_assert_uint_ge(plan.stage_count, 2); /* exercise inter-stage plumbing */
+
+    const int64_t first_output = 5;
+    const size_t output_count = 20;
+    const int64_t ratio = (int64_t)plan.ratio;
+    const int64_t reach = (int64_t)plan.history_source_samples;
+    const int64_t in_start = first_output * ratio - reach;
+    const size_t in_len = (output_count - 1) * (size_t)ratio + 2U * (size_t)reach + 1U;
+
+    float complex *in = malloc(in_len * sizeof(*in));
+    ck_assert_ptr_nonnull(in);
+    for (size_t i = 0; i < in_len; i++) {
+        in[i] = test_input_sample(in_start + (int64_t)i);
+    }
+
+    ddc_exec_init(&g_exec, &plan, in_start);
+    /* Priming at first_output*ratio - reach makes the alignment algebra land the first
+     * producible output exactly on first_output. */
+    ck_assert_int_eq(ddc_exec_next_output_index(&g_exec), first_output);
+
+    float complex out[64];
+    const size_t produced = ddc_exec_push(&g_exec, in, in_len, out, sizeof(out) / sizeof(out[0]));
+    ck_assert_uint_eq(produced, output_count);
+    ck_assert_int_eq(ddc_exec_next_output_index(&g_exec), first_output + (int64_t)output_count);
+
+    for (size_t m = 0; m < produced; m++) {
+        const double complex reference = reference_stage_output(
+            &plan, plan.stage_count - 1, first_output + (int64_t)m, in, in_start, in_len);
+        ck_assert_double_le(cabs((double complex)out[m] - reference), 1e-4);
+    }
+    free(in);
+}
+END_TEST
+
+START_TEST(executor_chunked_push_is_bit_identical)
+{
+    ddc_plan_t plan;
+    ck_assert(ddc_plan_design(&plan, 1024000U, 16000U, 12000U, DDC_STOPBAND_DB, NULL, 0));
+
+    const int64_t ratio = (int64_t)plan.ratio;
+    const int64_t reach = (int64_t)plan.history_source_samples;
+    const size_t output_count = 300; /* spans multiple DDC_EXEC_CHUNK slices */
+    const int64_t in_start = -reach;
+    const size_t in_len = (output_count - 1) * (size_t)ratio + 2U * (size_t)reach + 1U;
+
+    float complex *in = malloc(in_len * sizeof(*in));
+    float complex *whole = malloc(output_count * sizeof(*whole));
+    float complex *chunked = malloc(output_count * sizeof(*chunked));
+    ck_assert_ptr_nonnull(in);
+    ck_assert_ptr_nonnull(whole);
+    ck_assert_ptr_nonnull(chunked);
+    for (size_t i = 0; i < in_len; i++) {
+        in[i] = test_input_sample(in_start + (int64_t)i);
+    }
+
+    ddc_exec_init(&g_exec, &plan, in_start);
+    const size_t whole_count = ddc_exec_push(&g_exec, in, in_len, whole, output_count);
+    ck_assert_uint_eq(whole_count, output_count);
+
+    /* Same input in awkward slice sizes must give byte-identical output: every output is a
+     * single dot product over the same window, so chunking cannot change the arithmetic. */
+    ddc_exec_init(&g_exec, &plan, in_start);
+    const size_t sizes[] = {1, 7, 64, 8191, 1000, 12289};
+    size_t offset = 0;
+    size_t chunked_count = 0;
+    size_t size_index = 0;
+    while (offset < in_len) {
+        size_t slice = sizes[size_index % (sizeof(sizes) / sizeof(sizes[0]))];
+        size_index++;
+        if (slice > in_len - offset) {
+            slice = in_len - offset;
+        }
+        chunked_count += ddc_exec_push(&g_exec, in + offset, slice,
+                                       chunked + chunked_count, output_count - chunked_count);
+        offset += slice;
+    }
+    ck_assert_uint_eq(chunked_count, whole_count);
+    ck_assert_int_eq(memcmp(whole, chunked, whole_count * sizeof(*whole)), 0);
+
+    free(in);
+    free(whole);
+    free(chunked);
+}
+END_TEST
+
+START_TEST(executor_passes_in_band_tone_and_rejects_alias)
+{
+    ddc_plan_t plan;
+    ck_assert(ddc_plan_design(&plan, 98304000U, 128000U, 100000U, DDC_STOPBAND_DB, NULL, 0));
+
+    const int64_t ratio = (int64_t)plan.ratio;
+    const int64_t reach = (int64_t)plan.history_source_samples;
+    const size_t output_count = 64;
+    const size_t in_len = (output_count - 1) * (size_t)ratio + 2U * (size_t)reach + 1U;
+    const int64_t in_start = -reach;
+
+    float complex *in = malloc(in_len * sizeof(*in));
+    float complex out[64];
+    ck_assert_ptr_nonnull(in);
+
+    /* In-band 30 kHz tone: must come through at unity gain on the output grid (output m
+     * corresponds to source sample m*ratio, so phases line up exactly). */
+    for (size_t i = 0; i < in_len; i++) {
+        const double phase = 2.0 * M_PI * 30000.0 * (double)(in_start + (int64_t)i) / 98304000.0;
+        in[i] = CMPLXF((float)cos(phase), (float)sin(phase));
+    }
+    ddc_exec_init(&g_exec, &plan, in_start);
+    ck_assert_uint_eq(ddc_exec_push(&g_exec, in, in_len, out, output_count), output_count);
+    for (size_t m = 0; m < output_count; m++) {
+        const double phase = 2.0 * M_PI * 30000.0 * (double)m / 128000.0;
+        const double complex expected = cos(phase) + sin(phase) * I;
+        ck_assert_double_le(cabs((double complex)out[m] - expected), 0.01);
+    }
+
+    /* Tone in the third image band (3*128 kHz + 30 kHz): would fold onto 30 kHz, must be
+     * rejected to the design's stopband depth. */
+    for (size_t i = 0; i < in_len; i++) {
+        const double phase = 2.0 * M_PI * 414000.0 * (double)(in_start + (int64_t)i) / 98304000.0;
+        in[i] = CMPLXF((float)cos(phase), (float)sin(phase));
+    }
+    ddc_exec_init(&g_exec, &plan, in_start);
+    ck_assert_uint_eq(ddc_exec_push(&g_exec, in, in_len, out, output_count), output_count);
+    double peak = 0.0;
+    for (size_t m = 0; m < output_count; m++) {
+        const double magnitude = cabs((double complex)out[m]);
+        if (magnitude > peak) {
+            peak = magnitude;
+        }
+    }
+    ck_assert_double_le(peak, 1e-3); /* < -60 dBc, dominated by float accumulation noise */
+
+    free(in);
+}
+END_TEST
+
 Suite *ddc_suite(void)
 {
     Suite *suite = suite_create("ddc");
@@ -228,5 +414,12 @@ Suite *ddc_suite(void)
     tcase_add_test(tc, intermediate_rate_divides_source_and_bounds_tail);
     tcase_add_test(tc, grid_center_quantizes_to_nearest_step);
     suite_add_tcase(suite, tc);
+
+    TCase *tc_exec = tcase_create("executor");
+    tcase_set_timeout(tc_exec, 60);
+    tcase_add_test(tc_exec, executor_matches_direct_evaluation_and_alignment);
+    tcase_add_test(tc_exec, executor_chunked_push_is_bit_identical);
+    tcase_add_test(tc_exec, executor_passes_in_band_tone_and_rejects_alias);
+    suite_add_tcase(suite, tc_exec);
     return suite;
 }
