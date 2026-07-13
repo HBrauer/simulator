@@ -7,6 +7,7 @@ int main(void)
     Suite *suites[] = {
         config_suite(),
         asset_cache_suite(),
+        ddc_suite(),
         scenario_suite(),
         timebase_suite(),
         iq_file_reader_suite(),
