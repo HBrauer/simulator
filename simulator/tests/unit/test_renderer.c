@@ -1395,6 +1395,99 @@ static void setup_passthrough_signal(scenario_t *scenario, asset_cache_t *cache,
     }
 }
 
+/* Two loop-periodic tones around f0: one lands in the narrow channel, the other must fold
+ * onto an in-band frequency and be rejected by the DDC cascade. */
+static void fill_two_tone_asset(iq_ci16_t *asset, size_t n, uint32_t rate_hz,
+                                double tone_a_hz, double tone_b_hz, double amplitude)
+{
+    for (size_t p = 0; p < n; p++) {
+        const double phase_a = 2.0 * M_PI * tone_a_hz * (double)p / (double)rate_hz;
+        const double phase_b = 2.0 * M_PI * tone_b_hz * (double)p / (double)rate_hz;
+        asset[p].i = (int16_t)lrint(amplitude * (cos(phase_a) + cos(phase_b)));
+        asset[p].q = (int16_t)lrint(amplitude * (sin(phase_a) + sin(phase_b)));
+    }
+}
+
+START_TEST(ddc_cascade_extracts_subband_from_wideband_loop)
+{
+    /* 1.024 MS/s shift-mode loop into a 16 kS/s / 12 kHz channel: ratio 64 goes through the
+     * cascade via a cached 256 kS/s intermediate (tail ratio 16, front 4). A +5 kHz tone with
+     * the channel tuned +3 kHz off f0 must appear at exactly 2 kHz; a +200 kHz neighbor tone
+     * (folding onto 5 kHz) must vanish. */
+    enum { N = 8192, COUNT = 512 };
+    static iq_ci16_t asset[N];
+    fill_two_tone_asset(asset, N, 1024000U, 5000.0, 200000.0, 8000.0);
+    scenario_t scenario;
+    asset_cache_t cache;
+    setup_replay_signal(&scenario, &cache, asset, N, 1024000U,
+                        SCENARIO_REPLAY_SHIFT, true, 100000000ULL, 99500000ULL, 100500000ULL);
+
+    iq_ci16_t out[2 * COUNT];
+    render_stats_t stats;
+    receiver_config_t rx = fixed_channel_receiver(100003000ULL, 12000U, 16000U, 1.0, -40.0);
+    ck_assert(render_rx_block(&scenario, &cache, &rx, 0, out, COUNT, &stats));
+    ck_assert_uint_eq(stats.active_signals, 1);
+
+    const double wanted = dft_bin_mag(out, COUNT, 2000.0, 16000.0);
+    ck_assert_double_ge(wanted, 7500.0);
+    ck_assert_double_le(wanted, 8500.0);
+    /* The neighbor's fold target (200k - 3k = 197 kHz = 12*16 kHz + 5 kHz). */
+    ck_assert_double_le(dft_bin_mag(out, COUNT, 5000.0, 16000.0), 8.0);
+
+    /* Determinism: the same block renders bit-identically (second render is a cache hit,
+     * and entry content is a pure function of its key). */
+    iq_ci16_t again[COUNT];
+    ck_assert(render_rx_block(&scenario, &cache, &rx, 0, again, COUNT, &stats));
+    ck_assert_int_eq(memcmp(out, again, COUNT * sizeof(out[0])), 0);
+
+    /* Statelessness across blocks: block 2 rendered on its own matches the second half of a
+     * contiguous double-length render (only oscillator re-anchor rounding may differ). */
+    iq_ci16_t both[2 * COUNT];
+    ck_assert(render_rx_block(&scenario, &cache, &rx, 0, both, 2 * COUNT, &stats));
+    iq_ci16_t second[COUNT];
+    const uint64_t t1_ns = (uint64_t)COUNT * 1000000000ULL / 16000ULL;
+    ck_assert(render_rx_block(&scenario, &cache, &rx, t1_ns, second, COUNT, &stats));
+    for (size_t k = 0; k < COUNT; k++) {
+        ck_assert(abs((int)second[k].i - (int)both[COUNT + k].i) <= 2);
+        ck_assert(abs((int)second[k].q - (int)both[COUNT + k].q) <= 2);
+    }
+
+    /* A detector re-tuning a hair off (+125 Hz) reuses the cached intermediate (same tune
+     * grid point); the residual NCO moves the tone to 1875 Hz exactly. */
+    rx = fixed_channel_receiver(100003125ULL, 12000U, 16000U, 1.0, -40.0);
+    ck_assert(render_rx_block(&scenario, &cache, &rx, 0, out, COUNT, &stats));
+    const double retuned = dft_bin_mag(out, COUNT, 1875.0, 16000.0);
+    ck_assert_double_ge(retuned, 7500.0);
+    ck_assert_double_le(retuned, 8500.0);
+}
+END_TEST
+
+START_TEST(ddc_direct_cascade_when_intermediate_not_available)
+{
+    /* Ratio 20 has no split with tail >= 16 and front >= 4, so the block runs the full
+     * cascade from the source rate every time -- same extraction, no cache. */
+    enum { N = 8192, COUNT = 512 };
+    static iq_ci16_t asset[N];
+    fill_two_tone_asset(asset, N, 320000U, 5000.0, 100000.0, 8000.0);
+    scenario_t scenario;
+    asset_cache_t cache;
+    setup_replay_signal(&scenario, &cache, asset, N, 320000U,
+                        SCENARIO_REPLAY_SHIFT, true, 100000000ULL, 99500000ULL, 100500000ULL);
+
+    iq_ci16_t out[COUNT];
+    render_stats_t stats;
+    receiver_config_t rx = fixed_channel_receiver(100003000ULL, 12000U, 16000U, 1.0, -40.0);
+    ck_assert(render_rx_block(&scenario, &cache, &rx, 0, out, COUNT, &stats));
+    ck_assert_uint_eq(stats.active_signals, 1);
+
+    const double wanted = dft_bin_mag(out, COUNT, 2000.0, 16000.0);
+    ck_assert_double_ge(wanted, 7500.0);
+    ck_assert_double_le(wanted, 8500.0);
+    /* 100 kHz neighbor folds onto 4 kHz (100k - 3k = 97 kHz = 6*16 kHz + 1 kHz). */
+    ck_assert_double_le(dft_bin_mag(out, COUNT, 1000.0, 16000.0), 8.0);
+}
+END_TEST
+
 START_TEST(replay_range_mode_follows_tune_and_loops)
 {
     /* Ramp asset at the full 98.304 MS/s output rate: equal rates keep the direct (no-resample)
@@ -1667,6 +1760,8 @@ Suite *renderer_suite(void)
     tcase_add_test(tc, passthrough_selects_variant_by_channel_rate);
     tcase_add_test(tc, passthrough_rotates_for_shift_without_mixer);
     tcase_add_test(tc, passthrough_is_silent_out_of_range_and_at_unsupported_rate);
+    tcase_add_test(tc, ddc_cascade_extracts_subband_from_wideband_loop);
+    tcase_add_test(tc, ddc_direct_cascade_when_intermediate_not_available);
     suite_add_tcase(suite, tc);
     return suite;
 }

@@ -10,6 +10,8 @@
  * All signals and the noise floor accumulate into a wide float mix bus and are saturated to
  * ci16 exactly once, at the end of the block, so the result is independent of signal order. */
 #include "renderer.h"
+#include "ddc.h"
+#include "ddc_cache.h"
 #include "iq_file_reader.h"
 #include "nco.h"
 #include "receiver.h"
@@ -724,13 +726,206 @@ static bool render_resampled_nco_mix_first(const iq_ci16_t *source_samples, size
     return true;
 }
 
+/* --- Multi-stage DDC path for large integer decimation ratios ---------------------------
+ *
+ * Narrow channels extracting a sub-band from a wideband looping recording (ratio > 16, where
+ * the single-stage resampler's tap cap can no longer reject aliases) render through a
+ * designed decimation cascade instead (ddc.h). The block is still a pure function of the
+ * absolute grid index: the cascade is re-primed every block with plan->history_source_samples
+ * of history, the exact generalization of the resampler's history_samples trick below.
+ *
+ * Normally the cascade is split in two hops around a cached intermediate sub-band
+ * (ddc_cache.h): the source-rate front half runs once per (recording, tune-grid area) and is
+ * reused across blocks and revisited tunes; per block only the residual rotation and the tail
+ * stages run, at the intermediate rate. The direct single-hop cascade remains the fallback
+ * when the loop cannot be cached (length not divisible by the front decimation, budget). */
+
+static ddc_cache_t *g_ddc_cache = NULL;
+static size_t g_ddc_cache_max_bytes = RENDERER_DDC_CACHE_DEFAULT_BYTES;
+static pthread_mutex_t g_ddc_cache_lock = PTHREAD_MUTEX_INITIALIZER;
+
+void renderer_ddc_cache_configure(size_t max_bytes)
+{
+    pthread_mutex_lock(&g_ddc_cache_lock);
+    g_ddc_cache_max_bytes = max_bytes;
+    if (g_ddc_cache != NULL) {
+        ddc_cache_destroy(g_ddc_cache);
+        g_ddc_cache = NULL;
+    }
+    pthread_mutex_unlock(&g_ddc_cache_lock);
+}
+
+static ddc_cache_t *renderer_ddc_cache(void)
+{
+    pthread_mutex_lock(&g_ddc_cache_lock);
+    if (g_ddc_cache == NULL && g_ddc_cache_max_bytes > 0) {
+        g_ddc_cache = ddc_cache_create(g_ddc_cache_max_bytes);
+    }
+    ddc_cache_t *cache = g_ddc_cache;
+    pthread_mutex_unlock(&g_ddc_cache_lock);
+    return cache;
+}
+
+/* Run one cascade hop for a whole block and accumulate into the mix bus. `samples` is the
+ * hop's input loop (raw recording or cached intermediate); input index i of the hop grid maps
+ * to samples[i mod loop] (zero before the signal's start, i < 0). The rotation NCO is
+ * anchored to the absolute input index via the Q0.64 phase step -- exact even for negative
+ * indices, since the wrapping multiply is modulo one turn. `first_output` is the block's
+ * first output index on the signal-relative output grid. */
+static void ddc_render_hop(const iq_ci16_t *samples,
+                           uint64_t loop_samples,
+                           uint32_t input_rate_hz,
+                           const ddc_plan_t *plan,
+                           double rotate_hz,
+                           int64_t first_output,
+                           size_t count,
+                           double gain,
+                           float *bus)
+{
+    static _Thread_local ddc_exec_t exec;
+    float complex rotated[DDC_EXEC_CHUNK];
+    float complex produced[DDC_EXEC_CHUNK / 2U + 2U];
+
+    const int64_t ratio = (int64_t)plan->ratio;
+    const int64_t reach = (int64_t)plan->history_source_samples;
+    const int64_t feed_first = first_output * ratio - reach;
+    const int64_t feed_total = (int64_t)(count - 1) * ratio + 2 * reach + 1;
+    const int64_t loop = (int64_t)loop_samples;
+
+    ddc_exec_init(&exec, plan, feed_first);
+    const uint64_t step_q64 = nco_phase_step_q64(rotate_hz, (double)input_rate_hz);
+    const double step = 2.0 * M_PI * rotate_hz / (double)input_rate_hz;
+    const double step_c = cos(step);
+    const double step_s = sin(step);
+    const float gain_f = (float)gain;
+
+    size_t out_done = 0;
+    for (int64_t done = 0; done < feed_total; done += (int64_t)DDC_EXEC_CHUNK) {
+        const int64_t remaining = feed_total - done;
+        const size_t chunk = remaining < (int64_t)DDC_EXEC_CHUNK ? (size_t)remaining : DDC_EXEC_CHUNK;
+        const int64_t chunk_first = feed_first + done;
+        /* Drift-free: the oscillator recurrence is re-anchored every chunk from the absolute
+         * input index (same pattern as the mix-first path's per-block anchor). */
+        const double phase0 = nco_phase_rad_at(step_q64, (uint64_t)chunk_first);
+        double osc_c = cos(phase0);
+        double osc_s = sin(phase0);
+        int64_t wrapped = ((chunk_first % loop) + loop) % loop;
+        int64_t index = chunk_first;
+        for (size_t k = 0; k < chunk; k++) {
+            if (index < 0) {
+                rotated[k] = CMPLXF(0.0f, 0.0f);
+            } else {
+                const double sample_i = (double)samples[wrapped].i;
+                const double sample_q = (double)samples[wrapped].q;
+                rotated[k] = CMPLXF((float)(sample_i * osc_c - sample_q * osc_s),
+                                    (float)(sample_i * osc_s + sample_q * osc_c));
+            }
+            index++;
+            wrapped++;
+            if (wrapped == loop) {
+                wrapped = 0;
+            }
+            const double next_c = osc_c * step_c - osc_s * step_s;
+            const double next_s = osc_s * step_c + osc_c * step_s;
+            osc_c = next_c;
+            osc_s = next_s;
+            if ((k & 0xffU) == 0xffU) {
+                const double inv = 1.0 / sqrt(osc_c * osc_c + osc_s * osc_s);
+                osc_c *= inv;
+                osc_s *= inv;
+            }
+        }
+        const size_t space = count - out_done;
+        const size_t capacity = sizeof(produced) / sizeof(produced[0]) < space
+            ? sizeof(produced) / sizeof(produced[0])
+            : space;
+        const size_t emitted = ddc_exec_push(&exec, rotated, chunk, produced, capacity);
+        for (size_t k = 0; k < emitted; k++) {
+            bus[2U * (out_done + k)] += gain_f * crealf(produced[k]);
+            bus[2U * (out_done + k) + 1U] += gain_f * cimagf(produced[k]);
+        }
+        out_done += emitted;
+    }
+}
+
+/* Render a qualifying signal (looping IQ replay, integer ratio > threshold) through the DDC
+ * cascade: cached two-hop when possible, direct single hop otherwise. Returns false when no
+ * plan can be designed for this rate/bandwidth combination (caller falls back to the legacy
+ * resampler) or the block starts before the signal does. */
+static bool render_signal_ddc(const iq_ci16_t *samples_base,
+                              uint64_t total_samples,
+                              uint32_t source_rate_hz,
+                              const char *source_id,
+                              const scenario_signal_t *signal,
+                              double offset_hz,
+                              double source_gain,
+                              uint32_t output_sample_rate_hz,
+                              uint32_t channel_bandwidth_hz,
+                              uint64_t abs_start_sample,
+                              float *bus,
+                              size_t count)
+{
+    const ddc_plan_t *full_plan =
+        ddc_plan_cache_get(source_rate_hz, output_sample_rate_hz, channel_bandwidth_hz);
+    if (full_plan == NULL) {
+        return false;
+    }
+    /* Same start anchor as iq_signal_loop_position: output index m plays unwrapped source
+     * sample (m - start_out) * ratio. The rotation phase is likewise anchored to the
+     * signal-relative grid, so the cached and direct hops agree exactly. */
+    const uint64_t start_out =
+        (uint64_t)llround(signal->start_time_s * (double)output_sample_rate_hz);
+    if (abs_start_sample < start_out) {
+        return false; /* block straddles the signal start: legacy path, once */
+    }
+    const int64_t first_output = (int64_t)(abs_start_sample - start_out);
+
+    const uint32_t intermediate_rate_hz =
+        ddc_intermediate_rate_hz(source_rate_hz, output_sample_rate_hz);
+    if (intermediate_rate_hz != 0) {
+        const uint32_t front_bandwidth_hz = ddc_front_bandwidth_hz(intermediate_rate_hz);
+        const ddc_plan_t *front_plan =
+            ddc_plan_cache_get(source_rate_hz, intermediate_rate_hz, front_bandwidth_hz);
+        const ddc_plan_t *tail_plan =
+            ddc_plan_cache_get(intermediate_rate_hz, output_sample_rate_hz, channel_bandwidth_hz);
+        if (front_plan != NULL && tail_plan != NULL && total_samples % front_plan->ratio == 0) {
+            /* Quantize the shift to the tune grid so revisited tune areas share one entry;
+             * the residual (grid remainder plus the cache's whole-cycles snap) is applied
+             * exactly by the NCO at the intermediate rate. */
+            const uint32_t grid_step_hz = ddc_grid_step_hz(intermediate_rate_hz);
+            const double shift_request =
+                (double)ddc_grid_center_hz((int64_t)llround(offset_hz), grid_step_hz);
+            const ddc_cache_entry_t *entry = ddc_cache_acquire(
+                renderer_ddc_cache(), source_id, samples_base, total_samples, source_rate_hz,
+                shift_request, intermediate_rate_hz, front_plan);
+            if (entry != NULL) {
+                const double residual_hz = offset_hz - entry->applied_shift_hz;
+                if (fabs(residual_hz) + (double)channel_bandwidth_hz / 2.0 <=
+                    (double)front_bandwidth_hz / 2.0) {
+                    ddc_render_hop(entry->samples, entry->sample_count, intermediate_rate_hz,
+                                   tail_plan, residual_hz, first_output, count,
+                                   source_gain / DDC_CACHE_SAMPLE_SCALE, bus);
+                    ddc_cache_release(renderer_ddc_cache(), entry);
+                    return true;
+                }
+                ddc_cache_release(renderer_ddc_cache(), entry);
+            }
+        }
+    }
+
+    ddc_render_hop(samples_base, total_samples, source_rate_hz, full_plan, offset_hz,
+                   first_output, count, source_gain, bus);
+    return true;
+}
+
 /* Render one contiguous stretch of a signal into the mix bus, starting at output sample
  * `abs_start_sample` (absolute grid index) and bus position `out_offset`. This is the former
  * tail of the per-signal loop, factored out so looping signals can render a block in segments
  * split at the file seam: the NCO phase is anchored to the absolute index, so phase stays
  * continuous across segments and blocks for free. force_rotate_after keeps shift-mode replay
- * on the pure-rotation paths (never the band-limiting mix-first DDC), because spectral
- * wrap-around is that mode's specified semantics. */
+ * on the pure-rotation paths (never the band-limiting mix-first DDC) for moderate ratios,
+ * where spectral wrap-around is that mode's specified semantics; large integer ratios take
+ * the render_signal_ddc sub-band extraction path before ever reaching here. */
 static void render_signal_segment(
     const iq_ci16_t *samples_base,
     uint64_t total_samples,
@@ -934,6 +1129,22 @@ static bool renderer_render_window_block(
         double source_gain = passband_gain * output_scale * pow(10.0, (signal->power_dbm - rf_reference_power_dbm) / 20.0);
         if (is_audio) {
             source_gain *= prerender->gain;
+        }
+
+        /* Looping IQ replay into a much lower-rate channel is a true DDC: sub-band
+         * extraction through the multi-stage cascade. Everything else (moderate ratios,
+         * bursts, audio pre-renders) keeps the byte-identical legacy paths. */
+        if (signal->loop && !is_audio &&
+            output_sample_rate_hz != 0 && source_rate_hz % output_sample_rate_hz == 0U &&
+            source_rate_hz / output_sample_rate_hz > DDC_CASCADE_RATIO_THRESHOLD &&
+            render_signal_ddc(samples_base, total_samples, source_rate_hz,
+                              signal->source_reference, signal, offset_hz, source_gain,
+                              output_sample_rate_hz, (uint32_t)window_bandwidth_hz,
+                              start_sample, bus, count)) {
+            if (stats != NULL) {
+                stats->active_signals++;
+            }
+            continue;
         }
 
         const bool force_rotate_after = signal->replay_mode == SCENARIO_REPLAY_SHIFT;
