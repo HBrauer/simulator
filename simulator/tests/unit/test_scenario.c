@@ -280,7 +280,7 @@ START_TEST(rejects_invalid_replay_configs)
 }
 END_TEST
 
-START_TEST(rejects_loop_repeat_conflict_and_bad_mode)
+START_TEST(rejects_replay_repeat_and_bad_mode)
 {
     char path[] = "/tmp/sdr_scenario_replay_conflict_XXXXXX";
     int fd = mkstemp(path);
@@ -306,9 +306,9 @@ START_TEST(rejects_loop_repeat_conflict_and_bad_mode)
     fclose(file);
     scenario_t scenario;
     char error[128];
-    /* range mode implies loop, and loop cannot be combined with a repeat interval */
+    /* range/shift replay streams continuously, so a repeat interval is contradictory there */
     ck_assert(!scenario_load_json(path, &scenario, error, sizeof(error)));
-    ck_assert_str_eq(error, "loop_repeat_conflict");
+    ck_assert_str_eq(error, "replay_mode_no_repeat");
     unlink(path);
 
     char bad_mode_path[] = "/tmp/sdr_scenario_replay_badmode_XXXXXX";
@@ -398,7 +398,7 @@ Suite *scenario_suite(void)
     tcase_add_test(tc, rejects_passthrough_without_variants);
     tcase_add_test(tc, defaults_to_fixed_replay_without_new_fields);
     tcase_add_test(tc, rejects_invalid_replay_configs);
-    tcase_add_test(tc, rejects_loop_repeat_conflict_and_bad_mode);
+    tcase_add_test(tc, rejects_replay_repeat_and_bad_mode);
     tcase_add_test(tc, loads_and_validates_scenario);
     tcase_add_test(tc, loads_optional_noise_floor);
     tcase_add_test(tc, loads_audio_wav_modulation_scenario);

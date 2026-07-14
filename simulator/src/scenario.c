@@ -269,12 +269,6 @@ bool scenario_load_json(const char *path, scenario_t *scenario, char *error, siz
             snprintf(error, error_size, "signal_frequency_range_invalid");
             return false;
         }
-        json_t *loop = json_object_get(sig, "loop");
-        if (json_is_boolean(loop)) {
-            out->loop = json_is_true(loop);
-        } else {
-            out->loop = out->replay_mode != SCENARIO_REPLAY_FIXED;
-        }
         json_t *passthrough = json_object_get(sig, "passthrough");
         out->passthrough = json_is_boolean(passthrough) && json_is_true(passthrough);
         if (!get_json_string(sig, "signal_id", out->signal_id, sizeof(out->signal_id)) ||
@@ -297,16 +291,15 @@ bool scenario_load_json(const char *path, scenario_t *scenario, char *error, siz
             out->start_time_s = 0.0;
         }
         const bool has_repeat = get_json_double(sig, "repeat_interval_s", &out->repeat_interval_s);
-        if (out->loop && has_repeat) {
-            /* The two timing models cannot be mixed silently: a looping signal has no
-             * silent gap, so a repeat interval would be dead configuration. */
+        /* The timing model follows directly from repeat_interval_s -- there is no separate `loop`
+         * knob. A signal that carries an interval is a recurring burst (the source plays once per
+         * interval, silent in between); a signal without one loops the source continuously. */
+        out->loop = !has_repeat;
+        if (has_repeat && out->replay_mode != SCENARIO_REPLAY_FIXED) {
+            /* Range/shift replay streams the capture verbatim as the receiver tunes across it:
+             * an inherently continuous mode, so a repeat interval has no meaning there. */
             json_decref(root);
-            snprintf(error, error_size, "loop_repeat_conflict");
-            return false;
-        }
-        if (!out->loop && !has_repeat) {
-            json_decref(root);
-            snprintf(error, error_size, "signal_invalid");
+            snprintf(error, error_size, "replay_mode_no_repeat");
             return false;
         }
         json_t *modulation = json_object_get(sig, "modulation");

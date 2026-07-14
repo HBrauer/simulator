@@ -148,12 +148,16 @@ Signal fields:
 | `power_dbm` | number | yes | RF power. Digital level is `nominal_level_dbfs + (power_dbm - rf_reference_power_dbm)` before `output_scale`. |
 | `fm_deviation_hz` | number | WBFM only | FM peak deviation. Defaults to `75000`. |
 | `am_depth` | number | AM only | AM modulation depth from `0.0` to `1.0`. Defaults to `0.8`. |
-| `start_time_s` | number | no | Scenario start time for playback. Defaults to `0`. |
-| `repeat_interval_s` | number | unless `loop` | Burst repeat period. Required when `loop` is `false`; must not be combined with `loop: true` (`loop_repeat_conflict`). |
+| `start_time_s` | number | no | Scenario start time before the first playback. Defaults to `0`. |
+| `repeat_interval_s` | number | see notes | **Selects the timing model** (see "Timing model" below). Present → the signal is a recurring *burst* with this period; absent → the signal *loops* the source continuously. Continuous looping is IQ-file only. In `range`/`shift` replay mode it must be absent (`replay_mode_no_repeat`). |
 | `replay_mode` | string | no | `fixed` (default), `range`, or `shift`. See below. |
 | `frequency_range` | object | range/shift | `{ "start_hz": ..., "stop_hz": ... }`. The tune interval in which the signal is active. |
-| `loop` | bool | no | Continuous epoch-anchored looping of the file (no silent gap). Defaults to `true` for `range`/`shift`, `false` for `fixed`. IQ-file sources only. |
-| `passthrough` | bool | no | Bypasses the mixer entirely for a channel dedicated to this one capture (see below). Requires `replay_mode` `range`/`shift`, `loop: true`, and a source with `passthrough_variants`. Defaults to `false`. |
+| `passthrough` | bool | no | Bypasses the mixer entirely for a channel dedicated to this one capture (see below). Requires `replay_mode` `range`/`shift`, no `repeat_interval_s` (i.e. a looping signal), and a source with `passthrough_variants`. Defaults to `false`. |
+
+**Timing model** — a signal is one of two kinds, chosen solely by whether `repeat_interval_s` is present; there is no separate `loop` field:
+
+- **Burst** (`repeat_interval_s` present): the source plays once from `start_time_s`, runs for its natural duration, then goes silent until the next multiple of `repeat_interval_s`, and repeats. The interval must be `> 0` and `>=` the source duration (`signal_repeat_too_short`). Works for both IQ and audio sources.
+- **Loop** (`repeat_interval_s` absent): the source is played back-to-back with no gap, wrapping seamlessly at the file boundary, anchored to the epoch timebase. IQ-file sources only (`loop_source_unsupported` otherwise). `range`/`shift` replay signals are always loops — a repeat interval there is rejected (`replay_mode_no_repeat`).
 
 Replay modes (IQ-file sources with `iq` modulation only):
 
@@ -204,7 +208,7 @@ Validation error codes include:
 - `replay_range_invalid`
 - `replay_mode_source_mismatch`
 - `replay_shift_missing_center`
-- `loop_repeat_conflict`
+- `replay_mode_no_repeat`
 - `loop_source_unsupported`
 - `passthrough_requires_replay_mode`
 - `passthrough_requires_loop`

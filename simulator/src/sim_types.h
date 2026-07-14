@@ -164,7 +164,8 @@ typedef struct {
     scenario_replay_mode_t replay_mode;
     uint64_t replay_range_start_hz;
     uint64_t replay_range_stop_hz;
-    bool loop; /* continuous epoch-anchored looping instead of the start/repeat burst model */
+    bool loop; /* derived, not configured: true iff repeat_interval_s is absent. Selects
+                * continuous epoch-anchored looping over the start/repeat burst model. */
     /* When active, this channel bypasses the mixer entirely for the block: no float mix bus,
      * no noise floor, no other signals -- just this source's samples (optionally gain-scaled
      * and/or frequency-rotated for shift mode) written straight to the output. Requires
