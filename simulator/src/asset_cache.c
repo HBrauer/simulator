@@ -45,6 +45,31 @@ static double normalize_audio_rms(float *samples, size_t count)
     return gain;
 }
 
+/* Windowed FIR Hilbert transform. `circular` wraps the kernel around the clip ends (used for
+ * loop-conditioned audio, where the clip is periodic) instead of truncating at the edges. */
+static void build_hilbert(const float *audio, uint64_t count, bool circular, float *out)
+{
+    for (uint64_t i = 0; i < count; i++) {
+        double acc = 0.0;
+        for (int n = -HILBERT_RADIUS; n <= HILBERT_RADIUS; n++) {
+            if (n == 0 || (n & 1) == 0) {
+                continue;
+            }
+            int64_t index = (int64_t)i - (int64_t)n;
+            if (index < 0 || (uint64_t)index >= count) {
+                if (!circular) {
+                    continue;
+                }
+                index = ((index % (int64_t)count) + (int64_t)count) % (int64_t)count;
+            }
+            const double window = 0.54 + 0.46 * cos(M_PI * (double)n / (double)HILBERT_RADIUS);
+            const double coeff = (2.0 / (M_PI * (double)n)) * window;
+            acc += coeff * (double)audio[index];
+        }
+        out[i] = (float)acc;
+    }
+}
+
 static bool build_audio_helpers(cached_asset_t *asset, char *error, size_t error_size)
 {
     const size_t count = (size_t)asset->sample_count;
@@ -59,22 +84,91 @@ static bool build_audio_helpers(cached_asset_t *asset, char *error, size_t error
         asset->audio_integral[i + 1U] = asset->audio_integral[i] + (double)asset->audio_samples[i];
     }
 
-    for (size_t i = 0; i < count; i++) {
-        double acc = 0.0;
-        for (int n = -HILBERT_RADIUS; n <= HILBERT_RADIUS; n++) {
-            if (n == 0 || (n & 1) == 0) {
-                continue;
-            }
-            const int64_t index = (int64_t)i - (int64_t)n;
-            if (index < 0 || (uint64_t)index >= asset->sample_count) {
-                continue;
-            }
-            const double window = 0.54 + 0.46 * cos(M_PI * (double)n / (double)HILBERT_RADIUS);
-            const double coeff = (2.0 / (M_PI * (double)n)) * window;
-            acc += coeff * (double)asset->audio_samples[index];
-        }
-        asset->audio_hilbert[i] = (float)acc;
+    build_hilbert(asset->audio_samples, asset->sample_count, false, asset->audio_hilbert);
+    return true;
+}
+
+/* ---- loop conditioning for continuous audio signals ----
+ *
+ * A continuous signal wraps its pre-rendered buffer end-to-start, so the modulated waveform must
+ * be periodic: the WBFM carrier phase (the running integral of the audio) has to return to its
+ * start value at the wrap, and the AM/SSB waveform must be continuous across the seam. A raw clip
+ * guarantees neither, so the audio is conditioned into a loop-clean copy before synthesis:
+ *
+ *  1. Seam crossfade: the last AUDIO_LOOP_CROSSFADE_S of the clip is overlap-added onto its head
+ *     (equal-power), shortening the loop by the fade length. The periodic extension is then
+ *     continuous: ...y[L-1] -> y[0]... plays the original ...x[L-1] -> x[L]... transition.
+ *  2. Exact DC removal, plus a ramp correction on the integral so integral[L] == 0 exactly: the
+ *     FM phase completes a whole number of cycles per loop (DC in audio is inaudible anyway).
+ *  3. The Hilbert transform is computed circularly, so the SSB quadrature wraps too.
+ *
+ * Burst signals never come through here: their pre-renders are bit-identical to before, and each
+ * burst restarts from phase zero after a silent gap, so no conditioning is needed.
+ * (AUDIO_LOOP_CROSSFADE_S lives in asset_cache.h.)
+ */
+static void free_conditioned_asset(cached_asset_t *asset)
+{
+    free(asset->audio_samples);
+    free(asset->audio_hilbert);
+    free(asset->audio_integral);
+    memset(asset, 0, sizeof(*asset));
+}
+
+static bool build_loop_conditioned_asset(const cached_asset_t *src, uint32_t audio_rate_hz, cached_asset_t *out, char *error, size_t error_size)
+{
+    memset(out, 0, sizeof(*out));
+    out->source_kind = src->source_kind;
+    out->normalization_gain = src->normalization_gain;
+    const uint64_t count = src->sample_count;
+    if (count == 0) {
+        return true;
     }
+    uint64_t fade = (uint64_t)llround(AUDIO_LOOP_CROSSFADE_S * (double)audio_rate_hz);
+    if (fade > count / 4U) {
+        fade = count / 4U; /* very short clips: shrink the fade rather than consume the clip */
+    }
+    const uint64_t loop_count = count - fade;
+    out->sample_count = loop_count;
+    out->audio_samples = malloc((size_t)loop_count * sizeof(*out->audio_samples));
+    out->audio_hilbert = malloc((size_t)loop_count * sizeof(*out->audio_hilbert));
+    out->audio_integral = malloc(((size_t)loop_count + 1U) * sizeof(*out->audio_integral));
+    if (out->audio_samples == NULL || out->audio_hilbert == NULL || out->audio_integral == NULL) {
+        free_conditioned_asset(out);
+        snprintf(error, error_size, "asset_cache_alloc_failed");
+        return false;
+    }
+
+    memcpy(out->audio_samples, src->audio_samples, (size_t)loop_count * sizeof(*out->audio_samples));
+    for (uint64_t i = 0; i < fade; i++) {
+        /* Head weight runs 0 -> 1, tail weight 1 -> 0 (equal-power): y[0] == x[loop_count], so
+         * the wrap y[L-1] -> y[0] plays the original x[L-1] -> x[L] transition. */
+        const double theta = fade > 1U ? (M_PI / 2.0) * (double)i / (double)(fade - 1U) : M_PI / 2.0;
+        const double head = (double)src->audio_samples[i];
+        const double tail = (double)src->audio_samples[loop_count + i];
+        out->audio_samples[i] = (float)(sin(theta) * head + cos(theta) * tail);
+    }
+
+    double mean = 0.0;
+    for (uint64_t i = 0; i < loop_count; i++) {
+        mean += (double)out->audio_samples[i];
+    }
+    mean /= (double)loop_count;
+    for (uint64_t i = 0; i < loop_count; i++) {
+        out->audio_samples[i] = (float)((double)out->audio_samples[i] - mean);
+    }
+
+    out->audio_integral[0] = 0.0;
+    for (uint64_t i = 0; i < loop_count; i++) {
+        out->audio_integral[i + 1U] = out->audio_integral[i] + (double)out->audio_samples[i];
+    }
+    /* Remove the float-rounding residual as a linear ramp so the end value is exactly zero. */
+    const double residual = out->audio_integral[loop_count] / (double)loop_count;
+    for (uint64_t i = 1; i <= loop_count; i++) {
+        out->audio_integral[i] -= (double)i * residual;
+    }
+    out->audio_integral[loop_count] = 0.0;
+
+    build_hilbert(out->audio_samples, loop_count, true, out->audio_hilbert);
     return true;
 }
 
@@ -228,16 +322,34 @@ static bool prerender_signals(asset_cache_t *cache, const scenario_t *scenario, 
         struct timespec t_start;
         clock_gettime(CLOCK_MONOTONIC, &t_start);
 
+        /* Continuous signals synthesise from a loop-conditioned copy of the audio (seam
+         * crossfade + DC removal + circular Hilbert) so the pre-render wraps cleanly; the copy
+         * is transient and freed after synthesis. Burst signals use the asset as-is. */
+        const cached_asset_t *synth_asset = asset;
+        cached_asset_t conditioned;
+        if (signal->loop) {
+            if (!build_loop_conditioned_asset(asset, source->sample_rate_hz, &conditioned, error, error_size)) {
+                return false;
+            }
+            synth_asset = &conditioned;
+        }
+
         const uint32_t rate = prerender_rate_hz(signal, source, params);
         const double audio_rate = (double)source->sample_rate_hz;
-        const uint64_t pr_count = (uint64_t)llround((double)asset->sample_count * (double)rate / audio_rate);
+        const uint64_t pr_count = (uint64_t)llround((double)synth_asset->sample_count * (double)rate / audio_rate);
 
         if (pr_count > SIZE_MAX / sizeof(iq_ci16_t)) {
+            if (synth_asset == &conditioned) {
+                free_conditioned_asset(&conditioned);
+            }
             snprintf(error, error_size, "asset_cache_too_large");
             return false;
         }
         const size_t pr_bytes = (size_t)pr_count * sizeof(iq_ci16_t);
         if (max_bytes > 0 && (pr_bytes > max_bytes || *total_bytes > max_bytes - pr_bytes)) {
+            if (synth_asset == &conditioned) {
+                free_conditioned_asset(&conditioned);
+            }
             snprintf(error, error_size, "asset_cache_limit_exceeded");
             return false;
         }
@@ -247,12 +359,18 @@ static bool prerender_signals(asset_cache_t *cache, const scenario_t *scenario, 
         if (pr_count > 0) {
             buffer = calloc((size_t)pr_count, sizeof(*buffer));
             if (buffer == NULL) {
+                if (synth_asset == &conditioned) {
+                    free_conditioned_asset(&conditioned);
+                }
                 snprintf(error, error_size, "asset_cache_alloc_failed");
                 return false;
             }
         }
 
-        const double gain = pr_count > 0 ? prerender_fill_buffer(asset, signal, audio_rate, rate, pr_count, buffer) : 1.0;
+        const double gain = pr_count > 0 ? prerender_fill_buffer(synth_asset, signal, audio_rate, rate, pr_count, buffer) : 1.0;
+        if (synth_asset == &conditioned) {
+            free_conditioned_asset(&conditioned);
+        }
 
         cache->prerenders[s].valid = true;
         cache->prerenders[s].sample_rate_hz = rate;
@@ -264,9 +382,10 @@ static bool prerender_signals(asset_cache_t *cache, const scenario_t *scenario, 
         clock_gettime(CLOCK_MONOTONIC, &t_end);
         const double synth_ms = (double)(t_end.tv_sec - t_start.tv_sec) * 1000.0 +
                                 (double)(t_end.tv_nsec - t_start.tv_nsec) / 1.0e6;
-        fprintf(stderr, "prerender signal %s: %u Hz, %llu samples, %.2f MB, %.1f ms\n",
+        fprintf(stderr, "prerender signal %s: %u Hz, %llu samples, %.2f MB, %.1f ms%s\n",
                 signal->signal_id, rate, (unsigned long long)pr_count,
-                (double)pr_bytes / (1024.0 * 1024.0), synth_ms);
+                (double)pr_bytes / (1024.0 * 1024.0), synth_ms,
+                signal->loop ? " (loop-conditioned)" : "");
     }
     return true;
 }
@@ -528,7 +647,17 @@ bool asset_cache_prerender_from_audio(cached_prerender_t *out, const float *audi
             return false;
         }
         memcpy(asset.audio_samples, audio, (size_t)audio_count * sizeof(*asset.audio_samples));
-        if (!build_audio_helpers(&asset, error, error_size)) {
+        if (signal->loop) {
+            /* Continuous signal: synthesise from the loop-conditioned copy, exactly like the
+             * load path. */
+            cached_asset_t conditioned;
+            const bool ok = build_loop_conditioned_asset(&asset, audio_rate_hz, &conditioned, error, error_size);
+            free(asset.audio_samples);
+            if (!ok) {
+                return false;
+            }
+            asset = conditioned;
+        } else if (!build_audio_helpers(&asset, error, error_size)) {
             free(asset.audio_samples);
             return false;
         }
@@ -538,10 +667,10 @@ bool asset_cache_prerender_from_audio(cached_prerender_t *out, const float *audi
     memset(&source, 0, sizeof(source));
     source.source_kind = SCENARIO_SOURCE_AUDIO_FILE;
     source.sample_rate_hz = audio_rate_hz;
-    source.sample_count = audio_count;
+    source.sample_count = asset.sample_count;
 
     const uint32_t rate = prerender_rate_hz(signal, &source, params);
-    const uint64_t pr_count = audio_count > 0 ? (uint64_t)llround((double)audio_count * (double)rate / (double)audio_rate_hz) : 0;
+    const uint64_t pr_count = asset.sample_count > 0 ? (uint64_t)llround((double)asset.sample_count * (double)rate / (double)audio_rate_hz) : 0;
     iq_ci16_t *buffer = NULL;
     if (pr_count > 0) {
         buffer = calloc((size_t)pr_count, sizeof(*buffer));

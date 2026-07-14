@@ -307,6 +307,37 @@ START_TEST(iq_signal_bandwidth_defaults_to_source)
 }
 END_TEST
 
+START_TEST(audio_signal_without_repeat_is_continuous)
+{
+    /* An audio signal may omit repeat_interval_s: it becomes a continuous (loop-conditioned)
+     * station rather than a recurring burst. */
+    char path[] = "/tmp/sdr_scenario_audio_cont_XXXXXX";
+    int fd = mkstemp(path);
+    ck_assert_int_ge(fd, 0);
+    FILE *file = fdopen(fd, "w");
+    ck_assert_ptr_nonnull(file);
+    fprintf(file,
+        "{"
+        "\"schema_version\":1,\"scenario_id\":\"audio_cont\","
+        "\"sources\":[{"
+        "\"id\":\"aud\",\"source_type\":\"audio_file\",\"file\":\"simulator/assets/radio_clip.wav\","
+        "\"format\":\"wav\",\"sample_rate_hz\":48000,\"bandwidth_hz\":200000,\"center_frequency_hz\":0,\"nominal_level_dbfs\":-6.0"
+        "}],"
+        "\"signals\":[{"
+        "\"signal_id\":\"station\",\"source_reference\":\"aud\",\"modulation\":\"wbfm\","
+        "\"center_frequency_hz\":10005000000,\"bandwidth_hz\":200000,\"power_dbm\":-60.0"
+        "}]"
+        "}");
+    fclose(file);
+    scenario_t scenario;
+    char error[128];
+    ck_assert_msg(scenario_load_json(path, &scenario, error, sizeof(error)), "%s", error);
+    ck_assert(scenario.signals[0].loop);
+    ck_assert_msg(scenario_validate(&scenario, ".", error, sizeof(error)), "%s", error);
+    unlink(path);
+}
+END_TEST
+
 START_TEST(rejects_invalid_replay_configs)
 {
     scenario_t scenario;
@@ -451,6 +482,7 @@ Suite *scenario_suite(void)
     tcase_add_test(tc, rejects_passthrough_without_variants);
     tcase_add_test(tc, defaults_to_fixed_replay_without_new_fields);
     tcase_add_test(tc, iq_signal_bandwidth_defaults_to_source);
+    tcase_add_test(tc, audio_signal_without_repeat_is_continuous);
     tcase_add_test(tc, rejects_invalid_replay_configs);
     tcase_add_test(tc, rejects_replay_repeat_and_bad_mode);
     tcase_add_test(tc, loads_and_validates_scenario);

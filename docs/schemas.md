@@ -150,7 +150,7 @@ Signal fields:
 | `fm_deviation_hz` | number | WBFM only | FM peak deviation. Defaults to `75000`. |
 | `am_depth` | number | AM only | AM modulation depth from `0.0` to `1.0`. Defaults to `0.8`. |
 | `start_time_s` | number | no | Scenario start time before the first playback. Defaults to `0`. |
-| `repeat_interval_s` | number | see notes | **Selects the timing model** (see "Timing model" below). Present → the signal is a recurring *burst* with this period; absent → the signal *loops* the source continuously. Continuous looping is IQ-file only. In `range`/`shift` replay mode it must be absent (`replay_mode_no_repeat`). |
+| `repeat_interval_s` | number | see notes | **Selects the timing model** (see "Timing model" below). Present → the signal is a recurring *burst* with this period; absent → the signal plays the source continuously. In `range`/`shift` replay mode it must be absent (`replay_mode_no_repeat`). |
 | `replay_mode` | string | no | `fixed` (default), `range`, or `shift`. See below. |
 | `frequency_range` | object | range/shift | `{ "start_hz": ..., "stop_hz": ... }`. The tune interval in which the signal is active. |
 | `passthrough` | bool | no | Bypasses the mixer entirely for a channel dedicated to this one capture (see below). Requires `replay_mode` `range`/`shift`, no `repeat_interval_s` (i.e. a looping signal), and a source with `passthrough_variants`. Defaults to `false`. |
@@ -158,7 +158,7 @@ Signal fields:
 **Timing model** — a signal is one of two kinds, chosen solely by whether `repeat_interval_s` is present; there is no separate `loop` field:
 
 - **Burst** (`repeat_interval_s` present): the source plays once from `start_time_s`, runs for its natural duration, then goes silent until the next multiple of `repeat_interval_s`, and repeats. The interval must be `> 0` and `>=` the source duration (`signal_repeat_too_short`). Works for both IQ and audio sources.
-- **Loop** (`repeat_interval_s` absent): the source is played back-to-back with no gap, wrapping seamlessly at the file boundary, anchored to the epoch timebase. IQ-file sources only (`loop_source_unsupported` otherwise). `range`/`shift` replay signals are always loops — a repeat interval there is rejected (`replay_mode_no_repeat`).
+- **Continuous** (`repeat_interval_s` absent): the source is played back-to-back with no gap, wrapping seamlessly at the file boundary, anchored to the epoch timebase. `range`/`shift` replay signals are always continuous — a repeat interval there is rejected (`replay_mode_no_repeat`). A continuous **audio** signal is *loop-conditioned* at load so the modulated waveform is exactly periodic: the clip's tail is crossfaded onto its head over `AUDIO_LOOP_CROSSFADE_S` (20 ms, shortening the loop by that much), the DC is removed so the FM phase integral closes at the wrap, and the SSB Hilbert transform is computed circularly. Burst audio pre-renders are unaffected.
 
 Replay modes (IQ-file sources with `iq` modulation only):
 
@@ -210,7 +210,6 @@ Validation error codes include:
 - `replay_mode_source_mismatch`
 - `replay_shift_missing_center`
 - `replay_mode_no_repeat`
-- `loop_source_unsupported`
 - `passthrough_requires_replay_mode`
 - `passthrough_requires_loop`
 - `passthrough_requires_variants`

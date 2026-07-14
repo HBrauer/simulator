@@ -56,6 +56,11 @@ typedef struct {
     uint32_t max_rate_hz;
 } prerender_params_t;
 
+/* Seam crossfade applied when loop-conditioning the audio of a continuous signal: the clip's
+ * tail is overlap-added onto its head, shortening the loop by this many seconds (clamped to a
+ * quarter of the clip), so the pre-rendered buffer wraps without a phase/envelope discontinuity. */
+#define AUDIO_LOOP_CROSSFADE_S 0.02
+
 bool asset_cache_load(asset_cache_t *cache, const scenario_t *scenario, char *error, size_t error_size);
 bool asset_cache_load_limited(asset_cache_t *cache, const scenario_t *scenario, size_t max_bytes, size_t batch_samples, const prerender_params_t *prerender, char *error, size_t error_size);
 void asset_cache_free(asset_cache_t *cache);

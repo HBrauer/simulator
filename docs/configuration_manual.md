@@ -313,8 +313,26 @@ no repeat_interval_s:
 ```
 
 Rules:
-- **IQ-file sources only.** An audio source must use a `repeat_interval_s` (it plays in bursts).
 - Continuous playback is what you get by leaving `repeat_interval_s` out; there is nothing else to set.
+- Works for both IQ and audio sources. IQ recordings wrap as-is (a capture is assumed
+  seam-safe). **Audio is seam-conditioned at load** so the modulated waveform is exactly
+  periodic — see below.
+
+**Audio seam conditioning.** A modulated clip does not naturally wrap: the WBFM carrier phase is
+the running integral of the audio (it ends at an arbitrary angle, not where it started), and the
+AM/SSB waveform at the last sample generally differs from the first — a raw wrap would click once
+per pass. A continuous audio signal is therefore conditioned before synthesis:
+
+- the last **20 ms** of the clip are crossfaded (equal-power) onto its beginning, shortening the
+  playback period by that much — like a DJ loop splice;
+- the clip's DC offset is removed so the FM phase completes a whole number of carrier cycles per
+  pass (DC is inaudible in audio and only shifts the carrier);
+- the SSB quadrature (Hilbert) is computed circularly so it wraps too.
+
+Burst signals are untouched by this — each burst restarts cleanly after its silent gap, so their
+pre-renders are bit-identical to a burst-only configuration. Conditioning also means a continuous
+audio signal's pre-render is slightly shorter than the clip (by the 20 ms fade) and its one-time
+load cost is somewhat higher.
 
 Example — a continuous IQ emitter with no gaps:
 
@@ -330,12 +348,26 @@ Example — a continuous IQ emitter with no gaps:
 }
 ```
 
+Example — an endless FM radio station from an audio clip (the clip repeats seam-conditioned,
+with no gap and no click):
+
+```json
+{
+  "signal_id": "fm_station",
+  "source_reference": "radio_clip_wav",
+  "modulation": "wbfm",
+  "center_frequency_hz": 10005000000,
+  "bandwidth_hz": 200000,
+  "power_dbm": -65.0
+}
+```
+
 ### 4.3 Quick reference
 
 | You want | Set |
 | --- | --- |
-| Play once per N seconds, silent between (IQ or audio) | `repeat_interval_s: N` |
-| Play continuously with no gap (IQ only) | omit `repeat_interval_s` |
+| Play once per N seconds, silent between | `repeat_interval_s: N` |
+| Play continuously with no gap (e.g. an endless radio station) | omit `repeat_interval_s` |
 
 ---
 
@@ -465,8 +497,8 @@ on the air over a −160 dBm/Hz noise floor, all using the **burst** timing mode
 
 Note the same IQ source feeds two signals at different frequencies and powers, and the same audio
 clip feeds both an FM and an AM station. To turn `iq_lower` into a **continuous** emitter instead
-of a 1-second burst, delete its `"repeat_interval_s": 1.0` line (it is an IQ source, so continuous
-playback is allowed).
+of a 1-second burst — or `wbfm_station` into an endless radio station — delete the signal's
+`repeat_interval_s` line.
 
 ---
 
@@ -480,4 +512,4 @@ start. The full list of codes is in [`schemas.md`](schemas.md). The timing-relat
 | `signal_repeat_too_short` | `repeat_interval_s` is shorter than the source duration. |
 | `replay_mode_no_repeat` | A `range`/`shift` replay signal carries a `repeat_interval_s`. |
 
-An audio source used without a `repeat_interval_s` is also rejected (audio must play in bursts); see [`schemas.md`](schemas.md) for the complete error-code list.
+See [`schemas.md`](schemas.md) for the complete error-code list.

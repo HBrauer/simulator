@@ -519,10 +519,6 @@ bool scenario_validate(scenario_t *scenario, const char *base_dir, char *error, 
                 }
             }
         }
-        if (signal->loop && source->source_kind != SCENARIO_SOURCE_IQ_FILE) {
-            snprintf(error, error_size, "loop_source_unsupported");
-            return false;
-        }
         if (signal->passthrough) {
             if (signal->replay_mode == SCENARIO_REPLAY_FIXED) {
                 snprintf(error, error_size, "passthrough_requires_replay_mode");
