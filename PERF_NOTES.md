@@ -177,13 +177,20 @@ Measured on a 2-core codespace, default build (`simrender` at -O3, no `-march=na
 
 Steady state is dominated by the tail cascade's final-stage dot products (a few hundred taps at
 the channel rate) — 20 dwelling DDC channels together cost a small fraction of the wideband
-channel. The number that matters operationally is the **cold build**: retuning a DDC channel to
-an uncached tune area runs the shifted front cascade over one entire source loop, costing
-~1 second of wall time per second of recording per thread on this box (scalar rotation dominates;
-expect 2-3x better with `-Dnative_optimizations=true` on real hardware). Builds are sliced across
-up to 8 threads (`ddc_cache_set_build_threads`, bit-identical content for any thread count), so a
-60 s recording costs roughly 60 / (threads x per-thread rate) seconds of one-time stall per new
-tune area — prewarmed at startup for configured centers, amortized by the LRU cache for revisits.
-Future headroom if cold retunes need to get faster: fold the shift into complex-bandpass
-first-stage taps (removes the per-sample oscillator, the current build bottleneck) and/or a VOLK
-rotator on the build gather path.
+channel.
+
+**Cold retunes do not stall the stream.** With background builds (the streamer's mode after
+startup prewarm), a DDC channel retuned to an uncached area renders through the direct
+full-rate cascade immediately — the same per-sample cost as the build itself, ~1.1x real time
+single-threaded on this box, so one retuned channel keeps real-time output while its
+intermediate builds — and switches to the cached path when the build lands. The build runs the
+shifted front cascade over one entire source loop: ~1 second of wall time per second of
+recording per thread here (scalar rotation dominates; expect 2-3x better with
+`-Dnative_optimizations=true` on real hardware), sliced across up to 8 threads
+(`ddc_cache_set_build_threads`, bit-identical content for any thread count). So a 60 s
+recording needs roughly 60 / (threads x per-thread rate) seconds of *background* build per new
+tune area; during that window the channel costs full-rate CPU instead of intermediate-rate.
+Configured centers are prewarmed (blocking) at startup; revisits are cache hits. Future
+headroom if the transition window needs to shrink: fold the shift into complex-bandpass
+first-stage taps (removes the per-sample oscillator, the dominant cost of both the build and
+the direct path) and/or a VOLK rotator on the gather paths.

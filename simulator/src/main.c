@@ -151,9 +151,10 @@ int main(int argc, char **argv)
         return 0;
     }
 
-    /* Prewarm the DDC intermediates for fixed-center channels so their streams start hot
-     * instead of stalling on the first block's cold cache build. Track-tuner channels stay
-     * lazy (their center moves with the scan). */
+    /* Prewarm the DDC intermediates for fixed-center channels so their streams start hot.
+     * Track-tuner channels stay lazy (their center moves with the scan). Builds block here
+     * (background mode is enabled only afterwards), so startup takes roughly one front-
+     * cascade pass per unique tune area -- proportional to the recording length. */
     for (size_t i = 0; i < config.receiver_count; i++) {
         for (size_t c = 0; c < config.receivers[i].channel_count; c++) {
             const channel_config_t *channel = &config.receivers[i].channels[c];
@@ -166,6 +167,9 @@ int main(int argc, char **argv)
                                           timebase_now_ns(&timebase), warm, 64, &warm_stats);
         }
     }
+    /* From here on, a retune to a cold tune area keeps streaming through the direct
+     * full-rate cascade while its intermediate builds in the background. */
+    renderer_ddc_background_builds(true);
 
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
@@ -239,6 +243,8 @@ int main(int argc, char **argv)
         rest_server_stop(servers[i]);
     }
     pthread_mutex_destroy(&receiver_lock);
+    /* Drain in-flight background DDC builds (they read asset memory) before freeing assets. */
+    renderer_ddc_cache_configure(0);
     asset_cache_free(&asset_cache);
     return 0;
 }

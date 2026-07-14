@@ -743,6 +743,12 @@ static bool render_resampled_nco_mix_first(const iq_ci16_t *source_samples, size
 static ddc_cache_t *g_ddc_cache = NULL;
 static size_t g_ddc_cache_max_bytes = RENDERER_DDC_CACHE_DEFAULT_BYTES;
 static pthread_mutex_t g_ddc_cache_lock = PTHREAD_MUTEX_INITIALIZER;
+static atomic_bool g_ddc_background_builds = false;
+
+void renderer_ddc_background_builds(bool enabled)
+{
+    atomic_store_explicit(&g_ddc_background_builds, enabled, memory_order_relaxed);
+}
 
 void renderer_ddc_cache_configure(size_t max_bytes)
 {
@@ -897,7 +903,8 @@ static bool render_signal_ddc(const iq_ci16_t *samples_base,
                 (double)ddc_grid_center_hz((int64_t)llround(offset_hz), grid_step_hz);
             const ddc_cache_entry_t *entry = ddc_cache_acquire(
                 renderer_ddc_cache(), source_id, samples_base, total_samples, source_rate_hz,
-                shift_request, intermediate_rate_hz, front_plan);
+                shift_request, intermediate_rate_hz, front_plan,
+                !atomic_load_explicit(&g_ddc_background_builds, memory_order_relaxed));
             if (entry != NULL) {
                 const double residual_hz = offset_hz - entry->applied_shift_hz;
                 if (fabs(residual_hz) + (double)channel_bandwidth_hz / 2.0 <=

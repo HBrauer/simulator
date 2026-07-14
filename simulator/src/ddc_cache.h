@@ -59,8 +59,14 @@ void ddc_cache_set_build_threads(unsigned threads);
 /* Get-or-build the intermediate for `shift_hz` (snapped as described above). Returns a
  * pinned entry -- pair every successful acquire with ddc_cache_release. Returns NULL when
  * the loop length is not divisible by the front decimation (a circular build would smear
- * the seam), when the entry cannot fit the budget, or on allocation failure. Concurrent
- * acquires of the same key wait for the first builder instead of building twice. */
+ * the seam), when the entry cannot fit the budget, or on allocation failure.
+ *
+ * wait_for_build=true: a missing entry is built synchronously on the calling thread, and
+ * concurrent acquires of the same key wait for the first builder instead of building twice.
+ * wait_for_build=false: a missing entry starts building on a detached background thread and
+ * NULL is returned immediately -- the caller renders the direct full-rate cascade meanwhile
+ * and re-acquires on later blocks until the entry is ready. The source samples must stay
+ * valid until the cache is destroyed (ddc_cache_destroy drains in-flight builds). */
 const ddc_cache_entry_t *ddc_cache_acquire(ddc_cache_t *cache,
                                            const char *source_id,
                                            const iq_ci16_t *source_samples,
@@ -68,7 +74,8 @@ const ddc_cache_entry_t *ddc_cache_acquire(ddc_cache_t *cache,
                                            uint32_t source_rate_hz,
                                            double shift_hz,
                                            uint32_t intermediate_rate_hz,
-                                           const ddc_plan_t *front_plan);
+                                           const ddc_plan_t *front_plan,
+                                           bool wait_for_build);
 
 void ddc_cache_release(ddc_cache_t *cache, const ddc_cache_entry_t *entry);
 

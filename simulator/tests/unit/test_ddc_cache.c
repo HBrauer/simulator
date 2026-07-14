@@ -5,6 +5,7 @@
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 /* Shared fixture: a 1.024 MS/s source loop of 8192 samples (8 ms, so shifts snap to
  * multiples of 125 Hz) carrying a complex tone at +10 kHz, decimated 8:1 to a 128 kS/s
@@ -47,7 +48,7 @@ START_TEST(build_shifts_and_decimates_one_seamless_loop)
 
     const ddc_cache_entry_t *entry = ddc_cache_acquire(
         cache, "src", g_source, TEST_LOOP_SAMPLES, TEST_SOURCE_RATE,
-        3000.0, TEST_INTERMEDIATE_RATE, front_plan());
+        3000.0, TEST_INTERMEDIATE_RATE, front_plan(), true);
     ck_assert_ptr_nonnull(entry);
     ck_assert_uint_eq(entry->sample_count, TEST_LOOP_SAMPLES / 8U);
     ck_assert_double_eq_tol(entry->applied_shift_hz, 3000.0, 1e-9);
@@ -92,7 +93,7 @@ START_TEST(build_matches_direct_circular_convolution_at_the_seam)
     const ddc_plan_t *plan = front_plan();
     const ddc_cache_entry_t *entry = ddc_cache_acquire(
         cache, "src", g_source, TEST_LOOP_SAMPLES, TEST_SOURCE_RATE,
-        3000.0, TEST_INTERMEDIATE_RATE, plan);
+        3000.0, TEST_INTERMEDIATE_RATE, plan, true);
     ck_assert_ptr_nonnull(entry);
     ck_assert_uint_eq(plan->stage_count, 1); /* keeps the reference a single dot product */
 
@@ -132,19 +133,19 @@ START_TEST(nearby_shifts_snap_to_the_same_entry)
     ddc_cache_t *cache = ddc_cache_create(1U << 20);
     const ddc_cache_entry_t *first = ddc_cache_acquire(
         cache, "src", g_source, TEST_LOOP_SAMPLES, TEST_SOURCE_RATE,
-        3000.0, TEST_INTERMEDIATE_RATE, front_plan());
+        3000.0, TEST_INTERMEDIATE_RATE, front_plan(), true);
     /* 3010 Hz rounds to the same 24 cycles/loop (granularity 125 Hz): a detector coming
      * back "a few Hz off" reuses the entry instead of rebuilding. */
     const ddc_cache_entry_t *second = ddc_cache_acquire(
         cache, "src", g_source, TEST_LOOP_SAMPLES, TEST_SOURCE_RATE,
-        3010.0, TEST_INTERMEDIATE_RATE, front_plan());
+        3010.0, TEST_INTERMEDIATE_RATE, front_plan(), true);
     ck_assert_ptr_nonnull(first);
     ck_assert_ptr_eq(first, second);
     ck_assert_double_eq_tol(second->applied_shift_hz, 3000.0, 1e-9);
     /* A genuinely different shift builds its own entry. */
     const ddc_cache_entry_t *third = ddc_cache_acquire(
         cache, "src", g_source, TEST_LOOP_SAMPLES, TEST_SOURCE_RATE,
-        6000.0, TEST_INTERMEDIATE_RATE, front_plan());
+        6000.0, TEST_INTERMEDIATE_RATE, front_plan(), true);
     ck_assert_ptr_nonnull(third);
     ck_assert_ptr_ne(third, first);
     ddc_cache_release(cache, first);
@@ -162,10 +163,10 @@ START_TEST(lru_eviction_keeps_budget_and_rebuilds_on_demand)
 
     const ddc_cache_entry_t *entry_a = ddc_cache_acquire(
         cache, "src", g_source, TEST_LOOP_SAMPLES, TEST_SOURCE_RATE,
-        1000.0, TEST_INTERMEDIATE_RATE, front_plan());
+        1000.0, TEST_INTERMEDIATE_RATE, front_plan(), true);
     const ddc_cache_entry_t *entry_b = ddc_cache_acquire(
         cache, "src", g_source, TEST_LOOP_SAMPLES, TEST_SOURCE_RATE,
-        2000.0, TEST_INTERMEDIATE_RATE, front_plan());
+        2000.0, TEST_INTERMEDIATE_RATE, front_plan(), true);
     ck_assert_ptr_nonnull(entry_a);
     ck_assert_ptr_nonnull(entry_b);
     ddc_cache_release(cache, entry_a);
@@ -175,12 +176,12 @@ START_TEST(lru_eviction_keeps_budget_and_rebuilds_on_demand)
     /* Touch A so B is the LRU victim, then insert C: budget must hold. */
     const ddc_cache_entry_t *entry_a_again = ddc_cache_acquire(
         cache, "src", g_source, TEST_LOOP_SAMPLES, TEST_SOURCE_RATE,
-        1000.0, TEST_INTERMEDIATE_RATE, front_plan());
+        1000.0, TEST_INTERMEDIATE_RATE, front_plan(), true);
     ck_assert_ptr_eq(entry_a_again, entry_a);
     ddc_cache_release(cache, entry_a_again);
     const ddc_cache_entry_t *entry_c = ddc_cache_acquire(
         cache, "src", g_source, TEST_LOOP_SAMPLES, TEST_SOURCE_RATE,
-        3000.0, TEST_INTERMEDIATE_RATE, front_plan());
+        3000.0, TEST_INTERMEDIATE_RATE, front_plan(), true);
     ck_assert_ptr_nonnull(entry_c);
     ddc_cache_release(cache, entry_c);
     ck_assert_uint_le(ddc_cache_used_bytes(cache), 2U * entry_bytes);
@@ -188,10 +189,45 @@ START_TEST(lru_eviction_keeps_budget_and_rebuilds_on_demand)
     /* The evicted key just rebuilds (a bounded retune stall, not an error). */
     const ddc_cache_entry_t *entry_b_rebuilt = ddc_cache_acquire(
         cache, "src", g_source, TEST_LOOP_SAMPLES, TEST_SOURCE_RATE,
-        2000.0, TEST_INTERMEDIATE_RATE, front_plan());
+        2000.0, TEST_INTERMEDIATE_RATE, front_plan(), true);
     ck_assert_ptr_nonnull(entry_b_rebuilt);
     ddc_cache_release(cache, entry_b_rebuilt);
     ck_assert_uint_le(ddc_cache_used_bytes(cache), 2U * entry_bytes);
+    ddc_cache_destroy(cache);
+}
+END_TEST
+
+START_TEST(background_build_serves_later_acquires)
+{
+    fill_source_tone();
+    ddc_cache_t *cache = ddc_cache_create(1U << 20);
+    /* Non-waiting acquire on a cold key: NULL now (caller renders the direct path), entry
+     * appears once the detached builder finishes. */
+    ck_assert_ptr_null(ddc_cache_acquire(cache, "src", g_source, TEST_LOOP_SAMPLES,
+                                         TEST_SOURCE_RATE, 3000.0, TEST_INTERMEDIATE_RATE,
+                                         front_plan(), false));
+    const ddc_cache_entry_t *entry = NULL;
+    for (int attempt = 0; attempt < 1000 && entry == NULL; attempt++) {
+        usleep(2000);
+        entry = ddc_cache_acquire(cache, "src", g_source, TEST_LOOP_SAMPLES, TEST_SOURCE_RATE,
+                                  3000.0, TEST_INTERMEDIATE_RATE, front_plan(), false);
+    }
+    ck_assert_ptr_nonnull(entry);
+
+    /* Background and blocking builds run the same code, so content is bit-identical. */
+    ddc_cache_t *blocking_cache = ddc_cache_create(1U << 20);
+    const ddc_cache_entry_t *blocking_entry = ddc_cache_acquire(
+        blocking_cache, "src", g_source, TEST_LOOP_SAMPLES, TEST_SOURCE_RATE,
+        3000.0, TEST_INTERMEDIATE_RATE, front_plan(), true);
+    ck_assert_ptr_nonnull(blocking_entry);
+    ck_assert_uint_eq(entry->sample_count, blocking_entry->sample_count);
+    ck_assert_int_eq(memcmp(entry->samples, blocking_entry->samples,
+                            (size_t)entry->sample_count * sizeof(iq_ci16_t)), 0);
+
+    ddc_cache_release(cache, entry);
+    ddc_cache_release(blocking_cache, blocking_entry);
+    ddc_cache_destroy(blocking_cache);
+    /* Destroy with a build possibly still settling elsewhere: also exercises the drain. */
     ddc_cache_destroy(cache);
 }
 END_TEST
@@ -213,14 +249,14 @@ START_TEST(parallel_build_is_bit_identical_to_single_thread)
     ddc_cache_t *single = ddc_cache_create(1U << 20);
     const ddc_cache_entry_t *single_entry = ddc_cache_acquire(
         single, "src", source, LONG_LOOP, TEST_SOURCE_RATE,
-        3000.0, TEST_INTERMEDIATE_RATE, front_plan());
+        3000.0, TEST_INTERMEDIATE_RATE, front_plan(), true);
     ck_assert_ptr_nonnull(single_entry);
 
     ddc_cache_set_build_threads(4);
     ddc_cache_t *parallel = ddc_cache_create(1U << 20);
     const ddc_cache_entry_t *parallel_entry = ddc_cache_acquire(
         parallel, "src", source, LONG_LOOP, TEST_SOURCE_RATE,
-        3000.0, TEST_INTERMEDIATE_RATE, front_plan());
+        3000.0, TEST_INTERMEDIATE_RATE, front_plan(), true);
     ck_assert_ptr_nonnull(parallel_entry);
     ddc_cache_set_build_threads(0);
 
@@ -243,13 +279,13 @@ START_TEST(acquire_rejects_impossible_requests)
      * seam, so the caller must fall back to the direct path. */
     ck_assert_ptr_null(ddc_cache_acquire(cache, "src", g_source, TEST_LOOP_SAMPLES - 1U,
                                          TEST_SOURCE_RATE, 3000.0, TEST_INTERMEDIATE_RATE,
-                                         front_plan()));
+                                         front_plan(), true));
     ddc_cache_destroy(cache);
     /* Budget smaller than a single entry. */
     cache = ddc_cache_create(16);
     ck_assert_ptr_null(ddc_cache_acquire(cache, "src", g_source, TEST_LOOP_SAMPLES,
                                          TEST_SOURCE_RATE, 3000.0, TEST_INTERMEDIATE_RATE,
-                                         front_plan()));
+                                         front_plan(), true));
     ck_assert_uint_eq(ddc_cache_used_bytes(cache), 0);
     ddc_cache_destroy(cache);
 }
@@ -264,6 +300,7 @@ Suite *ddc_cache_suite(void)
     tcase_add_test(tc, build_matches_direct_circular_convolution_at_the_seam);
     tcase_add_test(tc, nearby_shifts_snap_to_the_same_entry);
     tcase_add_test(tc, lru_eviction_keeps_budget_and_rebuilds_on_demand);
+    tcase_add_test(tc, background_build_serves_later_acquires);
     tcase_add_test(tc, parallel_build_is_bit_identical_to_single_thread);
     tcase_add_test(tc, acquire_rejects_impossible_requests);
     suite_add_tcase(suite, tc);

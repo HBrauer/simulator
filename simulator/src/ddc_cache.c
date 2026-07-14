@@ -62,6 +62,24 @@ void ddc_cache_destroy(ddc_cache_t *cache)
     if (cache == NULL) {
         return;
     }
+    /* Drain in-flight background builds: a builder still holds pointers to its entry and the
+     * caller's source samples until it finishes (failed builds unlink their entry, so a
+     * rescan finding only ready entries means no builder is running). */
+    pthread_mutex_lock(&cache->lock);
+    for (;;) {
+        bool building = false;
+        for (ddc_cache_entry_t *scan = cache->entries; scan != NULL; scan = scan->next) {
+            if (!scan->ready) {
+                building = true;
+                break;
+            }
+        }
+        if (!building) {
+            break;
+        }
+        pthread_cond_wait(&cache->built, &cache->lock);
+    }
+    pthread_mutex_unlock(&cache->lock);
     ddc_cache_entry_t *entry = cache->entries;
     while (entry != NULL) {
         ddc_cache_entry_t *next = entry->next;
@@ -306,6 +324,53 @@ static bool ddc_cache_build(ddc_cache_entry_t *entry,
     return ok;
 }
 
+/* Arguments a background builder needs to outlive the acquire call. The source samples are
+ * owned by the asset cache, which lives until shutdown (ddc_cache_destroy waits for builds
+ * before the assets are freed); the plan lives in the static plan cache. */
+typedef struct {
+    ddc_cache_t *cache;
+    ddc_cache_entry_t *entry;
+    const iq_ci16_t *source_samples;
+    uint64_t source_sample_count;
+    uint32_t source_rate_hz;
+    const ddc_plan_t *front_plan;
+} ddc_cache_build_task_t;
+
+/* Finish a build under the lock: publish the entry or unlink it on failure, and wake both
+ * blocking acquirers and ddc_cache_destroy. Caller passes the pin count for the entry
+ * (1 when the builder's caller keeps it, 0 for background builds). */
+static void ddc_cache_finish_build(ddc_cache_t *cache, ddc_cache_entry_t *entry, bool built, uint32_t pins)
+{
+    if (!built) {
+        for (ddc_cache_entry_t **link = &cache->entries; *link != NULL; link = &(*link)->next) {
+            if (*link == entry) {
+                *link = entry->next;
+                break;
+            }
+        }
+        cache->used_bytes -= entry->bytes;
+        ddc_cache_entry_free(entry);
+    } else {
+        entry->ready = true;
+        entry->refcount = pins;
+        entry->last_use = ++cache->use_counter;
+    }
+    pthread_cond_broadcast(&cache->built);
+}
+
+static void *ddc_cache_background_build_main(void *arg)
+{
+    ddc_cache_build_task_t *task = arg;
+    const bool built = task->entry->samples != NULL &&
+        ddc_cache_build(task->entry, task->source_samples, task->source_sample_count,
+                        task->source_rate_hz, task->front_plan);
+    pthread_mutex_lock(&task->cache->lock);
+    ddc_cache_finish_build(task->cache, task->entry, built, 0);
+    pthread_mutex_unlock(&task->cache->lock);
+    free(task);
+    return NULL;
+}
+
 const ddc_cache_entry_t *ddc_cache_acquire(ddc_cache_t *cache,
                                            const char *source_id,
                                            const iq_ci16_t *source_samples,
@@ -313,7 +378,8 @@ const ddc_cache_entry_t *ddc_cache_acquire(ddc_cache_t *cache,
                                            uint32_t source_rate_hz,
                                            double shift_hz,
                                            uint32_t intermediate_rate_hz,
-                                           const ddc_plan_t *front_plan)
+                                           const ddc_plan_t *front_plan,
+                                           bool wait_for_build)
 {
     if (cache == NULL || front_plan == NULL || source_sample_count == 0 ||
         front_plan->ratio == 0 || source_sample_count % front_plan->ratio != 0) {
@@ -347,6 +413,12 @@ const ddc_cache_entry_t *ddc_cache_acquire(ddc_cache_t *cache,
             pthread_mutex_unlock(&cache->lock);
             return found;
         }
+        if (!wait_for_build) {
+            /* A build for this key is already running; caller renders the direct path
+             * meanwhile and re-tries next block. */
+            pthread_mutex_unlock(&cache->lock);
+            return NULL;
+        }
         /* Someone else is building this key: wait and re-scan (the entry may have been
          * removed if their build failed). */
         pthread_cond_wait(&cache->built, &cache->lock);
@@ -372,32 +444,44 @@ const ddc_cache_entry_t *ddc_cache_acquire(ddc_cache_t *cache,
     entry->next = cache->entries;
     cache->entries = entry;
     cache->used_bytes += bytes;
+
+    if (!wait_for_build) {
+        /* Kick off a detached background build and return immediately; the caller keeps
+         * rendering through the direct full-rate cascade until a later acquire finds the
+         * entry ready. */
+        ddc_cache_build_task_t *task = malloc(sizeof(*task));
+        bool spawned = false;
+        if (task != NULL && entry->samples != NULL) {
+            *task = (ddc_cache_build_task_t){
+                .cache = cache,
+                .entry = entry,
+                .source_samples = source_samples,
+                .source_sample_count = source_sample_count,
+                .source_rate_hz = source_rate_hz,
+                .front_plan = front_plan,
+            };
+            pthread_t builder;
+            if (pthread_create(&builder, NULL, ddc_cache_background_build_main, task) == 0) {
+                pthread_detach(builder);
+                spawned = true;
+            }
+        }
+        if (!spawned) {
+            free(task);
+            ddc_cache_finish_build(cache, entry, false, 0); /* unlink; next block retries */
+        }
+        pthread_mutex_unlock(&cache->lock);
+        return NULL;
+    }
     pthread_mutex_unlock(&cache->lock);
 
     const bool built = entry->samples != NULL &&
         ddc_cache_build(entry, source_samples, source_sample_count, source_rate_hz, front_plan);
 
     pthread_mutex_lock(&cache->lock);
-    if (!built) {
-        /* Unlink and drop; waiters re-scan and may retry the build themselves. */
-        for (ddc_cache_entry_t **link = &cache->entries; *link != NULL; link = &(*link)->next) {
-            if (*link == entry) {
-                *link = entry->next;
-                break;
-            }
-        }
-        cache->used_bytes -= entry->bytes;
-        ddc_cache_entry_free(entry);
-        pthread_cond_broadcast(&cache->built);
-        pthread_mutex_unlock(&cache->lock);
-        return NULL;
-    }
-    entry->ready = true;
-    entry->refcount = 1;
-    entry->last_use = ++cache->use_counter;
-    pthread_cond_broadcast(&cache->built);
+    ddc_cache_finish_build(cache, entry, built, 1);
     pthread_mutex_unlock(&cache->lock);
-    return entry;
+    return built ? entry : NULL;
 }
 
 void ddc_cache_release(ddc_cache_t *cache, const ddc_cache_entry_t *entry)
