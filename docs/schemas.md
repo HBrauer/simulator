@@ -144,7 +144,7 @@ Signal fields:
 | `source_reference` | string | yes | Must match an existing source `id`. |
 | `modulation` | string | no | Defaults to `iq`. Use `iq` for `iq_file`; use `wbfm`, `am`, `usb`, or `lsb` for `audio_file`. |
 | `center_frequency_hz` | integer | see notes | Absolute RF center frequency. Required except in `range` replay mode (where the content follows the tune and the field is ignored). |
-| `bandwidth_hz` | integer | yes | Signal bandwidth. |
+| `bandwidth_hz` | integer | see notes | The signal's on-air footprint (used for channel-overlap gain and the Nyquist guard; it does **not** filter the samples). Required for audio sources — the modulation, not the source, sets the RF width. Optional for IQ sources: when omitted it defaults to the referenced source's `bandwidth_hz`. |
 | `power_dbm` | number | yes | RF power. Digital level is `nominal_level_dbfs + (power_dbm - rf_reference_power_dbm)` before `output_scale`. |
 | `fm_deviation_hz` | number | WBFM only | FM peak deviation. Defaults to `75000`. |
 | `am_depth` | number | AM only | AM modulation depth from `0.0` to `1.0`. Defaults to `0.8`. |

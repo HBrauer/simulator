@@ -273,11 +273,23 @@ bool scenario_load_json(const char *path, scenario_t *scenario, char *error, siz
         out->passthrough = json_is_boolean(passthrough) && json_is_true(passthrough);
         if (!get_json_string(sig, "signal_id", out->signal_id, sizeof(out->signal_id)) ||
             !get_json_string(sig, "source_reference", out->source_reference, sizeof(out->source_reference)) ||
-            !get_json_u32(sig, "bandwidth_hz", &out->bandwidth_hz) ||
             !get_json_double(sig, "power_dbm", &out->power_dbm)) {
             json_decref(root);
             snprintf(error, error_size, "signal_invalid");
             return false;
+        }
+        if (!get_json_u32(sig, "bandwidth_hz", &out->bandwidth_hz)) {
+            /* An IQ signal defaults its on-air footprint to the referenced source's bandwidth (the
+             * recording already is that width). An audio signal must state it: the modulation, not
+             * the source, sets the RF width (WBFM ~200 kHz vs AM ~10 kHz from the same clip). */
+            const scenario_source_t *bw_source = scenario_find_source(scenario, out->source_reference);
+            if (bw_source == NULL || bw_source->source_kind != SCENARIO_SOURCE_IQ_FILE ||
+                bw_source->bandwidth_hz == 0U) {
+                json_decref(root);
+                snprintf(error, error_size, "signal_invalid");
+                return false;
+            }
+            out->bandwidth_hz = bw_source->bandwidth_hz;
         }
         /* center_frequency_hz is ignored in range mode (content follows the tune) and may be
          * omitted there; every other mode needs the absolute placement. */

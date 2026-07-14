@@ -119,6 +119,32 @@ A signal binds a source to a place on the air:
 `output_scale`. `rf_reference_power_dbm` comes from the instance config (default −55 dBm) and is
 the RF power at which a source plays back at its nominal digital level.
 
+### 2.4 Signal bandwidth
+
+`bandwidth_hz` is the signal's **on-air footprint** — the width the mixer uses to decide, per
+channel, how the signal interacts with that channel's window. It drives three things:
+
+- **In or out:** whether the signal's band overlaps the channel window at all (no overlap → the
+  signal is skipped for that channel).
+- **Edge attenuation:** when a signal straddles the window boundary, only the fraction of its band
+  inside the window contributes — a signal half in the window comes through at ≈ −3 dB. This is a
+  cheap stand-in for a channel filter's roll-off.
+- **Nyquist guard:** a band that, shifted to baseband, lies entirely beyond the output Nyquist is
+  dropped rather than aliased back in.
+
+It is **bookkeeping, not a filter**: the samples that get mixed are the source's content resampled
+to the channel rate; `bandwidth_hz` never reshapes them. Declaring a signal narrower than its
+source does not band-limit it — it only mis-scales the overlap math (and trips a load-time
+warning).
+
+**Audio sources must state it**, because the modulation — not the source — sets the RF width: one
+48 kHz clip is ≈ 200 kHz as WBFM but ≈ 10 kHz as AM (see [`audio_radio_demo.json`](../simulator/scenarios/audio_radio_demo.json),
+where one WAV feeds signals of 200 k / 10 k / 3 k Hz).
+
+**IQ sources may omit it** — the recording already *is* a given width, so an IQ signal that leaves
+`bandwidth_hz` out inherits the referenced source's `bandwidth_hz`. Set it explicitly only to
+model a narrower footprint than the source (e.g. a narrow signal inside a wideband capture).
+
 ---
 
 ## 3. The timing model — how inputs repeat

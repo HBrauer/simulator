@@ -254,6 +254,59 @@ START_TEST(defaults_to_fixed_replay_without_new_fields)
 }
 END_TEST
 
+START_TEST(iq_signal_bandwidth_defaults_to_source)
+{
+    /* An IQ signal that omits bandwidth_hz inherits the referenced source's bandwidth; an audio
+     * signal that omits it is rejected (the modulation, not the source, sets the RF width). */
+    char path[] = "/tmp/sdr_scenario_bw_default_XXXXXX";
+    int fd = mkstemp(path);
+    ck_assert_int_ge(fd, 0);
+    FILE *file = fdopen(fd, "w");
+    ck_assert_ptr_nonnull(file);
+    fprintf(file,
+        "{"
+        "\"schema_version\":1,\"scenario_id\":\"bw_default\","
+        "\"sources\":[{"
+        "\"id\":\"iq\",\"source_type\":\"iq_file\",\"file\":\"simulator/assets/fsk_20mhz.c16\","
+        "\"format\":\"ci16\",\"byte_order\":\"little_endian\",\"iq_layout\":\"interleaved_iq\","
+        "\"sample_rate_hz\":24576000,\"bandwidth_hz\":20000000,\"center_frequency_hz\":0,\"nominal_level_dbfs\":-12.0"
+        "}],"
+        "\"signals\":[{"
+        "\"signal_id\":\"sig\",\"source_reference\":\"iq\",\"modulation\":\"iq\","
+        "\"center_frequency_hz\":10005000000,\"power_dbm\":-60.0,\"repeat_interval_s\":1.0"
+        "}]"
+        "}");
+    fclose(file);
+    scenario_t scenario;
+    char error[128];
+    ck_assert_msg(scenario_load_json(path, &scenario, error, sizeof(error)), "%s", error);
+    ck_assert_uint_eq(scenario.signals[0].bandwidth_hz, 20000000);
+    unlink(path);
+
+    char audio_path[] = "/tmp/sdr_scenario_bw_audio_XXXXXX";
+    fd = mkstemp(audio_path);
+    ck_assert_int_ge(fd, 0);
+    file = fdopen(fd, "w");
+    ck_assert_ptr_nonnull(file);
+    fprintf(file,
+        "{"
+        "\"schema_version\":1,\"scenario_id\":\"bw_audio\","
+        "\"sources\":[{"
+        "\"id\":\"aud\",\"source_type\":\"audio_file\",\"file\":\"simulator/assets/radio_clip.wav\","
+        "\"format\":\"wav\",\"sample_rate_hz\":48000,\"bandwidth_hz\":200000,\"center_frequency_hz\":0,\"nominal_level_dbfs\":-6.0"
+        "}],"
+        "\"signals\":[{"
+        "\"signal_id\":\"sig\",\"source_reference\":\"aud\",\"modulation\":\"wbfm\","
+        "\"center_frequency_hz\":10005000000,\"power_dbm\":-60.0,\"repeat_interval_s\":30.0"
+        "}]"
+        "}");
+    fclose(file);
+    ck_assert(!scenario_load_json(audio_path, &scenario, error, sizeof(error)));
+    ck_assert_str_eq(error, "signal_invalid");
+    unlink(audio_path);
+}
+END_TEST
+
 START_TEST(rejects_invalid_replay_configs)
 {
     scenario_t scenario;
@@ -397,6 +450,7 @@ Suite *scenario_suite(void)
     tcase_add_test(tc, loads_passthrough_variant_scenario);
     tcase_add_test(tc, rejects_passthrough_without_variants);
     tcase_add_test(tc, defaults_to_fixed_replay_without_new_fields);
+    tcase_add_test(tc, iq_signal_bandwidth_defaults_to_source);
     tcase_add_test(tc, rejects_invalid_replay_configs);
     tcase_add_test(tc, rejects_replay_repeat_and_bad_mode);
     tcase_add_test(tc, loads_and_validates_scenario);
