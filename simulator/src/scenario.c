@@ -132,9 +132,7 @@ static bool parse_passthrough_variants(json_t *src, scenario_source_t *out, char
             snprintf(error, error_size, "passthrough_variant_invalid");
             return false;
         }
-        if (!get_json_u64(v, "sample_count", &pv->sample_count)) {
-            pv->sample_count = 0;
-        }
+        /* sample_count is derived from the file at validate time (see iq_file_reader_open). */
     }
     return true;
 }
@@ -238,9 +236,7 @@ bool scenario_load_json(const char *path, scenario_t *scenario, char *error, siz
             snprintf(error, error_size, "source_invalid");
             return false;
         }
-        if (!get_json_u64(src, "sample_count", &out->sample_count)) {
-            out->sample_count = 0;
-        }
+        /* sample_count is derived from the file at validate time (see iq_file_reader_open). */
         out->center_frequency_hz = json_integer_value(json_object_get(src, "center_frequency_hz"));
     }
 
@@ -432,7 +428,7 @@ bool scenario_validate(scenario_t *scenario, const char *base_dir, char *error, 
                 }
                 resolve_asset_path(v->file, sizeof(v->file), base_dir);
                 iq_file_reader_t reader;
-                if (!iq_file_reader_open(&reader, v->file, v->sample_count, error, error_size)) {
+                if (!iq_file_reader_open(&reader, v->file, error, error_size)) {
                     return false;
                 }
                 v->sample_count = reader.sample_count;
@@ -452,7 +448,7 @@ bool scenario_validate(scenario_t *scenario, const char *base_dir, char *error, 
                 return false;
             }
             iq_file_reader_t reader;
-            if (!iq_file_reader_open(&reader, source->file, source->sample_count, error, error_size)) {
+            if (!iq_file_reader_open(&reader, source->file, error, error_size)) {
                 return false;
             }
             source->sample_count = reader.sample_count;

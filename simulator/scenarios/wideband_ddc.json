@@ -18,7 +18,6 @@
       "sample_rate_hz": 98304000,
       "bandwidth_hz": 80000000,
       "center_frequency_hz": 140000000,
-      "sample_count": 9830400,
       "nominal_level_dbfs": -12.0
     }
   ],

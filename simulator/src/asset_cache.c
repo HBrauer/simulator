@@ -327,7 +327,7 @@ static bool load_iq_buffer(const char *path, uint64_t sample_count, size_t max_b
         return false;
     }
     iq_file_reader_t reader;
-    if (!iq_file_reader_open(&reader, path, sample_count, error, error_size)) {
+    if (!iq_file_reader_open(&reader, path, error, error_size)) {
         free(out->samples);
         out->samples = NULL;
         return false;

@@ -112,15 +112,16 @@ Source fields:
 | `sample_rate_hz` | integer | yes¹ | Source sample rate. |
 | `bandwidth_hz` | integer | yes¹ | Source bandwidth. |
 | `center_frequency_hz` | integer | yes¹ | Source-relative center; current sample scenarios use `0`. |
-| `sample_count` | integer | no | Number of complex/audio samples in the file. CI16 and WAV sources can derive this from file size. |
 | `nominal_level_dbfs` | number | yes¹ | Source nominal digital level. |
 | `passthrough_variants` | array | no | One capture per channel rate for passthrough replay (see below). When present, the top-level `file`/`sample_rate_hz`/`bandwidth_hz`/`center_frequency_hz`/`nominal_level_dbfs` are unused. |
 
 ¹ Not required when `passthrough_variants` is present.
 
+The number of samples in each source is derived from the file at load (CI16: file size / 4; WAV: the header's frame count), so it is not a configurable field.
+
 `audio_file` sources currently support PCM16 WAV, mono or stereo. Stereo is folded to mono in the asset cache.
 
-**`passthrough_variants`** — an IQ-file source that feeds a `passthrough` signal supplies one capture per channel sample rate instead of a single `file`. Each entry is `{ "sample_rate_hz": ..., "bandwidth_hz": ..., "file": ... }` (plus optional `sample_count`); the rates must be distinct. At render time the passthrough path selects the variant whose `sample_rate_hz` matches the channel's current rate and streams it verbatim; a channel bandwidth with no matching variant is silent. Example:
+**`passthrough_variants`** — an IQ-file source that feeds a `passthrough` signal supplies one capture per channel sample rate instead of a single `file`. Each entry is `{ "sample_rate_hz": ..., "bandwidth_hz": ..., "file": ... }`; the rates must be distinct. At render time the passthrough path selects the variant whose `sample_rate_hz` matches the channel's current rate and streams it verbatim; a channel bandwidth with no matching variant is silent. Example:
 
 ```json
 {

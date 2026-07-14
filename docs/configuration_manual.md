@@ -71,12 +71,12 @@ Three concepts, in order of the signal path:
   "sample_rate_hz": 24576000,
   "bandwidth_hz": 20000000,
   "center_frequency_hz": 0,
-  "sample_count": 24576,
   "nominal_level_dbfs": -12.0
 }
 ```
 
-`sample_count` may be omitted — it is derived from the file size.
+The sample count is not configured — it is derived from the file at load (CI16: file size / 4
+bytes per complex sample; WAV: the header's frame count).
 
 **Audio file** — a PCM16 WAV (mono, or stereo folded to mono), to be modulated onto a carrier:
 

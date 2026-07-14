@@ -5,7 +5,7 @@
 #include <stdio.h>
 #include <string.h>
 
-bool iq_file_reader_open(iq_file_reader_t *reader, const char *path, uint64_t declared_sample_count, char *error, size_t error_size)
+bool iq_file_reader_open(iq_file_reader_t *reader, const char *path, char *error, size_t error_size)
 {
     memset(reader, 0, sizeof(*reader));
     FILE *file = fopen(path, "rb");
@@ -25,14 +25,8 @@ bool iq_file_reader_open(iq_file_reader_t *reader, const char *path, uint64_t de
         snprintf(error, error_size, "asset_invalid_size");
         return false;
     }
-    const uint64_t derived_count = (uint64_t)bytes / sizeof(iq_ci16_t);
-    if (declared_sample_count != 0 && declared_sample_count != derived_count) {
-        fclose(file);
-        snprintf(error, error_size, "asset_sample_count_mismatch");
-        return false;
-    }
     reader->file = file;
-    reader->sample_count = derived_count;
+    reader->sample_count = (uint64_t)bytes / sizeof(iq_ci16_t);
     snprintf(error, error_size, "ok");
     return true;
 }

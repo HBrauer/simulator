@@ -11,7 +11,7 @@ typedef struct {
     uint64_t sample_count;
 } iq_file_reader_t;
 
-bool iq_file_reader_open(iq_file_reader_t *reader, const char *path, uint64_t declared_sample_count, char *error, size_t error_size);
+bool iq_file_reader_open(iq_file_reader_t *reader, const char *path, char *error, size_t error_size);
 void iq_file_reader_close(iq_file_reader_t *reader);
 bool iq_file_reader_read(iq_file_reader_t *reader, uint64_t sample_offset, iq_ci16_t *out, size_t count, size_t *read_count);
 /* Reports whether a signal is playing at the given time-of-day. On success returns the source

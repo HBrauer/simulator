@@ -9,7 +9,7 @@ START_TEST(opens_generated_asset)
 {
     iq_file_reader_t reader;
     char error[128];
-    ck_assert_msg(iq_file_reader_open(&reader, "simulator/assets/fsk_20mhz.c16", 24576, error, sizeof(error)), "%s", error);
+    ck_assert_msg(iq_file_reader_open(&reader, "simulator/assets/fsk_20mhz.c16", error, sizeof(error)), "%s", error);
     ck_assert_uint_eq(reader.sample_count, 24576);
     iq_ci16_t samples[4];
     size_t read_count = 0;
