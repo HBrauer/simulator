@@ -1,8 +1,8 @@
 # Configuration Manual
 
 A practical guide to configuring the SDR simulator, with worked examples. For the exhaustive
-field-by-field reference (every key, type, and error code) see [`schemas.md`](schemas.md); this
-document explains how the pieces fit together and how to express common setups.
+field-by-field reference (every key and error code) see [`schemas.md`](schemas.md); this document
+explains how the pieces fit together and how to express common setups.
 
 There are two configuration files:
 
@@ -30,7 +30,7 @@ Three concepts, in order of the signal path:
 1. **Source** — a piece of raw content: an IQ recording (`iq_file`) or an audio clip
    (`audio_file`). A source has *no* position in frequency or time on its own; it is just samples.
 2. **Signal** — places a source on the air: at some RF frequency, at some power, with some
-   modulation, appearing at some time (once, repeating, or continuously). Many signals can
+   modulation, appearing at some time (repeating in bursts, or continuously). Many signals can
    reference the same source.
 3. **Channel** — an output stream (a receiver tuned to a bandwidth). The simulator renders,
    for each channel, the sum of every signal whose passband overlaps that channel's window,
@@ -41,9 +41,120 @@ Three concepts, in order of the signal path:
 
 ---
 
-## 2. Scenario JSON
+## 2. Parameter reference
 
-### 2.1 Skeleton
+At-a-glance tables for every parameter. The sections that follow explain the behaviour in detail.
+
+### Scenario — top level
+
+| Parameter | Type / range | Description |
+| --- | --- | --- |
+| `schema_version` | integer, must be `1` | Required. |
+| `scenario_id` | string | Required. Identifier for logs/REST. |
+| `description` | string | Optional, human-readable. |
+| `noise_floor` | object | Optional. See the noise-floor table. |
+| `sources` | array (≤ 64) | Required. Source definitions. |
+| `signals` | array (≤ 256) | Required. Signal placements. |
+
+### Scenario — `noise_floor`
+
+| Parameter | Type / range | Description |
+| --- | --- | --- |
+| `enabled` | bool | Defaults to `true` when the object is present. |
+| `power_dbm_per_hz` | number (dBm/Hz) | Spectral density (preferred). Give exactly one of this or `power_dbm`. |
+| `power_dbm` | number (dBm) | Total in-window power (legacy). Give exactly one of this or `power_dbm_per_hz`. |
+| `seed` | integer | Noise realization; identical across instances for a given seed. Default `1`. |
+
+### Scenario — source
+
+| Parameter | Type / range | Description |
+| --- | --- | --- |
+| `id` | string | Required, unique. |
+| `source_type` | `iq_file` \| `audio_file` | Required. |
+| `file` | string (path) | Required (unless `passthrough_variants` is given). |
+| `format` | `ci16` (IQ) \| `wav` (audio) | Required. |
+| `byte_order` | `little_endian` | IQ only. |
+| `iq_layout` | `interleaved_iq` | IQ only. |
+| `sample_rate_hz` | integer (Hz) | Required. Source sample rate. |
+| `bandwidth_hz` | integer (Hz) | Required. Intrinsic bandwidth of the content. |
+| `center_frequency_hz` | integer (Hz) | Source-relative center; `0` in current scenarios. |
+| `nominal_level_dbfs` | number (dBFS) | Required. Source nominal digital level. |
+| `passthrough_variants` | array | Optional. One capture per channel rate (see Passthrough). |
+
+The sample count is **not** a parameter — it is derived from the file at load (CI16: file size / 4
+bytes per complex sample; WAV: the header's frame count).
+
+### Scenario — signal
+
+| Parameter | Type / range | Description |
+| --- | --- | --- |
+| `signal_id` | string | Required, unique. |
+| `source_reference` | string | Required. Must match a source `id`. |
+| `modulation` | `iq` \| `wbfm` \| `am` \| `usb` \| `lsb` | Default `iq`. `iq` for IQ sources; the rest for audio. |
+| `center_frequency_hz` | integer (Hz) | Absolute RF center. Required except in `range` replay mode. |
+| `bandwidth_hz` | integer (Hz) | On-air footprint. Required for audio; optional for IQ (defaults to the source's bandwidth). |
+| `power_dbm` | number (dBm) | Required. RF power. |
+| `fm_deviation_hz` | number (Hz) | WBFM only. Peak deviation, default `75000`. |
+| `am_depth` | number, `0.0`–`1.0` | AM only. Modulation depth, default `0.8`. |
+| `start_time_s` | number, `0` ≤ t < `86400` | First playback time. Default `0`. |
+| `repeat_interval_s` | number, `> 0` | Present → recurring burst with this period; absent → continuous playback. See "Timing model". |
+| `replay_mode` | `fixed` \| `range` \| `shift` | Default `fixed`. IQ sources only. |
+| `frequency_range` | object `{start_hz, stop_hz}` | Required for `range`/`shift`. Tune interval in which the signal is active. |
+| `passthrough` | bool | Default `false`. Dedicated verbatim-replay channel (see Passthrough). |
+
+### Instance — top level
+
+| Parameter | Type / range | Description |
+| --- | --- | --- |
+| `schema_version` | integer, must be `1` | Required. |
+| `instance_id` | string | Required. |
+| `scenario_file` | string (path) | Required. Default scenario when `--scenario` is omitted. |
+| `log_path` | string | Optional. |
+| `stream_block_samples` | integer, `1`–`4096` | CI16 samples per VITA 49.2 packet. Default `1024` (use `1536` for the MTU-9000 profile). |
+| `stream_cpu` | integer | CPU index for stream threads; `-1` disables pinning. Default `-1`. |
+| `asset_cache_max_bytes` | integer (bytes) | In-memory asset budget. Default 16 GiB; `0` = unlimited. |
+| `ddc_cache_max_bytes` | integer (bytes) | DDC intermediate sub-band budget. Default 2 GiB; `0` disables caching. |
+| `receivers` | array (`1`–`12`) | Required. |
+
+### Instance — receiver
+
+| Parameter | Type / range | Description |
+| --- | --- | --- |
+| `receiver_id` | integer | Required, unique. |
+| `rest_bind_host` | string (IP) | Required. REST bind address. |
+| `rest_port` | integer | Required, unique. |
+| `udp_output_host` | string (IP) | Required. Unicast or IPv4 multicast. |
+| `udp_multicast_interface` | string (IP) | Optional. Local interface for multicast sends. |
+| `frequency_start_hz` | integer, `0`–`40e9` | Required. Tuner range start. |
+| `frequency_stop_hz` | integer, > start, ≤ `40e9` | Required. Tuner range stop. |
+| `frontend_bandwidth_hz` | integer (Hz) | Instantaneous window all channels extract from. Default `80000000`. |
+| `scan_rate_hz_per_s` | number (Hz/s) | Required. Used when the tuner range exceeds the front-end bandwidth. |
+| `output_scale` | number, `> 0` | Default channel output multiplier. Default `1.0`. |
+| `rf_reference_power_dbm` | number (dBm) | RF power that preserves a source's nominal level. Default `-55.0`. |
+| `profiles` | array (≤ 32) | Optional. `{bandwidth_hz, sample_rate_hz}` pairs; defaults to the built-in table. |
+| `channels` | array (`1`–`24`) | Required. |
+
+### Instance — profile / channel
+
+| Parameter | Type / range | Description |
+| --- | --- | --- |
+| profile `bandwidth_hz` | integer (Hz) | Unique, non-zero. |
+| profile `sample_rate_hz` | integer, ≥ `bandwidth_hz` | Paired rate selected with the bandwidth. |
+| profile `name` | string | Optional label (e.g. `"20M"`). |
+| channel `channel_id` | integer, `0`–`N−1` | In order. |
+| channel `track_tuner` | bool | Center follows the tuner. Default `false`. |
+| channel `center_frequency_hz` | integer (Hz) | Required when not tracking; ignored when tracking. |
+| channel `bandwidth_hz` | integer (Hz) | Must match a profile `bandwidth_hz` and be ≤ `frontend_bandwidth_hz`. |
+| channel `output_scale` | number, `> 0` | Default: receiver `output_scale`. |
+| channel `rf_reference_power_dbm` | number (dBm) | Default: receiver value. |
+| channel `stream_enabled` | bool | Default `true`. |
+| channel `udp_output_port` | integer | Required, unique across the instance. |
+
+---
+
+## 3. Scenario JSON
+
+### 3.1 Skeleton
 
 ```json
 {
@@ -56,7 +167,7 @@ Three concepts, in order of the signal path:
 }
 ```
 
-### 2.2 Sources
+### 3.2 Sources
 
 **IQ file** — complex baseband samples, interleaved `ci16` (little-endian I,Q pairs):
 
@@ -75,9 +186,6 @@ Three concepts, in order of the signal path:
 }
 ```
 
-The sample count is not configured — it is derived from the file at load (CI16: file size / 4
-bytes per complex sample; WAV: the header's frame count).
-
 **Audio file** — a PCM16 WAV (mono, or stereo folded to mono), to be modulated onto a carrier:
 
 ```json
@@ -93,7 +201,7 @@ bytes per complex sample; WAV: the header's frame count).
 }
 ```
 
-### 2.3 Signals
+### 3.3 Signals
 
 A signal binds a source to a place on the air:
 
@@ -119,7 +227,7 @@ A signal binds a source to a place on the air:
 `output_scale`. `rf_reference_power_dbm` comes from the instance config (default −55 dBm) and is
 the RF power at which a source plays back at its nominal digital level.
 
-### 2.4 Signal bandwidth
+### 3.4 Signal bandwidth
 
 `bandwidth_hz` is the signal's **on-air footprint** — the width the mixer uses to decide, per
 channel, how the signal interacts with that channel's window. It drives three things:
@@ -147,13 +255,11 @@ model a narrower footprint than the source (e.g. a narrow signal inside a wideba
 
 ---
 
-## 3. The timing model — how inputs repeat
+## 4. The timing model — how inputs repeat
 
-This is the part most worth understanding. **Every signal is one of two kinds, and the kind is
-chosen by a single fact: whether `repeat_interval_s` is present.** There is no separate `loop`
-switch — the two ideas are the same choice, so the configuration expresses it once.
+`repeat_interval_s` selects between the two ways a signal appears over time.
 
-### 3.1 Burst — `repeat_interval_s` is present
+### 4.1 Burst — `repeat_interval_s` present
 
 The source plays **once** starting at `start_time_s`, runs for its natural duration, then goes
 **silent** until the next multiple of `repeat_interval_s`, and repeats. The silent gap is
@@ -192,7 +298,7 @@ Example — the same audio clip as a station that re-broadcasts every 30 seconds
 
 To play something essentially once, set a very large interval (e.g. `86400.0` = once a day).
 
-### 3.2 Loop — `repeat_interval_s` is absent
+### 4.2 Continuous — `repeat_interval_s` absent
 
 The source is played **back-to-back with no gap**, wrapping seamlessly at the file boundary
 (the end of the file is immediately followed by its start). Playback position is anchored to the
@@ -207,8 +313,8 @@ no repeat_interval_s:
 ```
 
 Rules:
-- **IQ-file sources only** (audio cannot loop: `loop_source_unsupported`).
-- Cannot also carry a `repeat_interval_s` — that is what distinguishes it from a burst.
+- **IQ-file sources only.** An audio source must use a `repeat_interval_s` (it plays in bursts).
+- Continuous playback is what you get by leaving `repeat_interval_s` out; there is nothing else to set.
 
 Example — a continuous IQ emitter with no gaps:
 
@@ -224,28 +330,20 @@ Example — a continuous IQ emitter with no gaps:
 }
 ```
 
-### 3.3 Why there is no `loop: false`
-
-A common question: *why not just set `repeat_interval_s: 0` to mean "loop"?* Because a repeat
-interval is a **period**, and a period of zero is a division by zero, not "no gap." "No gap" is a
-different thing entirely — it's the loop model, which you get by **omitting** the interval. So:
+### 4.3 Quick reference
 
 | You want | Set |
 | --- | --- |
-| Play once per N seconds, silent between | `repeat_interval_s: N` |
-| Play continuously with no gap | omit `repeat_interval_s` (IQ only) |
-
-Omitting the interval on an **audio** source is an error (`loop_source_unsupported`), because
-audio can only be used as a finite, recurring burst.
+| Play once per N seconds, silent between (IQ or audio) | `repeat_interval_s: N` |
+| Play continuously with no gap (IQ only) | omit `repeat_interval_s` |
 
 ---
 
-## 4. Replay modes (IQ + `iq` modulation only)
+## 5. Replay modes (IQ + `iq` modulation only)
 
 By default a signal sits at a fixed frequency. Replay modes make an IQ recording behave like a
-live capture that follows the receiver's tuner. All replay-mode signals are **loops** (they
-stream continuously as you tune across them); a `repeat_interval_s` there is rejected
-(`replay_mode_no_repeat`).
+live capture that follows the receiver's tuner. Replay-mode signals stream continuously as you
+tune across them, so they carry no `repeat_interval_s` (`replay_mode_no_repeat` if one is given).
 
 | `replay_mode` | Behaviour |
 | --- | --- |
@@ -268,20 +366,19 @@ stream continuously as you tune across them); a `repeat_interval_s` there is rej
 Note `center_frequency_hz` is omitted here — in `range` mode the content follows the tune, so it
 is ignored. (`shift` mode still requires it: it is the content's true RF home.)
 
-A narrow channel extracting from a wideband looping replay (integer rate ratio > 16) is rendered
+A narrow channel extracting from a wideband continuous replay (integer rate ratio > 16) is rendered
 as a hardware-style DDC — see the "DDC sub-band extraction" section in [`schemas.md`](schemas.md).
 
 ---
 
-## 5. Passthrough (dedicated replay channels)
+## 6. Passthrough (dedicated replay channels)
 
 When a channel's only job is to replay one capture verbatim, `passthrough: true` bypasses the
 mixer entirely (no float mix bus, no noise floor, no other signals — a `memcpy` at unit gain).
 It requires:
-- `replay_mode` of `range` or `shift` (`passthrough_requires_replay_mode`),
-- a **looping** signal — no `repeat_interval_s` (`passthrough_requires_loop`),
-- a source with `passthrough_variants` — one capture file per channel sample rate
-  (`passthrough_requires_variants`).
+- `replay_mode` of `range` or `shift`,
+- a continuous signal — i.e. no `repeat_interval_s`,
+- a source with `passthrough_variants` — one capture file per channel sample rate.
 
 A channel whose current rate has no matching variant renders **silence**, not a resampled
 approximation. See [`schemas.md`](schemas.md) for the full `passthrough_variants` example and the
@@ -289,7 +386,7 @@ performance rationale.
 
 ---
 
-## 6. Noise floor
+## 7. Noise floor
 
 Optional; applied to every channel that isn't a passthrough. Prefer the spectral **density**
 form so a narrow channel and the wide stream carry the same dBm/Hz:
@@ -305,7 +402,7 @@ instances.
 
 ---
 
-## 7. Instance YAML
+## 8. Instance YAML
 
 The instance describes the receiver and its output channels.
 
@@ -353,27 +450,27 @@ knobs (`asset_cache_max_bytes`, `ddc_cache_max_bytes`).
 
 ---
 
-## 8. Worked example: `benchmark_load.json`
+## 9. Worked example: `benchmark_load.json`
 
 The shipped [`benchmark_load.json`](../simulator/scenarios/benchmark_load.json) puts four signals
 on the air over a −160 dBm/Hz noise floor, all using the **burst** timing model (each has a
 `repeat_interval_s`), from two sources:
 
-| Signal | Source | Modulation | Center | Repeats every | Timing kind |
-| --- | --- | --- | --- | --- | --- |
-| `iq_lower` | `fsk_iq` (IQ) | `iq` | 9.985 GHz | 1 s | burst |
-| `iq_upper` | `fsk_iq` (IQ) | `iq` | 10.025 GHz | 1 s | burst |
-| `wbfm_station` | `radio_clip_wav` (audio) | `wbfm` | 10.005 GHz | 30 s | burst |
-| `am_station` | `radio_clip_wav` (audio) | `am` | 10.012 GHz | 86400 s | burst (effectively once) |
+| Signal | Source | Modulation | Center | Repeats every |
+| --- | --- | --- | --- | --- |
+| `iq_lower` | `fsk_iq` (IQ) | `iq` | 9.985 GHz | 1 s |
+| `iq_upper` | `fsk_iq` (IQ) | `iq` | 10.025 GHz | 1 s |
+| `wbfm_station` | `radio_clip_wav` (audio) | `wbfm` | 10.005 GHz | 30 s |
+| `am_station` | `radio_clip_wav` (audio) | `am` | 10.012 GHz | 86400 s (effectively once) |
 
 Note the same IQ source feeds two signals at different frequencies and powers, and the same audio
 clip feeds both an FM and an AM station. To turn `iq_lower` into a **continuous** emitter instead
-of a 1-second burst, you would simply delete its `"repeat_interval_s": 1.0` line (it is an IQ
-source, so it may loop).
+of a 1-second burst, delete its `"repeat_interval_s": 1.0` line (it is an IQ source, so continuous
+playback is allowed).
 
 ---
 
-## 9. Validation
+## 10. Validation
 
 Both files are validated at load; a failure prints an error code and the simulator refuses to
 start. The full list of codes is in [`schemas.md`](schemas.md). The timing-related ones:
@@ -381,6 +478,6 @@ start. The full list of codes is in [`schemas.md`](schemas.md). The timing-relat
 | Error | Cause |
 | --- | --- |
 | `signal_repeat_too_short` | `repeat_interval_s` is shorter than the source duration. |
-| `loop_source_unsupported` | A looping (no-interval) signal references an audio source. |
 | `replay_mode_no_repeat` | A `range`/`shift` replay signal carries a `repeat_interval_s`. |
-| `passthrough_requires_loop` | A `passthrough` signal carries a `repeat_interval_s`. |
+
+An audio source used without a `repeat_interval_s` is also rejected (audio must play in bursts); see [`schemas.md`](schemas.md) for the complete error-code list.
