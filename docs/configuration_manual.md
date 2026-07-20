@@ -126,28 +126,40 @@ bytes per complex sample; WAV: the header's frame count).
 | `receiver_id` | integer | Required, unique. |
 | `rest_bind_host` | string (IP) | Required. REST bind address. |
 | `rest_port` | integer | Required, unique. |
-| `udp_output_host` | string (IP) | Required. Unicast or IPv4 multicast. |
-| `udp_multicast_interface` | string (IP) | Optional. Local interface for multicast sends. |
-| `frequency_start_hz` | integer, `0`–`40e9` | Required. Tuner range start. |
-| `frequency_stop_hz` | integer, > start, ≤ `40e9` | Required. Tuner range stop. |
-| `frontend_bandwidth_hz` | integer (Hz) | Instantaneous window all channels extract from. Default `80000000`. |
+| `udp_output_host` | string (IP) | Required. **Destination** the IQ samples are sent to. Unicast (e.g. `127.0.0.1`, one receiver) or IPv4 multicast (e.g. `239.10.10.10`, any receiver that joins the group). |
+| `udp_multicast_interface` | string (IP) | Optional, **multicast only**. Picks which of the machine's network connections the multicast is sent out of, when it has more than one (e.g. Ethernet, Wi-Fi, loopback). Give the IP address of the connection to use. Empty (default) lets the system choose automatically — fine in most cases. Change it only when the automatic choice is wrong: to force local-only testing (`127.0.0.1`) or to send out a specific network when several are connected. Ignored for unicast destinations. |
+| `frequency_min_hz` | integer, `0`–`100e9` | Required. Minimum configurable frequency for this receiver (tuner range start). |
+| `frequency_max_hz` | integer, > min, ≤ `100e9` | Required. Maximum configurable frequency for this receiver (tuner range stop). |
+| `bandwidth_hz` | integer (Hz) | Bandwidth of the receiver. All channels must be inside of this bandwidth. Default `80000000`. |
 | `scan_rate_hz_per_s` | number (Hz/s) | Required. Used when the tuner range exceeds the front-end bandwidth. |
 | `output_scale` | number, `> 0` | Default channel output multiplier. Default `1.0`. |
 | `rf_reference_power_dbm` | number (dBm) | RF power that preserves a source's nominal level. Default `-55.0`. |
-| `profiles` | array (≤ 32) | Optional. `{bandwidth_hz, sample_rate_hz}` pairs; defaults to the built-in table. |
 | `channels` | array (`1`–`24`) | Required. |
 
-### Instance — profile / channel
+`udp_output_host` sets *where* packets go; `udp_multicast_interface` sets *which of the machine's network connections* they leave from, and only applies when the destination is a multicast group.
+
+```yaml
+# Unicast to one receiver — interface is left out (the system routes it).
+udp_output_host: "192.168.1.50"
+
+# Multicast to a group, forced out the loopback connection so the
+# traffic stays on this machine (typical for local testing).
+udp_output_host: "239.10.10.10"
+udp_multicast_interface: "127.0.0.1"
+```
+
+`frequency_min_hz`/`frequency_max_hz` are the frequency range **this receiver** is configured to cover — pick whatever band it should tune across. The `0`–`100e9` limit on those values is a separate thing: it is the range the **simulator** as a whole can represent (`SIM_MAX_RF_HZ`, reported over REST as `simulator_frequency_max_hz`). Any receiver range must fit inside it, but the limit is not itself a receiver setting.
+
+### Instance — channel
 
 | Parameter | Type / range | Description |
 | --- | --- | --- |
-| profile `bandwidth_hz` | integer (Hz) | Unique, non-zero. |
-| profile `sample_rate_hz` | integer, ≥ `bandwidth_hz` | Paired rate selected with the bandwidth. |
-| profile `name` | string | Optional label (e.g. `"20M"`). |
 | channel `channel_id` | integer, `0`–`N−1` | In order. |
 | channel `track_tuner` | bool | Center follows the tuner. Default `false`. |
 | channel `center_frequency_hz` | integer (Hz) | Required when not tracking; ignored when tracking. |
-| channel `bandwidth_hz` | integer (Hz) | Must match a profile `bandwidth_hz` and be ≤ `frontend_bandwidth_hz`. |
+| channel `rates` | array (`1`–`16`) | Required. `{bandwidth_hz, sample_rate_hz}` options this channel supports; the first is active at load, and a REST retune selects among them. |
+| rate `bandwidth_hz` | integer (Hz) | Non-zero, and ≤ the receiver `bandwidth_hz` (front-end window). |
+| rate `sample_rate_hz` | integer, ≥ `bandwidth_hz` | The stream rate paired with this bandwidth. |
 | channel `output_scale` | number, `> 0` | Default: receiver `output_scale`. |
 | channel `rf_reference_power_dbm` | number (dBm) | Default: receiver value. |
 | channel `stream_enabled` | bool | Default `true`. |
@@ -436,36 +448,37 @@ receivers:
     rest_bind_host: "127.0.0.1"
     rest_port: 8100
     udp_output_host: "127.0.0.1"   # unicast or IPv4 multicast (e.g. 239.10.10.10)
-    frequency_start_hz: 9960000000
-    frequency_stop_hz:  10040000000
-    frontend_bandwidth_hz: 80000000  # instantaneous window all channels extract from
+    frequency_min_hz: 9960000000
+    frequency_max_hz:  10040000000
+    bandwidth_hz: 80000000  # instantaneous window all channels extract from
     scan_rate_hz_per_s: 100000000000
     rf_reference_power_dbm: -55.0
-    profiles:                        # allowed {bandwidth, sample_rate} pairs
-      - { bandwidth_hz: 80000000, sample_rate_hz: 98304000, name: "80M" }
-      - { bandwidth_hz: 20000000, sample_rate_hz: 24576000, name: "20M" }
-      - { bandwidth_hz:  1000000, sample_rate_hz:  1536000, name: "1M"  }
     channels:
       - channel_id: 0
         track_tuner: true            # center follows the tuner (the "wideband" stream)
-        bandwidth_hz: 80000000
+        rates:                       # first entry is active; REST/B-key select among them
+          - { bandwidth_hz: 80000000, sample_rate_hz: 98304000 }
+          - { bandwidth_hz: 20000000, sample_rate_hz: 24576000 }
         udp_output_port: 50000
       - channel_id: 1
         center_frequency_hz: 10005000000   # fixed-center channel
-        bandwidth_hz: 20000000
+        rates:
+          - { bandwidth_hz: 20000000, sample_rate_hz: 24576000 }
         udp_output_port: 50001
 ```
 
 Key points:
-- A **channel's sample rate is not set directly** — it comes from the profile whose
-  `bandwidth_hz` matches. Setting `sample_rate_hz` on a channel is an error.
+- Each **channel lists the `{bandwidth_hz, sample_rate_hz}` options it supports** under `rates`.
+  The first entry is active at load; a REST retune (or the receiver's B key) selects another —
+  the requested pair must be one of the listed options. Every rate must have `sample_rate_hz ≥
+  bandwidth_hz`, and each `bandwidth_hz` must fit the receiver's front-end `bandwidth_hz`.
 - `track_tuner: true` makes the channel center follow the tuner (fixed center or scan sweep);
   otherwise give an absolute `center_frequency_hz`.
-- A channel whose span leaves the front-end window (tuner center ± `frontend_bandwidth_hz/2`)
+- A channel whose span leaves the front-end window (tuner center ± the receiver `bandwidth_hz`/2)
   keeps streaming, but empty — like a hardware DDC tuned outside the digitised band.
 - `udp_output_port` must be unique across the instance's channels.
 
-See [`schemas.md`](schemas.md) for every receiver/profile/channel field and the DDC cache tuning
+See [`schemas.md`](schemas.md) for every receiver/channel field and the DDC cache tuning
 knobs (`asset_cache_max_bytes`, `ddc_cache_max_bytes`).
 
 ---

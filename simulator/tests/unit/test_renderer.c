@@ -89,9 +89,9 @@ static receiver_config_t window_receiver(uint64_t f_start, uint64_t f_stop, uint
 {
     receiver_config_t rx = {
         .id = 0,
-        .frequency_start_hz = f_start,
-        .frequency_stop_hz = f_stop,
-        .frontend_bandwidth_hz = bandwidth_hz,
+        .frequency_min_hz = f_start,
+        .frequency_max_hz = f_stop,
+        .bandwidth_hz = bandwidth_hz,
         .scan_rate_hz_per_s = scan_rate,
         .output_scale = output_scale,
         .rf_reference_power_dbm = ref_dbm,
@@ -114,9 +114,9 @@ static receiver_config_t fixed_channel_receiver(uint64_t center_hz, uint32_t ban
 {
     receiver_config_t rx = {
         .id = 0,
-        .frequency_start_hz = center_hz - SIM_RECEIVER_BANDWIDTH_HZ / 2ULL,
-        .frequency_stop_hz = center_hz + SIM_RECEIVER_BANDWIDTH_HZ / 2ULL,
-        .frontend_bandwidth_hz = SIM_RECEIVER_BANDWIDTH_HZ,
+        .frequency_min_hz = center_hz - SIM_RECEIVER_BANDWIDTH_HZ / 2ULL,
+        .frequency_max_hz = center_hz + SIM_RECEIVER_BANDWIDTH_HZ / 2ULL,
+        .bandwidth_hz = SIM_RECEIVER_BANDWIDTH_HZ,
         .output_scale = output_scale,
         .rf_reference_power_dbm = ref_dbm,
         .channel_count = 1,
@@ -310,8 +310,8 @@ START_TEST(renderer_80mhz_sinc_resamples_24576_source_to_98304_output)
     ck_assert_msg(scenario_validate(&scenario, ".", error, sizeof(error)), "%s", error);
     asset_cache_t cache;
     ck_assert_msg(asset_cache_load(&cache, &scenario, error, sizeof(error)), "%s", error);
-    config.receivers[0].frequency_start_hz = 9965000000ULL;
-    config.receivers[0].frequency_stop_hz = 10045000000ULL;
+    config.receivers[0].frequency_min_hz = 9965000000ULL;
+    config.receivers[0].frequency_max_hz = 10045000000ULL;
 
     iq_ci16_t out[8];
     render_stats_t stats;
@@ -398,8 +398,8 @@ START_TEST(renderer_applies_rf_power_relative_to_reference)
     ck_assert_msg(scenario_validate(&scenario, ".", error, sizeof(error)), "%s", error);
     scenario.signals[0].power_dbm = -49.0;
     config.receivers[0].channels[0].rf_reference_power_dbm = -55.0;
-    config.receivers[0].frequency_start_hz = 9965000000ULL;
-    config.receivers[0].frequency_stop_hz = 10045000000ULL;
+    config.receivers[0].frequency_min_hz = 9965000000ULL;
+    config.receivers[0].frequency_max_hz = 10045000000ULL;
 
     asset_cache_t cache;
     ck_assert_msg(asset_cache_load(&cache, &scenario, error, sizeof(error)), "%s", error);

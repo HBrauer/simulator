@@ -84,15 +84,13 @@ receivers:
     rest_bind_host: "127.0.0.1"
     rest_port: {rest_port}
     udp_output_host: "127.0.0.1"
-    frequency_start_hz: {F0 - 4000000}
-    frequency_stop_hz: {F0 + 4000000}
-    frontend_bandwidth_hz: 8000000
+    frequency_min_hz: {F0 - 4000000}
+    frequency_max_hz: {F0 + 4000000}
+    bandwidth_hz: 8000000
     scan_rate_hz_per_s: 0
     rf_reference_power_dbm: -55.0
-    profiles:
-      - {{ bandwidth_hz: {CHANNEL_BW}, sample_rate_hz: {CHANNEL_RATE}, name: "10K" }}
     channels:
-      - {{ channel_id: 0, center_frequency_hz: {F0 + 200000}, bandwidth_hz: {CHANNEL_BW}, udp_output_port: {udp_base} }}
+      - {{ channel_id: 0, center_frequency_hz: {F0 + 200000}, rates: [ {{ bandwidth_hz: {CHANNEL_BW}, sample_rate_hz: {CHANNEL_RATE} }} ], udp_output_port: {udp_base} }}
 """,
         encoding="utf-8",
     )

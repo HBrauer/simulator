@@ -34,20 +34,20 @@ config_load_yaml       scenario_load       asset_cache_load
 
 A receiver is a **front end** plus `1..8` **channels**:
 
-- The front end is the tuner (`frequency_start_hz`/`frequency_stop_hz`, fixed or
-  scanning) plus an instantaneous analog window `frontend_bandwidth_hz` — the digitised
+- The front end is the tuner (`frequency_min_hz`/`frequency_max_hz`, fixed or
+  scanning) plus an instantaneous analog window `bandwidth_hz` — the digitised
   band all channels extract from, like an ADC.
-- Every output stream is a channel with a `{bandwidth_hz, sample_rate_hz}` **profile**
-  (a fixed pair from the receiver's supported set), a UDP port, and either its own
+- Every output stream is a channel with its own `rates` list of `{bandwidth_hz,
+  sample_rate_hz}` options (the first active at load), a UDP port, and either its own
   center frequency or `track_tuner: true` (the center follows the tuner). The former
-  80-MHz wideband stream is simply channel 0 with `track_tuner` and the widest profile;
+  80-MHz wideband stream is simply channel 0 with `track_tuner` and the widest bandwidth;
   the former DDCs are fixed-center channels.
 - A channel whose span leaves the front-end window keeps streaming, but empty, exactly
   like a hardware DDC tuned outside the digitised band.
 
-Channel center frequency and bandwidth (and therefore sample rate, via the profile) are
-runtime-settable through the REST API. A rate change re-anchors the stream's block grid
-and is announced in-band with a VITA 49.2 context packet.
+Channel center frequency is runtime-settable through the REST API, and the active bandwidth/
+sample rate can be switched to any of the channel's listed `rates`. A rate change re-anchors
+the stream's block grid and is announced in-band with a VITA 49.2 context packet.
 
 ## Runtime Threads
 
@@ -61,7 +61,7 @@ Each stream worker owns:
 
 `samples_sent` counts CI16 samples successfully handed to UDP. `samples_dropped` counts samples discarded before a successful UDP send. `samples_send_dropped` is the subset dropped because the nonblocking UDP socket could not queue the datagram. `udp_send_would_block`, `udp_send_no_buffer`, and `udp_send_other_errors` split those send failures by errno class. `samples_late` counts samples missed because the sender loop was already behind its configured pacing deadline. `samples_missed` includes underruns and late samples. The `/api/v1/metrics` response exposes these counters globally and per channel stream, with each channel's configured `sample_rate_hz` and measured `actual_sample_rate_sps`.
 
-Receiver configuration updates from REST are protected by `receiver_lock`. Stream workers copy a receiver snapshot while holding that lock, then render/send from the snapshot without keeping the lock held; a retune or profile change therefore takes effect on a block boundary within the ring depth (~8 blocks). Every successful REST mutation bumps the receiver's `config_epoch`, which clients can poll cheaply to detect changes.
+Receiver configuration updates from REST are protected by `receiver_lock`. Stream workers copy a receiver snapshot while holding that lock, then render/send from the snapshot without keeping the lock held; a retune or bandwidth/rate change therefore takes effect on a block boundary within the ring depth (~8 blocks). Every successful REST mutation bumps the receiver's `config_epoch`, which clients can poll cheaply to detect changes.
 
 ## Determinism Model
 

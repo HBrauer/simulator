@@ -10,11 +10,11 @@
 
 typedef struct {
     receiver_config_t *current_receiver;
-    channel_profile_t *current_profile;
     channel_config_t *current_channel;
+    channel_rate_t *current_rate;
     bool in_receivers_seq;
-    bool in_profiles_seq;
     bool in_channels_seq;
+    bool in_rates_seq;
 } parse_state_t;
 
 static uint64_t parse_u64(const char *value)
@@ -87,11 +87,8 @@ static bool set_error(char *error, size_t error_size, const char *code)
  * stale YAML fails loudly instead of being silently misread. */
 static const char *legacy_receiver_key_error(const char *key)
 {
-    if (strcmp(key, "bandwidth_hz") == 0) {
-        return "legacy_key_bandwidth_hz_use_frontend_bandwidth_hz";
-    }
-    if (strcmp(key, "sample_rate_hz") == 0) {
-        return "legacy_key_sample_rate_hz_use_channel_profiles";
+    if (strcmp(key, "frontend_bandwidth_hz") == 0) {
+        return "legacy_key_frontend_bandwidth_hz_use_bandwidth_hz";
     }
     if (strcmp(key, "udp_80mhz_output_port") == 0) {
         return "legacy_key_udp_80mhz_output_port_use_channels";
@@ -107,13 +104,11 @@ static const char *legacy_receiver_key_error(const char *key)
 
 static bool apply_scalar(simulator_config_t *config, parse_state_t *state, const char *key, const char *value, char *error, size_t error_size)
 {
-    if (state->current_profile != NULL) {
+    if (state->current_rate != NULL) {
         if (strcmp(key, "bandwidth_hz") == 0) {
-            state->current_profile->bandwidth_hz = (uint32_t)parse_u64(value);
+            state->current_rate->bandwidth_hz = (uint32_t)parse_u64(value);
         } else if (strcmp(key, "sample_rate_hz") == 0) {
-            state->current_profile->sample_rate_hz = (uint32_t)parse_u64(value);
-        } else if (strcmp(key, "name") == 0) {
-            sim_strlcpy(state->current_profile->name, value, sizeof(state->current_profile->name));
+            state->current_rate->sample_rate_hz = (uint32_t)parse_u64(value);
         }
         return true;
     }
@@ -125,11 +120,6 @@ static bool apply_scalar(simulator_config_t *config, parse_state_t *state, const
             state->current_channel->track_tuner = parse_bool_value(value);
         } else if (strcmp(key, "center_frequency_hz") == 0) {
             state->current_channel->center_frequency_hz = parse_u64(value);
-        } else if (strcmp(key, "bandwidth_hz") == 0) {
-            state->current_channel->bandwidth_hz = (uint32_t)parse_u64(value);
-        } else if (strcmp(key, "sample_rate_hz") == 0) {
-            /* The rate always comes from the profile selected by bandwidth_hz. */
-            return set_error(error, error_size, "channel_sample_rate_comes_from_profile");
         } else if (strcmp(key, "output_scale") == 0) {
             state->current_channel->output_scale = parse_double_value(value);
         } else if (strcmp(key, "rf_reference_power_dbm") == 0) {
@@ -167,12 +157,12 @@ static bool apply_scalar(simulator_config_t *config, parse_state_t *state, const
             sim_strlcpy(r->udp_output_host, value, sizeof(r->udp_output_host));
         } else if (strcmp(key, "udp_multicast_interface") == 0) {
             sim_strlcpy(r->udp_multicast_interface, value, sizeof(r->udp_multicast_interface));
-        } else if (strcmp(key, "frequency_start_hz") == 0) {
-            r->frequency_start_hz = parse_u64(value);
-        } else if (strcmp(key, "frequency_stop_hz") == 0) {
-            r->frequency_stop_hz = parse_u64(value);
-        } else if (strcmp(key, "frontend_bandwidth_hz") == 0) {
-            r->frontend_bandwidth_hz = parse_u64(value);
+        } else if (strcmp(key, "frequency_min_hz") == 0) {
+            r->frequency_min_hz = parse_u64(value);
+        } else if (strcmp(key, "frequency_max_hz") == 0) {
+            r->frequency_max_hz = parse_u64(value);
+        } else if (strcmp(key, "bandwidth_hz") == 0) {
+            r->bandwidth_hz = parse_u64(value);
         } else if (strcmp(key, "scan_rate_hz_per_s") == 0) {
             r->scan_rate_hz_per_s = parse_double_value(value);
         } else if (strcmp(key, "output_scale") == 0) {
@@ -235,10 +225,10 @@ static bool enter_sequence(simulator_config_t *config, parse_state_t *state, con
     (void)config;
     if (strcmp(key, "receivers") == 0 && state->current_receiver == NULL) {
         state->in_receivers_seq = true;
-    } else if (strcmp(key, "profiles") == 0 && state->current_receiver != NULL) {
-        state->in_profiles_seq = true;
     } else if (strcmp(key, "channels") == 0 && state->current_receiver != NULL) {
         state->in_channels_seq = true;
+    } else if (strcmp(key, "rates") == 0 && state->current_channel != NULL) {
+        state->in_rates_seq = true;
     } else if (strcmp(key, "ddc") == 0) {
         return set_error(error, error_size, "legacy_key_ddc_use_channels");
     }
@@ -247,12 +237,12 @@ static bool enter_sequence(simulator_config_t *config, parse_state_t *state, con
 
 static bool enter_mapping(simulator_config_t *config, parse_state_t *state, char *error, size_t error_size)
 {
-    if (state->in_profiles_seq && state->current_profile == NULL) {
-        receiver_config_t *r = state->current_receiver;
-        if (r->profile_count >= SIM_MAX_PROFILES) {
-            return set_error(error, error_size, "too_many_profiles");
+    if (state->in_rates_seq && state->current_rate == NULL) {
+        channel_config_t *ch = state->current_channel;
+        if (ch->rate_count >= SIM_MAX_CHANNEL_RATES) {
+            return set_error(error, error_size, "too_many_channel_rates");
         }
-        state->current_profile = &r->profiles[r->profile_count++];
+        state->current_rate = &ch->rates[ch->rate_count++];
     } else if (state->in_channels_seq && state->current_channel == NULL) {
         receiver_config_t *r = state->current_receiver;
         if (r->channel_count >= SIM_MAX_CHANNELS) {
@@ -271,19 +261,19 @@ static bool enter_mapping(simulator_config_t *config, parse_state_t *state, char
 
 static void leave_mapping(parse_state_t *state)
 {
-    if (state->current_profile != NULL) {
-        state->current_profile = NULL;
+    if (state->current_rate != NULL) {
+        state->current_rate = NULL;
     } else if (state->current_channel != NULL) {
         state->current_channel = NULL;
-    } else if (!state->in_profiles_seq && !state->in_channels_seq && state->current_receiver != NULL) {
+    } else if (!state->in_channels_seq && state->current_receiver != NULL) {
         state->current_receiver = NULL;
     }
 }
 
 static void leave_sequence(parse_state_t *state)
 {
-    if (state->in_profiles_seq) {
-        state->in_profiles_seq = false;
+    if (state->in_rates_seq) {
+        state->in_rates_seq = false;
     } else if (state->in_channels_seq) {
         state->in_channels_seq = false;
     } else if (state->in_receivers_seq) {
@@ -436,30 +426,21 @@ bool config_validate(simulator_config_t *config, char *error, size_t error_size)
         if (receiver->rf_reference_power_dbm == 0.0) {
             receiver->rf_reference_power_dbm = -55.0;
         }
-        if (receiver->frontend_bandwidth_hz == 0ULL) {
-            receiver->frontend_bandwidth_hz = SIM_RECEIVER_BANDWIDTH_HZ;
-        }
-        if (receiver->profile_count == 0) {
-            receiver_default_profiles(receiver);
+        if (receiver->bandwidth_hz == 0ULL) {
+            receiver->bandwidth_hz = SIM_RECEIVER_BANDWIDTH_HZ;
         }
         for (size_t c = 0; c < receiver->channel_count; c++) {
             channel_config_t *channel = &receiver->channels[c];
-            if (channel->bandwidth_hz == 0U) {
-                snprintf(error, error_size, "channel_bandwidth_required");
-                return false;
-            }
-            /* The sample rate is always the profile partner of the selected bandwidth. */
-            const channel_profile_t *profile = receiver_find_profile(receiver, channel->bandwidth_hz);
-            if (profile == NULL) {
-                snprintf(error, error_size, "unsupported_channel_bandwidth");
-                return false;
-            }
-            channel->sample_rate_hz = profile->sample_rate_hz;
             if (channel->output_scale == 0.0) {
                 channel->output_scale = receiver->output_scale;
             }
             if (channel->rf_reference_power_dbm == 0.0) {
                 channel->rf_reference_power_dbm = receiver->rf_reference_power_dbm;
+            }
+            /* The first listed rate is active at load. */
+            if (channel->rate_count > 0) {
+                channel->bandwidth_hz = channel->rates[0].bandwidth_hz;
+                channel->sample_rate_hz = channel->rates[0].sample_rate_hz;
             }
         }
         if (!receiver_validate(receiver, error, error_size)) {

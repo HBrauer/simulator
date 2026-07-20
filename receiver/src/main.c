@@ -201,7 +201,7 @@ static void usage(const char *argv0)
             "preserved; tuner-tracking channels follow), channel and bandwidth combo boxes, and a\n"
             "channel center-frequency field. Click a field, type MHz, Enter commits, Esc cancels.\n"
             "Keys: PgUp/PgDn or 0-7 select channel, Left/Right retune the channel (Shift = x10),\n"
-            "B cycles the bandwidth profile.\n",
+            "B cycles the bandwidth.\n",
             argv0);
 }
 
@@ -573,11 +573,11 @@ static void control_set_center(control_state_t *control, rx_stats_t *stats, uint
         fprintf(stderr, "control: channel %u follows the receiver tuner; it cannot be retuned directly\n", channel->channel_id);
         return;
     }
-    if (control->client.frequency_max_hz > 0U && center_hz > control->client.frequency_max_hz) {
-        center_hz = control->client.frequency_max_hz;
+    if (control->client.simulator_frequency_max_hz > 0U && center_hz > control->client.simulator_frequency_max_hz) {
+        center_hz = control->client.simulator_frequency_max_hz;
     }
     char error[CONTROL_MAX_ERROR];
-    if (!control_client_set_channel(&control->client, control->channel, &center_hz, 0, error, sizeof(error))) {
+    if (!control_client_set_channel(&control->client, control->channel, &center_hz, 0, 0, error, sizeof(error))) {
         fprintf(stderr, "control: %s\n", error);
         return;
     }
@@ -632,8 +632,8 @@ static void control_set_receiver_center(control_state_t *control, rx_stats_t *st
     if (center_hz < client->frequency_min_hz + low_half) {
         center_hz = client->frequency_min_hz + low_half;
     }
-    if (client->frequency_max_hz > 0U && center_hz + high_half > client->frequency_max_hz) {
-        center_hz = client->frequency_max_hz - high_half;
+    if (client->simulator_frequency_max_hz > 0U && center_hz + high_half > client->simulator_frequency_max_hz) {
+        center_hz = client->simulator_frequency_max_hz - high_half;
     }
     const uint64_t start = center_hz - low_half;
     const uint64_t stop = center_hz + high_half;
@@ -657,16 +657,30 @@ static void control_set_receiver_center(control_state_t *control, rx_stats_t *st
             (double)span / 1000000.0);
 }
 
-/* Switch the channel to a supported bandwidth profile. The paired sample rate is
- * applied by the server; the waterfall follows it. */
+/* The sample rate paired with a bandwidth in the current channel's rate list, or 0 if absent. */
+static uint32_t channel_rate_for_bandwidth(const control_channel_t *channel, uint32_t bandwidth_hz)
+{
+    for (size_t i = 0; i < channel->rate_count; i++) {
+        if (channel->rates[i].bandwidth_hz == bandwidth_hz) {
+            return channel->rates[i].sample_rate_hz;
+        }
+    }
+    return 0U;
+}
+
+/* Switch the channel to one of its listed bandwidths, sending the paired sample rate; the waterfall follows. */
 static void control_set_bandwidth(app_config_t *config, control_state_t *control, waterfall_t *wf, frame_sampler_t *sampler, rx_stats_t *stats, uint32_t bandwidth_hz)
 {
     const control_channel_t *channel = control_current(control);
     if (bandwidth_hz == channel->bandwidth_hz) {
         return;
     }
+    uint32_t sample_rate_hz = channel_rate_for_bandwidth(channel, bandwidth_hz);
+    if (sample_rate_hz == 0U) {
+        return;
+    }
     char error[CONTROL_MAX_ERROR];
-    if (!control_client_set_channel(&control->client, control->channel, 0, &bandwidth_hz, error, sizeof(error))) {
+    if (!control_client_set_channel(&control->client, control->channel, 0, &bandwidth_hz, &sample_rate_hz, error, sizeof(error))) {
         fprintf(stderr, "control: %s\n", error);
         return;
     }
@@ -683,24 +697,25 @@ static void control_set_bandwidth(app_config_t *config, control_state_t *control
             updated->in_frontend_window ? "" : " (outside front-end window: stream is empty)");
 }
 
-/* Bandwidth profiles that fit the front end, in capability order. */
+/* The current channel's listed bandwidths that fit the front end, in list order. */
 static size_t control_bandwidth_options(const control_state_t *control, uint32_t *out, size_t max)
 {
+    const control_channel_t *channel = control_current(control);
     const control_client_t *client = &control->client;
     size_t count = 0;
-    for (size_t i = 0; i < client->profile_count && count < max; i++) {
-        if ((uint64_t)client->profiles[i].bandwidth_hz <= client->frontend_bandwidth_hz) {
-            out[count++] = client->profiles[i].bandwidth_hz;
+    for (size_t i = 0; i < channel->rate_count && count < max; i++) {
+        if ((uint64_t)channel->rates[i].bandwidth_hz <= client->bandwidth_hz) {
+            out[count++] = channel->rates[i].bandwidth_hz;
         }
     }
     return count;
 }
 
-/* Cycle to the next supported bandwidth profile that fits the front end (keyboard `B`). */
+/* Cycle to the next listed bandwidth that fits the front end (keyboard `B`). */
 static void control_cycle_bandwidth(app_config_t *config, control_state_t *control, waterfall_t *wf, frame_sampler_t *sampler, rx_stats_t *stats)
 {
-    uint32_t options[CONTROL_MAX_PROFILES];
-    const size_t count = control_bandwidth_options(control, options, CONTROL_MAX_PROFILES);
+    uint32_t options[CONTROL_MAX_CHANNEL_RATES];
+    const size_t count = control_bandwidth_options(control, options, CONTROL_MAX_CHANNEL_RATES);
     if (count < 2U) {
         return;
     }
@@ -1201,16 +1216,14 @@ static void ui_channel_item_label(const control_channel_t *channel, char *out, s
 
 static void ui_bandwidth_item_label(const control_state_t *control, uint32_t bandwidth_hz, char *out, size_t out_size)
 {
-    const control_client_t *client = &control->client;
-    for (size_t i = 0; i < client->profile_count; i++) {
-        if (client->profiles[i].bandwidth_hz == bandwidth_hz) {
-            snprintf(out,
-                     out_size,
-                     "%.3f MHZ / %.3f MSPS",
-                     (double)bandwidth_hz / 1000000.0,
-                     (double)client->profiles[i].sample_rate_hz / 1000000.0);
-            return;
-        }
+    const uint32_t sample_rate_hz = channel_rate_for_bandwidth(control_current(control), bandwidth_hz);
+    if (sample_rate_hz != 0U) {
+        snprintf(out,
+                 out_size,
+                 "%.3f MHZ / %.3f MSPS",
+                 (double)bandwidth_hz / 1000000.0,
+                 (double)sample_rate_hz / 1000000.0);
+        return;
     }
     snprintf(out, out_size, "%.3f MHZ", (double)bandwidth_hz / 1000000.0);
 }
@@ -1242,8 +1255,8 @@ static void ui_draw_dropdowns(ui_t *ui, const control_state_t *control)
             ui_draw_dropdown_item(ui->renderer, ui_dropdown_item_rect(ui->channel_combo.x, i), label, i == control->channel);
         }
     } else if (ui->open_combo == UI_COMBO_BANDWIDTH) {
-        uint32_t options[CONTROL_MAX_PROFILES];
-        const size_t count = control_bandwidth_options(control, options, CONTROL_MAX_PROFILES);
+        uint32_t options[CONTROL_MAX_CHANNEL_RATES];
+        const size_t count = control_bandwidth_options(control, options, CONTROL_MAX_CHANNEL_RATES);
         const control_channel_t *channel = control_current(control);
         for (size_t i = 0; i < count; i++) {
             char label[64];
@@ -1798,8 +1811,8 @@ int main(int argc, char **argv)
                         }
                     } else if (control.enabled && ui.open_combo == UI_COMBO_BANDWIDTH) {
                         ui.open_combo = UI_COMBO_NONE;
-                        uint32_t options[CONTROL_MAX_PROFILES];
-                        const size_t count = control_bandwidth_options(&control, options, CONTROL_MAX_PROFILES);
+                        uint32_t options[CONTROL_MAX_CHANNEL_RATES];
+                        const size_t count = control_bandwidth_options(&control, options, CONTROL_MAX_CHANNEL_RATES);
                         for (size_t i = 0; i < count; i++) {
                             const SDL_Rect item = ui_dropdown_item_rect(ui.bandwidth_combo.x, i);
                             if (ui_point_in_rect(mx, my, &item)) {

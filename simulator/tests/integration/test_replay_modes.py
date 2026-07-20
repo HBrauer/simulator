@@ -39,15 +39,12 @@ receivers:
     rest_bind_host: "127.0.0.1"
     rest_port: {rest_port}
     udp_output_host: "127.0.0.1"
-    frequency_start_hz: 60000000
-    frequency_stop_hz: 140000000
+    frequency_min_hz: 60000000
+    frequency_max_hz: 140000000
     scan_rate_hz_per_s: 100000000000
-    profiles:
-      - {{ bandwidth_hz: 80000000, sample_rate_hz: 98304000, name: "80M" }}
-      - {{ bandwidth_hz: 1000000, sample_rate_hz: 1536000, name: "1M" }}
     channels:
-      - {{ channel_id: 0, track_tuner: true, bandwidth_hz: 80000000, udp_output_port: {udp_base} }}
-      - {{ channel_id: 1, center_frequency_hz: 100000000, bandwidth_hz: 1000000, udp_output_port: {udp_base + 1} }}
+      - {{ channel_id: 0, track_tuner: true, rates: [ {{ bandwidth_hz: 80000000, sample_rate_hz: 98304000 }} ], udp_output_port: {udp_base} }}
+      - {{ channel_id: 1, center_frequency_hz: 100000000, rates: [ {{ bandwidth_hz: 1000000, sample_rate_hz: 1536000 }} ], udp_output_port: {udp_base + 1} }}
 """,
         encoding="utf-8",
     )
@@ -216,26 +213,22 @@ receivers:
     rest_bind_host: "127.0.0.1"
     rest_port: {rest_port}
     udp_output_host: "127.0.0.1"
-    frequency_start_hz: 60000000
-    frequency_stop_hz: 140000000
+    frequency_min_hz: 60000000
+    frequency_max_hz: 140000000
     rf_reference_power_dbm: -55.0
     scan_rate_hz_per_s: 100000000000
-    profiles:
-      - {{ bandwidth_hz: 80000000, sample_rate_hz: 98304000, name: "80M" }}
-      - {{ bandwidth_hz: 20000000, sample_rate_hz: 24576000, name: "20M" }}
-      - {{ bandwidth_hz: 1000000, sample_rate_hz: 1536000, name: "1M" }}
     channels:
-      - {{ channel_id: 0, track_tuner: true, bandwidth_hz: 80000000, udp_output_port: {udp_base} }}
-      - {{ channel_id: 1, center_frequency_hz: 100000000, bandwidth_hz: 1000000, udp_output_port: {udp_base + 1} }}
+      - {{ channel_id: 0, track_tuner: true, rates: [ {{ bandwidth_hz: 80000000, sample_rate_hz: 98304000 }} ], udp_output_port: {udp_base} }}
+      - {{ channel_id: 1, center_frequency_hz: 100000000, rates: [ {{ bandwidth_hz: 1000000, sample_rate_hz: 1536000 }}, {{ bandwidth_hz: 20000000, sample_rate_hz: 24576000 }}, {{ bandwidth_hz: 80000000, sample_rate_hz: 98304000 }} ], udp_output_port: {udp_base + 1} }}
 """,
         encoding="utf-8",
     )
 
 
-def _set_bandwidth(rest_port, hz):
+def _set_bandwidth(rest_port, hz, sample_rate_hz):
     code, _ = _request_json(
         f"http://127.0.0.1:{rest_port}/api/v1/channels/1",
-        {"bandwidth_hz": hz},
+        {"bandwidth_hz": hz, "sample_rate_hz": sample_rate_hz},
         method="PUT",
     )
     assert code == 200, f"bandwidth retune to {hz} failed: {code}"
@@ -268,15 +261,15 @@ def test_passthrough_selects_variant_by_bandwidth(tmp_path):
         _wait_payload_state(ch1_sock, True)
 
         # 20 MHz: the 24.576 MS/s variant exists -> energy.
-        _set_bandwidth(rest_port, 20000000)
+        _set_bandwidth(rest_port, 20000000, 24576000)
         _wait_payload_state(ch1_sock, True)
 
         # 80 MHz: no variant for 98.304 MS/s -> silence (no resample).
-        _set_bandwidth(rest_port, 80000000)
+        _set_bandwidth(rest_port, 80000000, 98304000)
         _wait_payload_state(ch1_sock, False)
 
         # Back to 1 MHz -> energy again.
-        _set_bandwidth(rest_port, 1000000)
+        _set_bandwidth(rest_port, 1000000, 1536000)
         _wait_payload_state(ch1_sock, True)
     finally:
         _terminate(proc)

@@ -9,8 +9,7 @@
 /* Sized for the wideband-plus-many-narrow-DDC use case: one track_tuner channel and ~20
  * fixed DDC channels extracting from the same recording. */
 #define SIM_MAX_CHANNELS 24
-#define SIM_MAX_PROFILES 32
-#define SIM_MAX_PROFILE_NAME 24
+#define SIM_MAX_CHANNEL_RATES 16
 #define SIM_MAX_SOURCES 64
 #define SIM_MAX_SIGNALS 256
 #define SIM_MAX_PASSTHROUGH_VARIANTS 8
@@ -20,7 +19,7 @@
 #define SIM_RECEIVER_SAMPLE_RATE_HZ 98304000U
 #define SIM_DDC_BANDWIDTH_HZ 20000000U
 #define SIM_DDC_SAMPLE_RATE_HZ 24576000U
-#define SIM_MAX_RF_HZ 40000000000ULL
+#define SIM_MAX_RF_HZ 100000000000ULL
 #define SIM_DEFAULT_STREAM_BLOCK_SAMPLES 1024U
 #define SIM_MAX_STREAM_BLOCK_SAMPLES 4096U
 
@@ -58,24 +57,25 @@ typedef struct {
     uint16_t port;
 } udp_output_config_t;
 
-/* A supported {bandwidth, sample rate} pair, modelled after fixed DDC decimation stages:
- * selecting a bandwidth (via YAML or REST) always selects its paired sample rate. */
+/* A supported {bandwidth, sample rate} option a channel can be tuned to. Validation enforces
+ * sample_rate_hz >= bandwidth_hz > 0 and bandwidth_hz <= the receiver's front-end bandwidth_hz. */
 typedef struct {
     uint32_t bandwidth_hz;
     uint32_t sample_rate_hz;
-    char name[SIM_MAX_PROFILE_NAME];
-} channel_profile_t;
+} channel_rate_t;
 
 /* One output channel of a receiver. Every stream is a channel; the former wideband stream
- * is just a channel with track_tuner=true and the widest profile. bandwidth_hz and
- * sample_rate_hz are denormalised from the selected profile (validation enforces that the
- * pair matches one of the receiver's profiles). */
+ * is just a channel with track_tuner=true and the widest bandwidth. Each channel carries a list
+ * of supported {bandwidth, sample rate} options in `rates`; the first is active at load, and REST
+ * retunes/select among them. bandwidth_hz/sample_rate_hz denormalise the currently active rate. */
 typedef struct {
     uint32_t id;
     bool track_tuner;             /* center follows the receiver tuner (scan or fixed) */
     uint64_t center_frequency_hz; /* used when !track_tuner */
-    uint32_t bandwidth_hz;
-    uint32_t sample_rate_hz;
+    uint32_t bandwidth_hz;        /* active; denormalised from the selected entry of rates[] */
+    uint32_t sample_rate_hz;      /* active; denormalised from the selected entry of rates[] */
+    size_t rate_count;
+    channel_rate_t rates[SIM_MAX_CHANNEL_RATES];
     double output_scale;
     double rf_reference_power_dbm;
     bool stream_enabled;
@@ -91,17 +91,15 @@ typedef struct {
     uint32_t id;
     char rest_bind_host[64];
     uint16_t rest_port;
-    uint64_t frequency_start_hz;
-    uint64_t frequency_stop_hz;
-    uint64_t frontend_bandwidth_hz; /* instantaneous analog (ADC) window all channels extract from */
+    uint64_t frequency_min_hz;
+    uint64_t frequency_max_hz;
+    uint64_t bandwidth_hz; /* instantaneous analog (ADC) window all channels extract from */
     double scan_rate_hz_per_s;
     double output_scale;
     double rf_reference_power_dbm;
     char udp_output_host[64];
     char udp_multicast_interface[64];
     uint64_t config_epoch; /* bumped under the receiver lock on every runtime change */
-    size_t profile_count;
-    channel_profile_t profiles[SIM_MAX_PROFILES];
     size_t channel_count;
     channel_config_t channels[SIM_MAX_CHANNELS];
 } receiver_config_t;

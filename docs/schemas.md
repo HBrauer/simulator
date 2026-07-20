@@ -27,50 +27,48 @@ Receiver fields:
 | `rest_port` | integer | yes | Unique per instance. |
 | `udp_output_host` | string | yes | UDP destination host. May be unicast, for example `127.0.0.1`, or IPv4 multicast, for example `239.10.10.10`. |
 | `udp_multicast_interface` | string | no | Local IPv4 interface used for multicast sends, for example `127.0.0.1` for loopback-only testing. Empty/default lets the kernel choose. |
-| `frequency_start_hz` | integer | yes | Inclusive RF tuner range start, `0..40000000000`. |
-| `frequency_stop_hz` | integer | yes | RF tuner range stop, greater than start and `<= 40000000000`. |
-| `frontend_bandwidth_hz` | integer | no | Instantaneous analog (ADC) window all channels extract from. Defaults to `80000000`; must be non-zero. |
+| `frequency_min_hz` | integer | yes | Minimum configurable frequency for the receiver (inclusive tuner range start), `0..100000000000`. |
+| `frequency_max_hz` | integer | yes | Maximum configurable frequency for the receiver (tuner range stop), greater than `frequency_min_hz` and `<= 100000000000`. |
+| `bandwidth_hz` | integer | no | Receiver-level: the instantaneous analog (ADC) window all channels extract from (distinct from a channel's own `bandwidth_hz`). Defaults to `80000000`; must be non-zero. |
 | `scan_rate_hz_per_s` | number | yes | Used when the tuner range is wider than the front-end bandwidth. |
 | `output_scale` | number | no | Default channel output multiplier. Defaults to `1.0`; must be positive when set. |
 | `rf_reference_power_dbm` | number | no | RF power that preserves the source's `nominal_level_dbfs`. Defaults to `-55.0`. |
-| `profiles` | array | no | Supported `{bandwidth_hz, sample_rate_hz}` pairs, up to `SIM_MAX_PROFILES` (`32`). Defaults to the built-in table `80/40/20/10/5/1 MHz` with the `1.2288x` rate family. Narrow profiles (for example `100 kHz / 128 kS/s`, down to `1 kHz / 2 kS/s`) are supported for DDC channels extracting from wideband replays. |
 | `channels` | array | yes | `1..SIM_MAX_CHANNELS` (`24`) channel entries with IDs `0..N-1`. |
 
-Profile fields (fixed bandwidth/sample-rate pairs, like hardware DDC decimation stages;
-selecting a bandwidth always selects its paired sample rate):
-
-| Field | Type | Required | Notes |
-| --- | --- | --- | --- |
-| `bandwidth_hz` | integer | yes | Unique within the receiver; non-zero. |
-| `sample_rate_hz` | integer | yes | Must be `>= bandwidth_hz`. |
-| `name` | string | no | Label reported by the REST API, for example `"20M"`. |
-
 Channel fields (every output stream is a channel; the former wideband stream is a
-channel with `track_tuner: true` and the widest profile):
+channel with `track_tuner: true` and the widest bandwidth):
 
 | Field | Type | Required | Notes |
 | --- | --- | --- | --- |
 | `channel_id` | integer | yes | `0..N-1`, in order. |
 | `track_tuner` | boolean | no | Channel center follows the receiver tuner (fixed center or scan sweep). Defaults to `false`. |
 | `center_frequency_hz` | integer | when not tracking | Absolute RF center frequency. Ignored with `track_tuner: true`. |
-| `bandwidth_hz` | integer | yes | Must exactly match a profile `bandwidth_hz` and be `<= frontend_bandwidth_hz`. The sample rate is the profile partner; specifying `sample_rate_hz` on a channel is an error. |
+| `rates` | array | yes | The `{bandwidth_hz, sample_rate_hz}` options this channel supports (`1..SIM_MAX_CHANNEL_RATES`, `16`). The first entry is active at load; a REST retune selects among them. |
 | `output_scale` | number | no | Channel output multiplier. Defaults to receiver `output_scale`. |
 | `rf_reference_power_dbm` | number | no | Defaults to the receiver value. |
 | `stream_enabled` | boolean | no | Enables this channel's UDP stream. Defaults to `true`. |
 | `udp_output_port` | integer | yes | Unique across all channel UDP outputs of the instance. |
 
-A channel whose span leaves the front-end window (tuner center ± `frontend_bandwidth_hz/2`)
-keeps streaming, but empty — exactly like a hardware DDC tuned outside the digitised band.
+Rate fields (each entry of a channel's `rates` list):
 
-The pre-channel keys (`bandwidth_hz`/`sample_rate_hz`/`stream_enabled`/`udp_80mhz_output_port`
-at receiver level, and the `ddc` array) are rejected with a `legacy_key_...` error naming
-the replacement.
+| Field | Type | Required | Notes |
+| --- | --- | --- | --- |
+| `bandwidth_hz` | integer | yes | Non-zero, and `<=` the receiver's `bandwidth_hz` (the front-end window). |
+| `sample_rate_hz` | integer | yes | Must be `>= bandwidth_hz`. |
+
+Narrow rates (down to `1 kHz / 2 kS/s`) for DDC channels extracting from wideband replays are
+supported. A channel whose span leaves the front-end window (tuner center ± the receiver's
+`bandwidth_hz`/2) keeps streaming, but empty — exactly like a hardware DDC tuned outside the
+digitised band.
+
+Retired keys are rejected with a `legacy_key_...` error naming the replacement: `frontend_bandwidth_hz`
+(the front-end window is now the receiver's `bandwidth_hz`), and the pre-channel keys
+`stream_enabled`/`udp_80mhz_output_port` at receiver level plus the `ddc` array.
 
 Validation error codes include:
 
 - `config_invalid`
 - `too_many_receivers`
-- `too_many_profiles`
 - `too_many_channels`
 - `invalid_stream_block_samples`
 - `duplicate_receiver`
@@ -78,12 +76,11 @@ Validation error codes include:
 - `duplicate_udp_port`
 - `invalid_receiver`
 - `invalid_frontend_bandwidth`
-- `invalid_profiles` / `invalid_profile` / `duplicate_profile_bandwidth`
 - `invalid_channels` / `invalid_channel`
-- `channel_bandwidth_required`
-- `unsupported_channel_bandwidth`
+- `channel_rates_required` / `too_many_channel_rates`
+- `invalid_channel_rate`
+- `unsupported_channel_rate`
 - `bandwidth_exceeds_frontend`
-- `channel_sample_rate_comes_from_profile`
 - `legacy_key_ddc_use_channels` (and the other `legacy_key_...` codes)
 - `invalid_output_scale`
 

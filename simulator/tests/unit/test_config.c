@@ -23,8 +23,8 @@ static const char *write_temp_config_body(const char *top_body, const char *rece
           "    rest_bind_host: \"127.0.0.1\"\n"
           "    rest_port: 8100\n"
           "    udp_output_host: \"127.0.0.1\"\n"
-          "    frequency_start_hz: 9960000000\n"
-          "    frequency_stop_hz: 10040000000\n",
+          "    frequency_min_hz: 9960000000\n"
+          "    frequency_max_hz: 10040000000\n",
           f);
     fputs(receiver_body, f);
     fclose(f);
@@ -34,9 +34,9 @@ static const char *write_temp_config_body(const char *top_body, const char *rece
 static const char *default_channels_yaml(void)
 {
     return "    channels:\n"
-           "      - { channel_id: 0, track_tuner: true, bandwidth_hz: 80000000, udp_output_port: 50000 }\n"
-           "      - { channel_id: 1, center_frequency_hz: 10000000000, bandwidth_hz: 20000000, udp_output_port: 50001 }\n"
-           "      - { channel_id: 2, center_frequency_hz: 10001000000, bandwidth_hz: 20000000, udp_output_port: 50002 }\n";
+           "      - { channel_id: 0, track_tuner: true, rates: [ { bandwidth_hz: 80000000, sample_rate_hz: 98304000 } ], udp_output_port: 50000 }\n"
+           "      - { channel_id: 1, center_frequency_hz: 10000000000, rates: [ { bandwidth_hz: 20000000, sample_rate_hz: 24576000 } ], udp_output_port: 50001 }\n"
+           "      - { channel_id: 2, center_frequency_hz: 10001000000, rates: [ { bandwidth_hz: 20000000, sample_rate_hz: 24576000 } ], udp_output_port: 50002 }\n";
 }
 
 static const char *write_temp_config(const char *body)
@@ -49,20 +49,21 @@ static receiver_config_t valid_receiver(uint32_t id, uint16_t rest_port, uint16_
     receiver_config_t receiver = {
         .id = id,
         .rest_port = rest_port,
-        .frequency_start_hz = 9960000000ULL,
-        .frequency_stop_hz = 10040000000ULL,
-        .frontend_bandwidth_hz = SIM_RECEIVER_BANDWIDTH_HZ,
+        .frequency_min_hz = 9960000000ULL,
+        .frequency_max_hz = 10040000000ULL,
+        .bandwidth_hz = SIM_RECEIVER_BANDWIDTH_HZ,
         .scan_rate_hz_per_s = 100000000000.0,
         .output_scale = 1.0,
         .rf_reference_power_dbm = -55.0,
         .channel_count = 5,
     };
-    receiver_default_profiles(&receiver);
     receiver.channels[0] = (channel_config_t){
         .id = 0,
         .track_tuner = true,
         .bandwidth_hz = (uint32_t)SIM_RECEIVER_BANDWIDTH_HZ,
         .sample_rate_hz = SIM_RECEIVER_SAMPLE_RATE_HZ,
+        .rate_count = 1,
+        .rates = {{(uint32_t)SIM_RECEIVER_BANDWIDTH_HZ, SIM_RECEIVER_SAMPLE_RATE_HZ}},
         .output_scale = 1.0,
         .rf_reference_power_dbm = -55.0,
         .stream_enabled = true,
@@ -74,6 +75,8 @@ static receiver_config_t valid_receiver(uint32_t id, uint16_t rest_port, uint16_
             .center_frequency_hz = 10000000000ULL + (uint64_t)i * 1000000ULL,
             .bandwidth_hz = SIM_DDC_BANDWIDTH_HZ,
             .sample_rate_hz = SIM_DDC_SAMPLE_RATE_HZ,
+            .rate_count = 1,
+            .rates = {{SIM_DDC_BANDWIDTH_HZ, SIM_DDC_SAMPLE_RATE_HZ}},
             .output_scale = 1.0,
             .rf_reference_power_dbm = -55.0,
             .stream_enabled = true,
@@ -97,15 +100,13 @@ START_TEST(loads_instance_config)
     ck_assert_int_eq(config.stream_cpu, -1);
     ck_assert_uint_eq(config.stream_cpu_count, 0); /* absent -> no pinning */
     ck_assert_uint_eq(config.asset_cache_max_bytes, 0);
-    ck_assert_uint_eq(config.receivers[0].frontend_bandwidth_hz, 80000000ULL);
+    ck_assert_uint_eq(config.receivers[0].bandwidth_hz, 80000000ULL);
     ck_assert(config.receivers[0].channels[0].track_tuner);
     ck_assert_uint_eq(config.receivers[0].channels[0].bandwidth_hz, 80000000U);
     ck_assert_uint_eq(config.receivers[0].channels[0].sample_rate_hz, 98304000U);
     ck_assert(!config.receivers[0].channels[1].track_tuner);
     ck_assert_uint_eq(config.receivers[0].channels[1].bandwidth_hz, 20000000U);
     ck_assert_uint_eq(config.receivers[0].channels[1].sample_rate_hz, 24576000U);
-    ck_assert_uint_eq(config.receivers[0].profile_count, 6);
-    ck_assert_str_eq(config.receivers[0].profiles[0].name, "80M");
     ck_assert_double_eq_tol(config.receivers[0].rf_reference_power_dbm, -55.0, 0.000001);
     ck_assert_double_eq_tol(config.receivers[0].channels[1].rf_reference_power_dbm, -55.0, 0.000001);
     ck_assert(config.receivers[0].channels[0].stream_enabled);
@@ -115,127 +116,100 @@ START_TEST(loads_instance_config)
 }
 END_TEST
 
-START_TEST(defaults_profiles_and_stream_block_samples)
+START_TEST(defaults_stream_block_samples)
 {
     simulator_config_t config = {
         .schema_version = 1,
         .receiver_count = 1,
     };
     config.receivers[0] = valid_receiver(0, 8100, 50000);
-    config.receivers[0].profile_count = 0; /* omitted -> built-in table */
 
     char error[128];
     ck_assert_msg(config_validate(&config, error, sizeof(error)), "%s", error);
     ck_assert_uint_eq(config.stream_block_samples, SIM_DEFAULT_STREAM_BLOCK_SAMPLES);
-    ck_assert_uint_eq(config.receivers[0].profile_count, 6);
     ck_assert_uint_eq(config.receivers[0].channels[0].sample_rate_hz, SIM_RECEIVER_SAMPLE_RATE_HZ);
     ck_assert_uint_eq(config.receivers[0].channels[1].sample_rate_hz, SIM_DDC_SAMPLE_RATE_HZ);
 }
 END_TEST
 
-START_TEST(channel_sample_rate_follows_profile)
+START_TEST(active_rate_is_first_listed)
 {
-    /* The channel selects a profile via bandwidth; the sample rate is overwritten with the
-     * profile partner even if the struct carried something else. */
+    /* The first listed rate becomes active, overriding whatever the active fields held. */
     simulator_config_t config = {
         .schema_version = 1,
         .receiver_count = 1,
     };
     config.receivers[0] = valid_receiver(0, 8100, 50000);
-    config.receivers[0].channels[1].sample_rate_hz = 12345U;
+    config.receivers[0].channels[1].rate_count = 2;
+    config.receivers[0].channels[1].rates[0] = (channel_rate_t){20000000U, 24576000U};
+    config.receivers[0].channels[1].rates[1] = (channel_rate_t){1000000U, 1536000U};
+    config.receivers[0].channels[1].bandwidth_hz = 1000000U; /* not the first entry */
+    config.receivers[0].channels[1].sample_rate_hz = 1536000U;
 
     char error[128];
     ck_assert_msg(config_validate(&config, error, sizeof(error)), "%s", error);
-    ck_assert_uint_eq(config.receivers[0].channels[1].sample_rate_hz, SIM_DDC_SAMPLE_RATE_HZ);
+    ck_assert_uint_eq(config.receivers[0].channels[1].bandwidth_hz, 20000000U);
+    ck_assert_uint_eq(config.receivers[0].channels[1].sample_rate_hz, 24576000U);
 }
 END_TEST
 
-START_TEST(rejects_unsupported_channel_bandwidth)
+START_TEST(rejects_invalid_channel_rates)
 {
     simulator_config_t config = {
         .schema_version = 1,
         .receiver_count = 1,
     };
     config.receivers[0] = valid_receiver(0, 8100, 50000);
-    config.receivers[0].channels[1].bandwidth_hz = 3000000U; /* not in the profile table */
+    config.receivers[0].channels[1].rate_count = 0; /* no rates */
 
     char error[128];
     ck_assert(!config_validate(&config, error, sizeof(error)));
-    ck_assert_str_eq(error, "unsupported_channel_bandwidth");
+    ck_assert_str_eq(error, "channel_rates_required");
 
     config.receivers[0] = valid_receiver(0, 8100, 50000);
-    config.receivers[0].channels[1].bandwidth_hz = 0;
+    /* A rate whose sample rate is below its bandwidth. */
+    config.receivers[0].channels[1].rates[0].sample_rate_hz = config.receivers[0].channels[1].rates[0].bandwidth_hz - 1U;
     ck_assert(!config_validate(&config, error, sizeof(error)));
-    ck_assert_str_eq(error, "channel_bandwidth_required");
+    ck_assert_str_eq(error, "invalid_channel_rate");
+}
+END_TEST
+
+START_TEST(rejects_active_rate_not_in_list)
+{
+    /* A retune leaving the active pair off the channel's rate list is rejected. */
+    receiver_config_t receiver = valid_receiver(0, 8100, 50000);
+    receiver.channels[1].bandwidth_hz = 12345U; /* not one of channel 1's rates */
+    char error[128];
+    ck_assert(!receiver_validate(&receiver, error, sizeof(error)));
+    ck_assert_str_eq(error, "unsupported_channel_rate");
 }
 END_TEST
 
 START_TEST(rejects_bandwidth_exceeding_frontend)
 {
     receiver_config_t receiver = valid_receiver(0, 8100, 50000);
-    receiver.frontend_bandwidth_hz = 20000000ULL;
-    /* channel 0 selects the 80 MHz profile, wider than the 20 MHz front end */
+    receiver.bandwidth_hz = 20000000ULL;
+    /* channel 0 is 80 MHz wide, wider than the 20 MHz front end */
     char error[128];
     ck_assert(!receiver_validate(&receiver, error, sizeof(error)));
     ck_assert_str_eq(error, "bandwidth_exceeds_frontend");
 }
 END_TEST
 
-START_TEST(rejects_invalid_profiles)
-{
-    receiver_config_t receiver = valid_receiver(0, 8100, 50000);
-    receiver.profiles[2].sample_rate_hz = receiver.profiles[2].bandwidth_hz - 1U; /* rate < bandwidth */
-    char error[128];
-    ck_assert(!receiver_validate(&receiver, error, sizeof(error)));
-    ck_assert_str_eq(error, "invalid_profile");
-
-    receiver = valid_receiver(0, 8100, 50000);
-    receiver.profiles[1].bandwidth_hz = receiver.profiles[0].bandwidth_hz;
-    ck_assert(!receiver_validate(&receiver, error, sizeof(error)));
-    ck_assert_str_eq(error, "duplicate_profile_bandwidth");
-
-    receiver = valid_receiver(0, 8100, 50000);
-    receiver.profile_count = 0;
-    ck_assert(!receiver_validate(&receiver, error, sizeof(error)));
-    ck_assert_str_eq(error, "invalid_profiles");
-}
-END_TEST
-
-START_TEST(parses_receiver_profiles_from_yaml)
+START_TEST(parses_channel_bandwidth_and_rate_from_yaml)
 {
     const char *path = write_temp_config_body(
         "",
-        "    profiles:\n"
-        "      - { bandwidth_hz: 80000000, sample_rate_hz: 98304000, name: \"80M\" }\n"
-        "      - { bandwidth_hz: 5000000, sample_rate_hz: 6144000, name: \"5M\" }\n"
         "    channels:\n"
-        "      - { channel_id: 0, track_tuner: true, bandwidth_hz: 80000000, udp_output_port: 50000 }\n"
-        "      - { channel_id: 1, center_frequency_hz: 10000000000, bandwidth_hz: 5000000, udp_output_port: 50001 }\n");
+        "      - { channel_id: 0, track_tuner: true, rates: [ { bandwidth_hz: 80000000, sample_rate_hz: 98304000 } ], udp_output_port: 50000 }\n"
+        "      - { channel_id: 1, center_frequency_hz: 10000000000, rates: [ { bandwidth_hz: 5000000, sample_rate_hz: 6144000 } ], udp_output_port: 50001 }\n");
     ck_assert_ptr_nonnull(path);
     simulator_config_t config;
     char error[128];
     ck_assert_msg(config_load_yaml(path, &config, error, sizeof(error)), "%s", error);
-    ck_assert_uint_eq(config.receivers[0].profile_count, 2);
-    ck_assert_str_eq(config.receivers[0].profiles[1].name, "5M");
     ck_assert_uint_eq(config.receivers[0].channel_count, 2);
     ck_assert_uint_eq(config.receivers[0].channels[1].bandwidth_hz, 5000000U);
     ck_assert_uint_eq(config.receivers[0].channels[1].sample_rate_hz, 6144000U);
-}
-END_TEST
-
-START_TEST(rejects_channel_bandwidth_outside_profiles_in_yaml)
-{
-    const char *path = write_temp_config_body(
-        "",
-        "    profiles:\n"
-        "      - { bandwidth_hz: 80000000, sample_rate_hz: 98304000 }\n"
-        "    channels:\n"
-        "      - { channel_id: 0, track_tuner: true, bandwidth_hz: 20000000, udp_output_port: 50000 }\n");
-    ck_assert_ptr_nonnull(path);
-    simulator_config_t config;
-    char error[128];
-    ck_assert(!config_load_yaml(path, &config, error, sizeof(error)));
-    ck_assert_str_eq(error, "unsupported_channel_bandwidth");
 }
 END_TEST
 
@@ -246,9 +220,9 @@ START_TEST(parses_class_id_and_counts_up_stream_ids)
         "class_id_information_code: 4660\n"
         "class_id_packet_code: 22136\n",
         "    channels:\n"
-        "      - { channel_id: 0, track_tuner: true, bandwidth_hz: 80000000, udp_output_port: 50000 }\n"
-        "      - { channel_id: 1, center_frequency_hz: 10000000000, bandwidth_hz: 20000000, stream_id: 4242, udp_output_port: 50001 }\n"
-        "      - { channel_id: 2, center_frequency_hz: 10001000000, bandwidth_hz: 20000000, udp_output_port: 50002 }\n");
+        "      - { channel_id: 0, track_tuner: true, rates: [ { bandwidth_hz: 80000000, sample_rate_hz: 98304000 } ], udp_output_port: 50000 }\n"
+        "      - { channel_id: 1, center_frequency_hz: 10000000000, rates: [ { bandwidth_hz: 20000000, sample_rate_hz: 24576000 } ], stream_id: 4242, udp_output_port: 50001 }\n"
+        "      - { channel_id: 2, center_frequency_hz: 10001000000, rates: [ { bandwidth_hz: 20000000, sample_rate_hz: 24576000 } ], udp_output_port: 50002 }\n");
     ck_assert_ptr_nonnull(path);
     simulator_config_t config;
     char error[128];
@@ -321,29 +295,24 @@ START_TEST(rejects_legacy_config_keys)
     ck_assert(!config_load_yaml(path, &config, error, sizeof(error)));
     ck_assert_str_eq(error, "legacy_key_udp_80mhz_output_port_use_channels");
 
-    path = write_temp_config_body("", "    bandwidth_hz: 80000000\n");
+    path = write_temp_config_body("", "    frontend_bandwidth_hz: 80000000\n");
     ck_assert_ptr_nonnull(path);
     ck_assert(!config_load_yaml(path, &config, error, sizeof(error)));
-    ck_assert_str_eq(error, "legacy_key_bandwidth_hz_use_frontend_bandwidth_hz");
-
-    path = write_temp_config_body("", "    sample_rate_hz: 98304000\n");
-    ck_assert_ptr_nonnull(path);
-    ck_assert(!config_load_yaml(path, &config, error, sizeof(error)));
-    ck_assert_str_eq(error, "legacy_key_sample_rate_hz_use_channel_profiles");
+    ck_assert_str_eq(error, "legacy_key_frontend_bandwidth_hz_use_bandwidth_hz");
 }
 END_TEST
 
-START_TEST(rejects_channel_sample_rate_key)
+START_TEST(accepts_channel_sample_rate_key)
 {
     const char *path = write_temp_config_body(
         "",
         "    channels:\n"
-        "      - { channel_id: 0, track_tuner: true, bandwidth_hz: 80000000, sample_rate_hz: 98304000, udp_output_port: 50000 }\n");
+        "      - { channel_id: 0, track_tuner: true, rates: [ { bandwidth_hz: 80000000, sample_rate_hz: 98304000 } ], udp_output_port: 50000 }\n");
     ck_assert_ptr_nonnull(path);
     simulator_config_t config;
     char error[128];
-    ck_assert(!config_load_yaml(path, &config, error, sizeof(error)));
-    ck_assert_str_eq(error, "channel_sample_rate_comes_from_profile");
+    ck_assert_msg(config_load_yaml(path, &config, error, sizeof(error)), "%s", error);
+    ck_assert_uint_eq(config.receivers[0].channels[0].sample_rate_hz, 98304000U);
 }
 END_TEST
 
@@ -421,8 +390,8 @@ START_TEST(rejects_zero_scan_rate_only_in_scan_mode)
 {
     /* Scan mode (span > front-end bandwidth) requires a positive scan rate. */
     receiver_config_t scan = valid_receiver(0, 8100, 50000);
-    scan.frequency_start_hz = 9960000000ULL;
-    scan.frequency_stop_hz = 10060000000ULL; /* 100 MHz span > 80 MHz front end -> scan */
+    scan.frequency_min_hz = 9960000000ULL;
+    scan.frequency_max_hz = 10060000000ULL; /* 100 MHz span > 80 MHz front end -> scan */
     scan.scan_rate_hz_per_s = 0.0;
     char error[128];
     ck_assert(!receiver_validate(&scan, error, sizeof(error)));
@@ -430,8 +399,8 @@ START_TEST(rejects_zero_scan_rate_only_in_scan_mode)
 
     /* Fixed mode (span <= front-end bandwidth) ignores the scan rate. */
     receiver_config_t fixed = valid_receiver(0, 8100, 50000);
-    fixed.frequency_start_hz = 9960000000ULL;
-    fixed.frequency_stop_hz = 10040000000ULL; /* 80 MHz span == front end -> fixed */
+    fixed.frequency_min_hz = 9960000000ULL;
+    fixed.frequency_max_hz = 10040000000ULL; /* 80 MHz span == front end -> fixed */
     fixed.scan_rate_hz_per_s = 0.0;
     ck_assert_msg(receiver_validate(&fixed, error, sizeof(error)), "%s", error);
 }
@@ -562,19 +531,18 @@ Suite *config_suite(void)
     tcase_add_test(tc, asset_cache_budget_defaults_to_16gib);
     tcase_add_test(tc, ddc_cache_budget_defaults_to_2gib);
     tcase_add_test(tc, loads_instance_config);
-    tcase_add_test(tc, defaults_profiles_and_stream_block_samples);
-    tcase_add_test(tc, channel_sample_rate_follows_profile);
-    tcase_add_test(tc, rejects_unsupported_channel_bandwidth);
+    tcase_add_test(tc, defaults_stream_block_samples);
+    tcase_add_test(tc, active_rate_is_first_listed);
+    tcase_add_test(tc, rejects_invalid_channel_rates);
+    tcase_add_test(tc, rejects_active_rate_not_in_list);
     tcase_add_test(tc, rejects_bandwidth_exceeding_frontend);
-    tcase_add_test(tc, rejects_invalid_profiles);
-    tcase_add_test(tc, parses_receiver_profiles_from_yaml);
-    tcase_add_test(tc, rejects_channel_bandwidth_outside_profiles_in_yaml);
+    tcase_add_test(tc, parses_channel_bandwidth_and_rate_from_yaml);
     tcase_add_test(tc, parses_class_id_and_counts_up_stream_ids);
     tcase_add_test(tc, rejects_out_of_range_class_id_oui);
     tcase_add_test(tc, rejects_out_of_range_class_id_codes);
     tcase_add_test(tc, rejects_out_of_range_stream_id);
     tcase_add_test(tc, rejects_legacy_config_keys);
-    tcase_add_test(tc, rejects_channel_sample_rate_key);
+    tcase_add_test(tc, accepts_channel_sample_rate_key);
     tcase_add_test(tc, parses_stream_cpus_range);
     tcase_add_test(tc, parses_stream_cpus_list);
     tcase_add_test(tc, legacy_stream_cpu_maps_to_single_element_set);

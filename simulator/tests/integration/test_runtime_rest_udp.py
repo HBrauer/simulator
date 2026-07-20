@@ -64,15 +64,15 @@ receivers:
     rest_bind_host: "127.0.0.1"
     rest_port: {rest_port}
     udp_output_host: "127.0.0.1"
-    frequency_start_hz: 9960000000
-    frequency_stop_hz: 10040000000
+    frequency_min_hz: 9960000000
+    frequency_max_hz: 10040000000
     scan_rate_hz_per_s: 100000000000
     channels:
-      - {{ channel_id: 0, track_tuner: true, bandwidth_hz: 80000000, udp_output_port: {udp_base} }}
-      - {{ channel_id: 1, center_frequency_hz: {ch1_center}, bandwidth_hz: 20000000, udp_output_port: {udp_base + 1} }}
-      - {{ channel_id: 2, center_frequency_hz: 10010000000, bandwidth_hz: 20000000, udp_output_port: {udp_base + 2} }}
-      - {{ channel_id: 3, center_frequency_hz: 9995000000, bandwidth_hz: 20000000, udp_output_port: {udp_base + 3} }}
-      - {{ channel_id: 4, center_frequency_hz: 10030000000, bandwidth_hz: 20000000, udp_output_port: {udp_base + 4} }}
+      - {{ channel_id: 0, track_tuner: true, rates: [ {{ bandwidth_hz: 80000000, sample_rate_hz: 98304000 }} ], udp_output_port: {udp_base} }}
+      - {{ channel_id: 1, center_frequency_hz: {ch1_center}, rates: [ {{ bandwidth_hz: 20000000, sample_rate_hz: 24576000 }}, {{ bandwidth_hz: 5000000, sample_rate_hz: 6144000 }} ], udp_output_port: {udp_base + 1} }}
+      - {{ channel_id: 2, center_frequency_hz: 10010000000, rates: [ {{ bandwidth_hz: 20000000, sample_rate_hz: 24576000 }} ], udp_output_port: {udp_base + 2} }}
+      - {{ channel_id: 3, center_frequency_hz: 9995000000, rates: [ {{ bandwidth_hz: 20000000, sample_rate_hz: 24576000 }} ], udp_output_port: {udp_base + 3} }}
+      - {{ channel_id: 4, center_frequency_hz: 10030000000, rates: [ {{ bandwidth_hz: 20000000, sample_rate_hz: 24576000 }} ], udp_output_port: {udp_base + 4} }}
 """,
         encoding="utf-8",
     )
@@ -89,28 +89,28 @@ receivers:
     rest_bind_host: "127.0.0.1"
     rest_port: {rest_port_0}
     udp_output_host: "127.0.0.1"
-    frequency_start_hz: 9960000000
-    frequency_stop_hz: 10040000000
+    frequency_min_hz: 9960000000
+    frequency_max_hz: 10040000000
     scan_rate_hz_per_s: 100000000000
     channels:
-      - {{ channel_id: 0, track_tuner: true, bandwidth_hz: 80000000, udp_output_port: {udp_base} }}
-      - {{ channel_id: 1, center_frequency_hz: 10005000000, bandwidth_hz: 20000000, udp_output_port: {udp_base + 1} }}
-      - {{ channel_id: 2, center_frequency_hz: 10010000000, bandwidth_hz: 20000000, udp_output_port: {udp_base + 2} }}
-      - {{ channel_id: 3, center_frequency_hz: 9995000000, bandwidth_hz: 20000000, udp_output_port: {udp_base + 3} }}
-      - {{ channel_id: 4, center_frequency_hz: 10030000000, bandwidth_hz: 20000000, udp_output_port: {udp_base + 4} }}
+      - {{ channel_id: 0, track_tuner: true, rates: [ {{ bandwidth_hz: 80000000, sample_rate_hz: 98304000 }} ], udp_output_port: {udp_base} }}
+      - {{ channel_id: 1, center_frequency_hz: 10005000000, rates: [ {{ bandwidth_hz: 20000000, sample_rate_hz: 24576000 }} ], udp_output_port: {udp_base + 1} }}
+      - {{ channel_id: 2, center_frequency_hz: 10010000000, rates: [ {{ bandwidth_hz: 20000000, sample_rate_hz: 24576000 }} ], udp_output_port: {udp_base + 2} }}
+      - {{ channel_id: 3, center_frequency_hz: 9995000000, rates: [ {{ bandwidth_hz: 20000000, sample_rate_hz: 24576000 }} ], udp_output_port: {udp_base + 3} }}
+      - {{ channel_id: 4, center_frequency_hz: 10030000000, rates: [ {{ bandwidth_hz: 20000000, sample_rate_hz: 24576000 }} ], udp_output_port: {udp_base + 4} }}
   - receiver_id: 1
     rest_bind_host: "127.0.0.1"
     rest_port: {rest_port_1}
     udp_output_host: "127.0.0.1"
-    frequency_start_hz: 19960000000
-    frequency_stop_hz: 20040000000
+    frequency_min_hz: 19960000000
+    frequency_max_hz: 20040000000
     scan_rate_hz_per_s: 100000000000
     channels:
-      - {{ channel_id: 0, track_tuner: true, bandwidth_hz: 80000000, udp_output_port: {udp_base + 5} }}
-      - {{ channel_id: 1, center_frequency_hz: 20000000000, bandwidth_hz: 20000000, udp_output_port: {udp_base + 6} }}
-      - {{ channel_id: 2, center_frequency_hz: 20010000000, bandwidth_hz: 20000000, udp_output_port: {udp_base + 7} }}
-      - {{ channel_id: 3, center_frequency_hz: 19990000000, bandwidth_hz: 20000000, udp_output_port: {udp_base + 8} }}
-      - {{ channel_id: 4, center_frequency_hz: 20030000000, bandwidth_hz: 20000000, udp_output_port: {udp_base + 9} }}
+      - {{ channel_id: 0, track_tuner: true, rates: [ {{ bandwidth_hz: 80000000, sample_rate_hz: 98304000 }} ], udp_output_port: {udp_base + 5} }}
+      - {{ channel_id: 1, center_frequency_hz: 20000000000, rates: [ {{ bandwidth_hz: 20000000, sample_rate_hz: 24576000 }} ], udp_output_port: {udp_base + 6} }}
+      - {{ channel_id: 2, center_frequency_hz: 20010000000, rates: [ {{ bandwidth_hz: 20000000, sample_rate_hz: 24576000 }} ], udp_output_port: {udp_base + 7} }}
+      - {{ channel_id: 3, center_frequency_hz: 19990000000, rates: [ {{ bandwidth_hz: 20000000, sample_rate_hz: 24576000 }} ], udp_output_port: {udp_base + 8} }}
+      - {{ channel_id: 4, center_frequency_hz: 20030000000, rates: [ {{ bandwidth_hz: 20000000, sample_rate_hz: 24576000 }} ], udp_output_port: {udp_base + 9} }}
 """,
         encoding="utf-8",
     )
@@ -164,10 +164,10 @@ def _assert_receiver_status_shape(status):
         {
             "receiver_id",
             "effective_mode",
-            "frequency_start_hz",
-            "frequency_stop_hz",
+            "frequency_min_hz",
+            "frequency_max_hz",
             "center_frequency_hz",
-            "frontend_bandwidth_hz",
+            "bandwidth_hz",
             "scan_rate_hz_per_s",
             "output_scale",
             "rf_reference_power_dbm",
@@ -189,7 +189,7 @@ def _assert_channel_shape(channel):
             "configured_center_frequency_hz",
             "bandwidth_hz",
             "sample_rate_hz",
-            "profile",
+            "rates",
             "in_frontend_window",
             "stream_enabled",
             "active",
@@ -516,7 +516,7 @@ def test_runtime_rest_and_udp_stream(tmp_path):
 
         code, error = _request_json_error(
             f"http://127.0.0.1:{rest_port}/api/v1/frequency-range",
-            {"frequency_start_hz": 1000},
+            {"frequency_min_hz": 1000},
         )
         assert code == 400
         assert error["error"]["code"] == "invalid_request"
@@ -524,8 +524,8 @@ def test_runtime_rest_and_udp_stream(tmp_path):
         code, updated = _request_json(
             f"http://127.0.0.1:{rest_port}/api/v1/frequency-range",
             {
-                "frequency_start_hz": 9960000000,
-                "frequency_stop_hz": 10060000000,
+                "frequency_min_hz": 9960000000,
+                "frequency_max_hz": 10060000000,
                 "scan_rate_hz_per_s": 100000000000,
             },
         )
@@ -551,26 +551,21 @@ def test_capabilities_and_channel_configuration(tmp_path):
             {
                 "receiver_id",
                 "frequency_min_hz",
-                "frequency_max_hz",
-                "frontend_bandwidth_hz",
+                "simulator_frequency_max_hz",
+                "bandwidth_hz",
                 "tuner",
                 "channel_count",
-                "profiles",
                 "iq_format",
                 "udp_output_host",
                 "config_epoch",
             },
         )
         assert capabilities["receiver_id"] == 0
-        assert capabilities["frequency_max_hz"] == 40000000000
-        assert capabilities["frontend_bandwidth_hz"] == 80000000
+        assert capabilities["simulator_frequency_max_hz"] == 100000000000
+        assert capabilities["bandwidth_hz"] == 80000000
         assert capabilities["channel_count"] == 5
         assert capabilities["iq_format"] == "vita49_2_ci16"
         assert capabilities["tuner"]["mode"] == "fixed"
-        profile_bandwidths = {profile["bandwidth_hz"] for profile in capabilities["profiles"]}
-        assert {80000000, 20000000, 5000000} <= profile_bandwidths
-        for profile in capabilities["profiles"]:
-            assert profile["sample_rate_hz"] >= profile["bandwidth_hz"]
         epoch_0 = capabilities["config_epoch"]
 
         channels = _wait_json(f"http://127.0.0.1:{rest_port}/api/v1/channels")
@@ -586,10 +581,10 @@ def test_capabilities_and_channel_configuration(tmp_path):
         _assert_channel_shape(channel_1)
         assert channel_1["channel_id"] == 1
 
-        # Retune + narrow the channel; the sample rate must follow the profile.
+        # Retune + narrow the channel; bandwidth and sample rate are set together.
         code, updated = _request_json(
             f"http://127.0.0.1:{rest_port}/api/v1/channels/1",
-            {"center_frequency_hz": 10012000000, "bandwidth_hz": 5000000},
+            {"center_frequency_hz": 10012000000, "bandwidth_hz": 5000000, "sample_rate_hz": 6144000},
             method="PUT",
         )
         assert code == 200
@@ -629,12 +624,20 @@ def test_capabilities_and_channel_configuration(tmp_path):
 
         code, error = _request_json_error(
             f"http://127.0.0.1:{rest_port}/api/v1/channels/1",
-            {"bandwidth_hz": 12345},
+            {"bandwidth_hz": 20000000, "sample_rate_hz": 1000},
             method="PUT",
         )
         assert code == 400
-        assert error["error"]["code"] == "unsupported_bandwidth"
-        assert "80000000" in error["error"]["message"]
+        assert error["error"]["code"] == "unsupported_channel_rate"
+
+        # bandwidth_hz and sample_rate_hz must be set together.
+        code, error = _request_json_error(
+            f"http://127.0.0.1:{rest_port}/api/v1/channels/1",
+            {"bandwidth_hz": 5000000},
+            method="PUT",
+        )
+        assert code == 400
+        assert error["error"]["code"] == "invalid_request"
 
         # A tuner-tracking channel rejects a direct retune.
         code, error = _request_json_error(
@@ -648,7 +651,7 @@ def test_capabilities_and_channel_configuration(tmp_path):
         # Unless it is detached from the tuner in the same request.
         code, updated = _request_json(
             f"http://127.0.0.1:{rest_port}/api/v1/channels/0",
-            {"track_tuner": False, "center_frequency_hz": 10001000000, "bandwidth_hz": 20000000},
+            {"track_tuner": False, "center_frequency_hz": 10001000000},
             method="PUT",
         )
         assert code == 200
@@ -684,7 +687,7 @@ def test_channel_bandwidth_change_switches_stream_rate(tmp_path):
 
         code, updated = _request_json(
             f"http://127.0.0.1:{rest_port}/api/v1/channels/1",
-            {"bandwidth_hz": 5000000},
+            {"bandwidth_hz": 5000000, "sample_rate_hz": 6144000},
             method="PUT",
         )
         assert code == 200

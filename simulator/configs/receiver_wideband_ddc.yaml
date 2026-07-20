@@ -26,44 +26,39 @@ receivers:
     rest_port: 8120
     udp_output_host: "127.0.0.1"
     # Fixed tuner centered on the recording: 100-180 MHz span, 80 MHz front end.
-    frequency_start_hz: 100000000
-    frequency_stop_hz: 180000000
-    frontend_bandwidth_hz: 80000000
+    frequency_min_hz: 100000000
+    frequency_max_hz: 180000000
+    bandwidth_hz: 80000000
     scan_rate_hz_per_s: 0
     rf_reference_power_dbm: -55.0
-    profiles:
-      - { bandwidth_hz: 80000000, sample_rate_hz: 98304000, name: "80M" }
-      - { bandwidth_hz: 500000, sample_rate_hz: 768000, name: "500K" }
-      - { bandwidth_hz: 100000, sample_rate_hz: 128000, name: "100K" }
-      - { bandwidth_hz: 10000, sample_rate_hz: 16000, name: "10K" }
-      - { bandwidth_hz: 1000, sample_rate_hz: 2000, name: "1K" }
     channels:
       - channel_id: 0
         track_tuner: true
-        bandwidth_hz: 80000000
+        rates:
+          - { bandwidth_hz: 80000000, sample_rate_hz: 98304000 }
         stream_enabled: true
         udp_output_port: 52000
       # 500 kHz DDCs
-      - { channel_id: 1, center_frequency_hz: 104500000, bandwidth_hz: 500000, stream_enabled: true, udp_output_port: 52001 }
-      - { channel_id: 2, center_frequency_hz: 112000000, bandwidth_hz: 500000, stream_enabled: true, udp_output_port: 52002 }
-      - { channel_id: 3, center_frequency_hz: 133250000, bandwidth_hz: 500000, stream_enabled: true, udp_output_port: 52003 }
-      - { channel_id: 4, center_frequency_hz: 158000000, bandwidth_hz: 500000, stream_enabled: true, udp_output_port: 52004 }
-      - { channel_id: 5, center_frequency_hz: 176500000, bandwidth_hz: 500000, stream_enabled: true, udp_output_port: 52005 }
+      - { channel_id: 1, center_frequency_hz: 104500000, rates: [ { bandwidth_hz: 500000, sample_rate_hz: 768000 } ], stream_enabled: true, udp_output_port: 52001 }
+      - { channel_id: 2, center_frequency_hz: 112000000, rates: [ { bandwidth_hz: 500000, sample_rate_hz: 768000 } ], stream_enabled: true, udp_output_port: 52002 }
+      - { channel_id: 3, center_frequency_hz: 133250000, rates: [ { bandwidth_hz: 500000, sample_rate_hz: 768000 } ], stream_enabled: true, udp_output_port: 52003 }
+      - { channel_id: 4, center_frequency_hz: 158000000, rates: [ { bandwidth_hz: 500000, sample_rate_hz: 768000 } ], stream_enabled: true, udp_output_port: 52004 }
+      - { channel_id: 5, center_frequency_hz: 176500000, rates: [ { bandwidth_hz: 500000, sample_rate_hz: 768000 } ], stream_enabled: true, udp_output_port: 52005 }
       # 100 kHz DDCs (119.4 MHz is the worked example from the use case)
-      - { channel_id: 6, center_frequency_hz: 119400000, bandwidth_hz: 100000, stream_enabled: true, udp_output_port: 52006 }
-      - { channel_id: 7, center_frequency_hz: 121150000, bandwidth_hz: 100000, stream_enabled: true, udp_output_port: 52007 }
-      - { channel_id: 8, center_frequency_hz: 127800000, bandwidth_hz: 100000, stream_enabled: true, udp_output_port: 52008 }
-      - { channel_id: 9, center_frequency_hz: 141020000, bandwidth_hz: 100000, stream_enabled: true, udp_output_port: 52009 }
-      - { channel_id: 10, center_frequency_hz: 149500000, bandwidth_hz: 100000, stream_enabled: true, udp_output_port: 52010 }
-      - { channel_id: 11, center_frequency_hz: 155725000, bandwidth_hz: 100000, stream_enabled: true, udp_output_port: 52011 }
-      - { channel_id: 12, center_frequency_hz: 163300000, bandwidth_hz: 100000, stream_enabled: true, udp_output_port: 52012 }
-      - { channel_id: 13, center_frequency_hz: 171000000, bandwidth_hz: 100000, stream_enabled: true, udp_output_port: 52013 }
+      - { channel_id: 6, center_frequency_hz: 119400000, rates: [ { bandwidth_hz: 100000, sample_rate_hz: 128000 } ], stream_enabled: true, udp_output_port: 52006 }
+      - { channel_id: 7, center_frequency_hz: 121150000, rates: [ { bandwidth_hz: 100000, sample_rate_hz: 128000 } ], stream_enabled: true, udp_output_port: 52007 }
+      - { channel_id: 8, center_frequency_hz: 127800000, rates: [ { bandwidth_hz: 100000, sample_rate_hz: 128000 } ], stream_enabled: true, udp_output_port: 52008 }
+      - { channel_id: 9, center_frequency_hz: 141020000, rates: [ { bandwidth_hz: 100000, sample_rate_hz: 128000 } ], stream_enabled: true, udp_output_port: 52009 }
+      - { channel_id: 10, center_frequency_hz: 149500000, rates: [ { bandwidth_hz: 100000, sample_rate_hz: 128000 } ], stream_enabled: true, udp_output_port: 52010 }
+      - { channel_id: 11, center_frequency_hz: 155725000, rates: [ { bandwidth_hz: 100000, sample_rate_hz: 128000 } ], stream_enabled: true, udp_output_port: 52011 }
+      - { channel_id: 12, center_frequency_hz: 163300000, rates: [ { bandwidth_hz: 100000, sample_rate_hz: 128000 } ], stream_enabled: true, udp_output_port: 52012 }
+      - { channel_id: 13, center_frequency_hz: 171000000, rates: [ { bandwidth_hz: 100000, sample_rate_hz: 128000 } ], stream_enabled: true, udp_output_port: 52013 }
       # 10 kHz DDCs
-      - { channel_id: 14, center_frequency_hz: 106230000, bandwidth_hz: 10000, stream_enabled: true, udp_output_port: 52014 }
-      - { channel_id: 15, center_frequency_hz: 118005000, bandwidth_hz: 10000, stream_enabled: true, udp_output_port: 52015 }
-      - { channel_id: 16, center_frequency_hz: 137450000, bandwidth_hz: 10000, stream_enabled: true, udp_output_port: 52016 }
-      - { channel_id: 17, center_frequency_hz: 152370000, bandwidth_hz: 10000, stream_enabled: true, udp_output_port: 52017 }
-      - { channel_id: 18, center_frequency_hz: 169915000, bandwidth_hz: 10000, stream_enabled: true, udp_output_port: 52018 }
+      - { channel_id: 14, center_frequency_hz: 106230000, rates: [ { bandwidth_hz: 10000, sample_rate_hz: 16000 } ], stream_enabled: true, udp_output_port: 52014 }
+      - { channel_id: 15, center_frequency_hz: 118005000, rates: [ { bandwidth_hz: 10000, sample_rate_hz: 16000 } ], stream_enabled: true, udp_output_port: 52015 }
+      - { channel_id: 16, center_frequency_hz: 137450000, rates: [ { bandwidth_hz: 10000, sample_rate_hz: 16000 } ], stream_enabled: true, udp_output_port: 52016 }
+      - { channel_id: 17, center_frequency_hz: 152370000, rates: [ { bandwidth_hz: 10000, sample_rate_hz: 16000 } ], stream_enabled: true, udp_output_port: 52017 }
+      - { channel_id: 18, center_frequency_hz: 169915000, rates: [ { bandwidth_hz: 10000, sample_rate_hz: 16000 } ], stream_enabled: true, udp_output_port: 52018 }
       # 1 kHz DDCs (ratio 49152:1 -- the extreme end)
-      - { channel_id: 19, center_frequency_hz: 111003000, bandwidth_hz: 1000, stream_enabled: true, udp_output_port: 52019 }
-      - { channel_id: 20, center_frequency_hz: 146900500, bandwidth_hz: 1000, stream_enabled: true, udp_output_port: 52020 }
+      - { channel_id: 19, center_frequency_hz: 111003000, rates: [ { bandwidth_hz: 1000, sample_rate_hz: 2000 } ], stream_enabled: true, udp_output_port: 52019 }
+      - { channel_id: 20, center_frequency_hz: 146900500, rates: [ { bandwidth_hz: 1000, sample_rate_hz: 2000 } ], stream_enabled: true, udp_output_port: 52020 }

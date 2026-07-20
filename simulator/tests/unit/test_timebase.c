@@ -16,9 +16,9 @@ END_TEST
 START_TEST(scanner_is_deterministic)
 {
     receiver_config_t r = {
-        .frequency_start_hz = 9960000000ULL,
-        .frequency_stop_hz = 10060000000ULL,
-        .frontend_bandwidth_hz = SIM_RECEIVER_BANDWIDTH_HZ,
+        .frequency_min_hz = 9960000000ULL,
+        .frequency_max_hz = 10060000000ULL,
+        .bandwidth_hz = SIM_RECEIVER_BANDWIDTH_HZ,
         .scan_rate_hz_per_s = 100000000000.0,
     };
     ck_assert_uint_eq(receiver_center_frequency_hz(&r, 500000ULL), 10010000000ULL);
@@ -28,9 +28,9 @@ END_TEST
 START_TEST(channel_window_check_requires_full_channel_band_inside_frontend_window)
 {
     receiver_config_t r = {
-        .frequency_start_hz = 9960000000ULL,
-        .frequency_stop_hz = 10040000000ULL,
-        .frontend_bandwidth_hz = SIM_RECEIVER_BANDWIDTH_HZ,
+        .frequency_min_hz = 9960000000ULL,
+        .frequency_max_hz = 10040000000ULL,
+        .bandwidth_hz = SIM_RECEIVER_BANDWIDTH_HZ,
         .scan_rate_hz_per_s = 100000000000.0,
     };
     channel_config_t inside = {

@@ -222,6 +222,20 @@ static bool parse_channel(json_t *entry, control_channel_t *channel)
     channel->udp_port = (uint16_t)json_u64(entry, "udp_port");
     channel->stream_enabled = json_flag(entry, "stream_enabled");
     channel->in_frontend_window = json_flag(entry, "in_frontend_window");
+    channel->rate_count = 0;
+    json_t *rates = json_object_get(entry, "rates");
+    if (json_is_array(rates)) {
+        size_t count = json_array_size(rates);
+        if (count > CONTROL_MAX_CHANNEL_RATES) {
+            count = CONTROL_MAX_CHANNEL_RATES;
+        }
+        for (size_t i = 0; i < count; i++) {
+            json_t *rate = json_array_get(rates, i);
+            channel->rates[i].bandwidth_hz = (uint32_t)json_u64(rate, "bandwidth_hz");
+            channel->rates[i].sample_rate_hz = (uint32_t)json_u64(rate, "sample_rate_hz");
+        }
+        channel->rate_count = count;
+    }
     return channel->udp_port != 0 && channel->sample_rate_hz != 0;
 }
 
@@ -267,12 +281,12 @@ bool control_client_init(control_client_t *client, const char *base_url, char *e
     }
     client->receiver_id = (uint32_t)json_u64(capabilities, "receiver_id");
     client->frequency_min_hz = json_u64(capabilities, "frequency_min_hz");
-    client->frequency_max_hz = json_u64(capabilities, "frequency_max_hz");
-    client->frontend_bandwidth_hz = json_u64(capabilities, "frontend_bandwidth_hz");
+    client->simulator_frequency_max_hz = json_u64(capabilities, "simulator_frequency_max_hz");
+    client->bandwidth_hz = json_u64(capabilities, "bandwidth_hz");
     json_t *tuner = json_object_get(capabilities, "tuner");
     if (json_is_object(tuner)) {
-        client->tuner_start_hz = json_u64(tuner, "frequency_start_hz");
-        client->tuner_stop_hz = json_u64(tuner, "frequency_stop_hz");
+        client->tuner_start_hz = json_u64(tuner, "frequency_min_hz");
+        client->tuner_stop_hz = json_u64(tuner, "frequency_max_hz");
         json_t *scan_rate = json_object_get(tuner, "scan_rate_hz_per_s");
         if (json_is_number(scan_rate)) {
             client->scan_rate_hz_per_s = json_number_value(scan_rate);
@@ -282,45 +296,36 @@ bool control_client_init(control_client_t *client, const char *base_url, char *e
     if (json_is_string(udp_host)) {
         snprintf(client->udp_output_host, sizeof(client->udp_output_host), "%s", json_string_value(udp_host));
     }
-    json_t *profiles = json_object_get(capabilities, "profiles");
-    if (!json_is_array(profiles) || json_array_size(profiles) == 0 ||
-        json_array_size(profiles) > CONTROL_MAX_PROFILES) {
-        json_decref(capabilities);
-        set_error(error, error_size, "unexpected capabilities response");
-        return false;
-    }
-    client->profile_count = json_array_size(profiles);
-    for (size_t i = 0; i < client->profile_count; i++) {
-        json_t *entry = json_array_get(profiles, i);
-        client->profiles[i].bandwidth_hz = (uint32_t)json_u64(entry, "bandwidth_hz");
-        client->profiles[i].sample_rate_hz = (uint32_t)json_u64(entry, "sample_rate_hz");
-        json_t *name = json_object_get(entry, "name");
-        snprintf(client->profiles[i].name,
-                 sizeof(client->profiles[i].name),
-                 "%s",
-                 json_is_string(name) ? json_string_value(name) : "");
-    }
     json_decref(capabilities);
 
     return control_client_refresh(client, error, error_size);
 }
 
-bool control_client_set_channel(control_client_t *client, uint32_t channel_id, const uint64_t *center_frequency_hz, const uint32_t *bandwidth_hz, char *error, size_t error_size)
+bool control_client_set_channel(control_client_t *client, uint32_t channel_id, const uint64_t *center_frequency_hz, const uint32_t *bandwidth_hz, const uint32_t *sample_rate_hz, char *error, size_t error_size)
 {
-    if (channel_id >= client->channel_count || (center_frequency_hz == NULL && bandwidth_hz == NULL)) {
+    if (channel_id >= client->channel_count ||
+        (center_frequency_hz == NULL && bandwidth_hz == NULL && sample_rate_hz == NULL)) {
         set_error(error, error_size, "invalid channel update");
         return false;
     }
     char path[64];
     snprintf(path, sizeof(path), "/api/v1/channels/%u", channel_id);
-    char body[128];
-    if (center_frequency_hz != NULL && bandwidth_hz != NULL) {
-        snprintf(body, sizeof(body), "{\"center_frequency_hz\":%llu,\"bandwidth_hz\":%u}", (unsigned long long)*center_frequency_hz, *bandwidth_hz);
-    } else if (center_frequency_hz != NULL) {
-        snprintf(body, sizeof(body), "{\"center_frequency_hz\":%llu}", (unsigned long long)*center_frequency_hz);
-    } else {
-        snprintf(body, sizeof(body), "{\"bandwidth_hz\":%u}", *bandwidth_hz);
+    char body[160];
+    size_t n = (size_t)snprintf(body, sizeof(body), "{");
+    const char *sep = "";
+    if (center_frequency_hz != NULL) {
+        n += (size_t)snprintf(body + n, sizeof(body) - n, "%s\"center_frequency_hz\":%llu", sep, (unsigned long long)*center_frequency_hz);
+        sep = ",";
     }
+    if (bandwidth_hz != NULL) {
+        n += (size_t)snprintf(body + n, sizeof(body) - n, "%s\"bandwidth_hz\":%u", sep, *bandwidth_hz);
+        sep = ",";
+    }
+    if (sample_rate_hz != NULL) {
+        n += (size_t)snprintf(body + n, sizeof(body) - n, "%s\"sample_rate_hz\":%u", sep, *sample_rate_hz);
+        sep = ",";
+    }
+    snprintf(body + n, sizeof(body) - n, "}");
     json_t *updated = request_json(client, "PUT", path, body, error, error_size);
     if (updated == NULL) {
         return false;
@@ -336,13 +341,13 @@ bool control_client_set_channel(control_client_t *client, uint32_t channel_id, c
 bool control_client_set_frequency_range(control_client_t *client, uint64_t start_hz, uint64_t stop_hz, char *error, size_t error_size)
 {
     char body[128];
-    snprintf(body, sizeof(body), "{\"frequency_start_hz\":%llu,\"frequency_stop_hz\":%llu}", (unsigned long long)start_hz, (unsigned long long)stop_hz);
+    snprintf(body, sizeof(body), "{\"frequency_min_hz\":%llu,\"frequency_max_hz\":%llu}", (unsigned long long)start_hz, (unsigned long long)stop_hz);
     json_t *response = request_json(client, "POST", "/api/v1/frequency-range", body, error, error_size);
     if (response == NULL) {
         return false;
     }
-    const uint64_t new_start = json_u64(response, "frequency_start_hz");
-    const uint64_t new_stop = json_u64(response, "frequency_stop_hz");
+    const uint64_t new_start = json_u64(response, "frequency_min_hz");
+    const uint64_t new_stop = json_u64(response, "frequency_max_hz");
     json_decref(response);
     if (new_start == 0U || new_stop <= new_start) {
         set_error(error, error_size, "unexpected frequency-range response");

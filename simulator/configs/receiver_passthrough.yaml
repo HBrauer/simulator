@@ -1,9 +1,9 @@
 # Passthrough replay: channel 1 is dedicated to streaming a recorded capture verbatim.
 # The scenario (replay_passthrough.yaml) carries one capture per bandwidth (1M / 20M / 80M).
-# Channel 1 defaults to the full 80 MHz / 98.304 MS/s profile and streams that capture with no
-# resampling; retune its bandwidth via REST (PUT /api/v1/channels/1) to 20M or 1M to select a
-# different variant. Retuning to a bandwidth with no matching variant renders silence --
-# passthrough never resamples.
+# Channel 1 is configured for the full 80 MHz / 98.304 MS/s and streams that capture with no
+# resampling; retune its bandwidth_hz + sample_rate_hz via REST (PUT /api/v1/channels/1) to
+# 20 MHz / 24.576 MS/s or 1 MHz / 1.536 MS/s to select a different variant. Retuning to a
+# bandwidth/rate with no matching variant renders silence -- passthrough never resamples.
 schema_version: 1
 instance_id: "receiver_passthrough"
 scenario_file: "simulator/scenarios/replay_passthrough.yaml"
@@ -15,17 +15,13 @@ receivers:
     rest_bind_host: "127.0.0.1"
     rest_port: 8111
     udp_output_host: "127.0.0.1"
-    frequency_start_hz: 60000000
-    frequency_stop_hz: 140000000
-    frontend_bandwidth_hz: 80000000
+    frequency_min_hz: 60000000
+    frequency_max_hz: 140000000
+    bandwidth_hz: 80000000
     scan_rate_hz_per_s: 100000000000
     # Matches the source's power_dbm exactly (with default output_scale 1.0), so passthrough
     # takes the literal-memcpy branch (gain == 1.0) instead of a scaled copy.
     rf_reference_power_dbm: -55.0
-    profiles:
-      - { bandwidth_hz: 80000000, sample_rate_hz: 98304000, name: "80M" }
-      - { bandwidth_hz: 20000000, sample_rate_hz: 24576000, name: "20M" }
-      - { bandwidth_hz: 1000000, sample_rate_hz: 1536000, name: "1M" }
     channels:
       # Channel 0: wideband 80 MHz reference stream (tracks the tuner). Left DISABLED by default:
       # a second 80 MHz stream doubles loopback traffic to ~196 MS/s (~786 MB/s) and steals CPU
@@ -35,12 +31,18 @@ receivers:
       # receive buffer (see the README note) and are viewing this channel, not channel 1.
       - channel_id: 0
         track_tuner: true
-        bandwidth_hz: 80000000
+        rates:
+          - { bandwidth_hz: 80000000, sample_rate_hz: 98304000 }
         stream_enabled: false
         udp_output_port: 51100
-      # Channel 1: dedicated 80 MHz passthrough replay at 100 MHz -- the channel this demo streams.
+      # Channel 1: dedicated passthrough replay at 100 MHz -- the channel this demo streams. It
+      # lists all three recorded variants; the first (80 MHz) is active at load, and REST retunes
+      # among them (a rate with no matching capture renders silence -- passthrough never resamples).
       - channel_id: 1
         center_frequency_hz: 100000000
-        bandwidth_hz: 80000000
+        rates:
+          - { bandwidth_hz: 80000000, sample_rate_hz: 98304000 }
+          - { bandwidth_hz: 20000000, sample_rate_hz: 24576000 }
+          - { bandwidth_hz:  1000000, sample_rate_hz:  1536000 }
         stream_enabled: true
         udp_output_port: 51101

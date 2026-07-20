@@ -6,15 +6,15 @@
 
 receiver_mode_t receiver_effective_mode(const receiver_config_t *receiver)
 {
-    return (receiver->frequency_stop_hz - receiver->frequency_start_hz <= receiver->frontend_bandwidth_hz)
+    return (receiver->frequency_max_hz - receiver->frequency_min_hz <= receiver->bandwidth_hz)
         ? RECEIVER_MODE_FIXED
         : RECEIVER_MODE_SCAN;
 }
 
 uint64_t receiver_fixed_center_hz(const receiver_config_t *receiver)
 {
-    return receiver->frequency_start_hz / 2ULL + receiver->frequency_stop_hz / 2ULL +
-        ((receiver->frequency_start_hz & 1ULL) && (receiver->frequency_stop_hz & 1ULL) ? 1ULL : 0ULL);
+    return receiver->frequency_min_hz / 2ULL + receiver->frequency_max_hz / 2ULL +
+        ((receiver->frequency_min_hz & 1ULL) && (receiver->frequency_max_hz & 1ULL) ? 1ULL : 0ULL);
 }
 
 uint64_t receiver_center_frequency_hz(const receiver_config_t *receiver, uint64_t scenario_time_ns)
@@ -24,12 +24,12 @@ uint64_t receiver_center_frequency_hz(const receiver_config_t *receiver, uint64_
     }
 
     if (!(receiver->scan_rate_hz_per_s > 0.0)) {
-        return receiver->frequency_start_hz; /* validation rejects this; stay defensive */
+        return receiver->frequency_min_hz; /* validation rejects this; stay defensive */
     }
-    const double span = (double)(receiver->frequency_stop_hz - receiver->frequency_start_hz);
+    const double span = (double)(receiver->frequency_max_hz - receiver->frequency_min_hz);
     const double t = (double)scenario_time_ns / 1000000000.0;
     const double position = fmod(receiver->scan_rate_hz_per_s * t, span);
-    return receiver->frequency_start_hz + (uint64_t)llround(position);
+    return receiver->frequency_min_hz + (uint64_t)llround(position);
 }
 
 uint64_t receiver_channel_center_hz(const receiver_config_t *receiver, const channel_config_t *channel, uint64_t scenario_time_ns)
@@ -45,46 +45,30 @@ uint64_t receiver_channel_center_hz(const receiver_config_t *receiver, const cha
 bool receiver_channel_in_window(const receiver_config_t *receiver, const channel_config_t *channel, uint64_t scenario_time_ns)
 {
     if (channel->track_tuner) {
-        return (uint64_t)channel->bandwidth_hz <= receiver->frontend_bandwidth_hz;
+        return (uint64_t)channel->bandwidth_hz <= receiver->bandwidth_hz;
     }
     const uint64_t receiver_center = receiver_center_frequency_hz(receiver, scenario_time_ns);
-    const int64_t receiver_low = (int64_t)receiver_center - (int64_t)(receiver->frontend_bandwidth_hz / 2ULL);
-    const int64_t receiver_high = (int64_t)receiver_center + (int64_t)(receiver->frontend_bandwidth_hz / 2ULL);
+    const int64_t receiver_low = (int64_t)receiver_center - (int64_t)(receiver->bandwidth_hz / 2ULL);
+    const int64_t receiver_high = (int64_t)receiver_center + (int64_t)(receiver->bandwidth_hz / 2ULL);
     const int64_t channel_low = (int64_t)channel->center_frequency_hz - (int64_t)(channel->bandwidth_hz / 2U);
     const int64_t channel_high = (int64_t)channel->center_frequency_hz + (int64_t)(channel->bandwidth_hz / 2U);
     return channel_low >= receiver_low && channel_high <= receiver_high;
 }
 
-const channel_profile_t *receiver_find_profile(const receiver_config_t *receiver, uint32_t bandwidth_hz)
+const channel_rate_t *channel_find_rate(const channel_config_t *channel, uint32_t bandwidth_hz, uint32_t sample_rate_hz)
 {
-    for (size_t i = 0; i < receiver->profile_count; i++) {
-        if (receiver->profiles[i].bandwidth_hz == bandwidth_hz) {
-            return &receiver->profiles[i];
+    for (size_t i = 0; i < channel->rate_count; i++) {
+        if (channel->rates[i].bandwidth_hz == bandwidth_hz && channel->rates[i].sample_rate_hz == sample_rate_hz) {
+            return &channel->rates[i];
         }
     }
     return NULL;
 }
 
-/* Built-in profile table used when the instance YAML declares none. The pairs keep the
- * historical 80 MHz / 20 MHz rates and extend the same 1.2288 rate-to-bandwidth family. */
-void receiver_default_profiles(receiver_config_t *receiver)
-{
-    static const channel_profile_t defaults[] = {
-        {.bandwidth_hz = 80000000U, .sample_rate_hz = 98304000U, .name = "80M"},
-        {.bandwidth_hz = 40000000U, .sample_rate_hz = 49152000U, .name = "40M"},
-        {.bandwidth_hz = 20000000U, .sample_rate_hz = 24576000U, .name = "20M"},
-        {.bandwidth_hz = 10000000U, .sample_rate_hz = 12288000U, .name = "10M"},
-        {.bandwidth_hz = 5000000U, .sample_rate_hz = 6144000U, .name = "5M"},
-        {.bandwidth_hz = 1000000U, .sample_rate_hz = 1536000U, .name = "1M"},
-    };
-    receiver->profile_count = sizeof(defaults) / sizeof(defaults[0]);
-    memcpy(receiver->profiles, defaults, sizeof(defaults));
-}
-
 bool receiver_validate(const receiver_config_t *receiver, char *error, size_t error_size)
 {
-    if (receiver->frequency_start_hz > SIM_MAX_RF_HZ || receiver->frequency_stop_hz > SIM_MAX_RF_HZ ||
-        receiver->frequency_stop_hz <= receiver->frequency_start_hz) {
+    if (receiver->frequency_min_hz > SIM_MAX_RF_HZ || receiver->frequency_max_hz > SIM_MAX_RF_HZ ||
+        receiver->frequency_max_hz <= receiver->frequency_min_hz) {
         snprintf(error, error_size, "invalid_frequency");
         return false;
     }
@@ -92,7 +76,7 @@ bool receiver_validate(const receiver_config_t *receiver, char *error, size_t er
         snprintf(error, error_size, "invalid_port");
         return false;
     }
-    if (receiver->frontend_bandwidth_hz == 0ULL) {
+    if (receiver->bandwidth_hz == 0ULL) {
         snprintf(error, error_size, "invalid_frontend_bandwidth");
         return false;
     }
@@ -105,23 +89,6 @@ bool receiver_validate(const receiver_config_t *receiver, char *error, size_t er
         snprintf(error, error_size, "invalid_scan_rate");
         return false;
     }
-    if (receiver->profile_count == 0 || receiver->profile_count > SIM_MAX_PROFILES) {
-        snprintf(error, error_size, "invalid_profiles");
-        return false;
-    }
-    for (size_t i = 0; i < receiver->profile_count; i++) {
-        const channel_profile_t *profile = &receiver->profiles[i];
-        if (profile->bandwidth_hz == 0U || profile->sample_rate_hz < profile->bandwidth_hz) {
-            snprintf(error, error_size, "invalid_profile");
-            return false;
-        }
-        for (size_t j = i + 1; j < receiver->profile_count; j++) {
-            if (receiver->profiles[j].bandwidth_hz == profile->bandwidth_hz) {
-                snprintf(error, error_size, "duplicate_profile_bandwidth");
-                return false;
-            }
-        }
-    }
     if (receiver->channel_count == 0 || receiver->channel_count > SIM_MAX_CHANNELS) {
         snprintf(error, error_size, "invalid_channels");
         return false;
@@ -133,13 +100,24 @@ bool receiver_validate(const receiver_config_t *receiver, char *error, size_t er
             snprintf(error, error_size, "invalid_channel");
             return false;
         }
-        const channel_profile_t *profile = receiver_find_profile(receiver, channel->bandwidth_hz);
-        if (profile == NULL || profile->sample_rate_hz != channel->sample_rate_hz) {
-            snprintf(error, error_size, "unsupported_channel_bandwidth");
+        if (channel->rate_count == 0 || channel->rate_count > SIM_MAX_CHANNEL_RATES) {
+            snprintf(error, error_size, "channel_rates_required");
             return false;
         }
-        if ((uint64_t)channel->bandwidth_hz > receiver->frontend_bandwidth_hz) {
-            snprintf(error, error_size, "bandwidth_exceeds_frontend");
+        for (size_t r = 0; r < channel->rate_count; r++) {
+            const channel_rate_t *rate = &channel->rates[r];
+            if (rate->bandwidth_hz == 0U || rate->sample_rate_hz < rate->bandwidth_hz) {
+                snprintf(error, error_size, "invalid_channel_rate");
+                return false;
+            }
+            if ((uint64_t)rate->bandwidth_hz > receiver->bandwidth_hz) {
+                snprintf(error, error_size, "bandwidth_exceeds_frontend");
+                return false;
+            }
+        }
+        /* The active pair must be one of the listed rates. */
+        if (channel_find_rate(channel, channel->bandwidth_hz, channel->sample_rate_hz) == NULL) {
+            snprintf(error, error_size, "unsupported_channel_rate");
             return false;
         }
     }
