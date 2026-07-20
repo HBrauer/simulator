@@ -137,7 +137,11 @@ static bool apply_scalar(simulator_config_t *config, parse_state_t *state, const
         } else if (strcmp(key, "stream_enabled") == 0) {
             state->current_channel->stream_enabled = parse_bool_value(value);
         } else if (strcmp(key, "stream_id") == 0) {
-            state->current_channel->stream_id = (uint32_t)parse_u64(value);
+            const uint64_t stream_id = parse_u64(value);
+            if (stream_id > UINT32_MAX) {
+                return set_error(error, error_size, "invalid_stream_id");
+            }
+            state->current_channel->stream_id = (uint32_t)stream_id;
             state->current_channel->stream_id_set = true;
         } else if (strcmp(key, "udp_output_port") == 0) {
             state->current_channel->udp_output.port = (uint16_t)parse_u64(value);
@@ -202,13 +206,25 @@ static bool apply_scalar(simulator_config_t *config, parse_state_t *state, const
     } else if (strcmp(key, "audio_prerender_max_rate_hz") == 0) {
         config->audio_prerender_max_rate_hz = (uint32_t)parse_u64(value);
     } else if (strcmp(key, "class_id_oui") == 0) {
-        config->class_id_oui = (uint32_t)parse_u64(value) & 0xffffffU;
+        const uint64_t oui = parse_u64(value);
+        if (oui > 0xffffffULL) {
+            return set_error(error, error_size, "invalid_class_id_oui");
+        }
+        config->class_id_oui = (uint32_t)oui;
         config->class_id_present = true;
     } else if (strcmp(key, "class_id_information_code") == 0) {
-        config->class_id_information_code = (uint16_t)parse_u64(value);
+        const uint64_t code = parse_u64(value);
+        if (code > 0xffffULL) {
+            return set_error(error, error_size, "invalid_class_id_information_code");
+        }
+        config->class_id_information_code = (uint16_t)code;
         config->class_id_present = true;
     } else if (strcmp(key, "class_id_packet_code") == 0) {
-        config->class_id_packet_code = (uint16_t)parse_u64(value);
+        const uint64_t code = parse_u64(value);
+        if (code > 0xffffULL) {
+            return set_error(error, error_size, "invalid_class_id_packet_code");
+        }
+        config->class_id_packet_code = (uint16_t)code;
         config->class_id_present = true;
     }
     return true;

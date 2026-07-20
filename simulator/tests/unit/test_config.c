@@ -239,6 +239,73 @@ START_TEST(rejects_channel_bandwidth_outside_profiles_in_yaml)
 }
 END_TEST
 
+START_TEST(parses_class_id_and_counts_up_stream_ids)
+{
+    const char *path = write_temp_config_body(
+        "class_id_oui: 11259375\n"
+        "class_id_information_code: 4660\n"
+        "class_id_packet_code: 22136\n",
+        "    channels:\n"
+        "      - { channel_id: 0, track_tuner: true, bandwidth_hz: 80000000, udp_output_port: 50000 }\n"
+        "      - { channel_id: 1, center_frequency_hz: 10000000000, bandwidth_hz: 20000000, stream_id: 4242, udp_output_port: 50001 }\n"
+        "      - { channel_id: 2, center_frequency_hz: 10001000000, bandwidth_hz: 20000000, udp_output_port: 50002 }\n");
+    ck_assert_ptr_nonnull(path);
+    simulator_config_t config;
+    char error[128];
+    ck_assert_msg(config_load_yaml(path, &config, error, sizeof(error)), "%s", error);
+    ck_assert(config.class_id_present);
+    ck_assert_uint_eq(config.class_id_oui, 0xABCDEFU);
+    ck_assert_uint_eq(config.class_id_information_code, 0x1234U);
+    ck_assert_uint_eq(config.class_id_packet_code, 0x5678U);
+    /* Count-up assignment skips the explicit 4242: channel 0 -> 0, channel 1 -> 4242,
+     * channel 2 -> 1. */
+    ck_assert_uint_eq(config.receivers[0].channels[0].stream_id, 0U);
+    ck_assert_uint_eq(config.receivers[0].channels[1].stream_id, 4242U);
+    ck_assert_uint_eq(config.receivers[0].channels[2].stream_id, 1U);
+}
+END_TEST
+
+START_TEST(rejects_out_of_range_class_id_oui)
+{
+    const char *path = write_temp_config("class_id_oui: 16777216\n");
+    ck_assert_ptr_nonnull(path);
+    simulator_config_t config;
+    char error[128];
+    ck_assert(!config_load_yaml(path, &config, error, sizeof(error)));
+    ck_assert_str_eq(error, "invalid_class_id_oui");
+}
+END_TEST
+
+START_TEST(rejects_out_of_range_class_id_codes)
+{
+    const char *info_path = write_temp_config("class_id_information_code: 65536\n");
+    ck_assert_ptr_nonnull(info_path);
+    simulator_config_t config;
+    char error[128];
+    ck_assert(!config_load_yaml(info_path, &config, error, sizeof(error)));
+    ck_assert_str_eq(error, "invalid_class_id_information_code");
+
+    const char *packet_path = write_temp_config("class_id_packet_code: 65536\n");
+    ck_assert_ptr_nonnull(packet_path);
+    ck_assert(!config_load_yaml(packet_path, &config, error, sizeof(error)));
+    ck_assert_str_eq(error, "invalid_class_id_packet_code");
+}
+END_TEST
+
+START_TEST(rejects_out_of_range_stream_id)
+{
+    const char *path = write_temp_config_body(
+        "",
+        "    channels:\n"
+        "      - { channel_id: 0, track_tuner: true, bandwidth_hz: 80000000, stream_id: 4294967296, udp_output_port: 50000 }\n");
+    ck_assert_ptr_nonnull(path);
+    simulator_config_t config;
+    char error[128];
+    ck_assert(!config_load_yaml(path, &config, error, sizeof(error)));
+    ck_assert_str_eq(error, "invalid_stream_id");
+}
+END_TEST
+
 START_TEST(rejects_legacy_config_keys)
 {
     simulator_config_t config;
@@ -502,6 +569,10 @@ Suite *config_suite(void)
     tcase_add_test(tc, rejects_invalid_profiles);
     tcase_add_test(tc, parses_receiver_profiles_from_yaml);
     tcase_add_test(tc, rejects_channel_bandwidth_outside_profiles_in_yaml);
+    tcase_add_test(tc, parses_class_id_and_counts_up_stream_ids);
+    tcase_add_test(tc, rejects_out_of_range_class_id_oui);
+    tcase_add_test(tc, rejects_out_of_range_class_id_codes);
+    tcase_add_test(tc, rejects_out_of_range_stream_id);
     tcase_add_test(tc, rejects_legacy_config_keys);
     tcase_add_test(tc, rejects_channel_sample_rate_key);
     tcase_add_test(tc, parses_stream_cpus_range);

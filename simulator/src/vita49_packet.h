@@ -18,7 +18,7 @@
 #define VITA49_TSF_REAL_TIME 2U
 
 /* Optional Class ID (VITA 49.2 §5.1.3): a 24-bit OUI plus 16-bit information and packet
- * class codes. Packed into two words as (oui << 8) then (info << 16 | packet). */
+ * class codes. Packed into two words as (oui in bits 23..0) then (info << 16 | packet). */
 typedef struct {
     uint32_t oui; /* 24-bit Organizationally Unique Identifier */
     uint16_t information_class_code;

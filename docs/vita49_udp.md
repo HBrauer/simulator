@@ -41,8 +41,9 @@ receivers and channels in configuration order, skipping any value claimed explic
 
 Setting any of `class_id_oui`, `class_id_information_code`, or `class_id_packet_code` at
 the instance top level adds an optional two-word VITA 49 Class ID to every data and context
-packet. Word 1 carries the 24-bit OUI left-justified into bits 31–8; word 2 packs the
-16-bit information class code (high half) and packet class code (low half).
+packet. Word 1 carries the 24-bit OUI in bits 23–0 (bits 31–24 reserved, per VITA 49.2 /
+DIFI); word 2 packs the 16-bit information class code (high half) and packet class code
+(low half).
 
 ## IF Context Packets
 

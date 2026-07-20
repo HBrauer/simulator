@@ -73,8 +73,8 @@ START_TEST(writes_if_data_packet_with_class_id)
     ck_assert_uint_eq((read_be32(out) >> 27U) & 0x01U, 1U); /* class id present */
     ck_assert_uint_eq(read_be32(out) & 0xffffU, written / 4U);
     ck_assert_uint_eq(read_be32(out + 4), 0x00000005U);
-    /* Class ID: OUI left-justified into bits 31..8, then info/packet class codes. */
-    ck_assert_uint_eq(read_be32(out + 8) >> 8U, 0xABCDEFU);
+    /* Class ID: 24-bit OUI in bits 23..0, then info/packet class codes. */
+    ck_assert_uint_eq(read_be32(out + 8), 0xABCDEFU);
     ck_assert_uint_eq(read_be32(out + 12), (0x1234U << 16U) | 0x5678U);
     /* Timestamps shift past the two class-id words. */
     ck_assert_uint_eq(read_be32(out + 16), 1U);
@@ -162,7 +162,7 @@ START_TEST(writes_context_packet_with_class_id)
     ck_assert_uint_eq((header >> 27U) & 0x01U, 1U); /* class id present */
     ck_assert_uint_eq(header & 0xffffU, written / 4U);
     ck_assert_uint_eq(read_be32(out + 4), 0x00000002U);
-    ck_assert_uint_eq(read_be32(out + 8) >> 8U, 0x00A2F5U);
+    ck_assert_uint_eq(read_be32(out + 8), 0x00A2F5U);
     ck_assert_uint_eq(read_be32(out + 12), (0x0001U << 16U) | 0x0002U);
     /* CIF0 and its fields shift past the two class-id words. */
     ck_assert_uint_eq(read_be32(out + 16), 1U); /* integer seconds */

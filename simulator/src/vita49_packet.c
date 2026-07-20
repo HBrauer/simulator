@@ -22,11 +22,12 @@ static void write_be64(uint8_t *out, uint64_t value)
     }
 }
 
-/* Two-word Class ID: OUI left-justified into bits 31..8 of the first word, then the
- * information/packet class codes packed into the halves of the second word. */
+/* Two-word Class ID: 24-bit OUI in bits 23..0 of the first word (bits 31..24 reserved, per
+ * VITA 49.2 §5.1.3 / DIFI), then the information/packet class codes packed into the halves
+ * of the second word. */
 static void write_class_id(uint8_t *out, const vita49_class_id_t *class_id)
 {
-    write_be32(out, (class_id->oui & 0xffffffU) << 8U);
+    write_be32(out, class_id->oui & 0xffffffU);
     write_be32(out + 4, ((uint32_t)class_id->information_class_code << 16U) | (uint32_t)class_id->packet_class_code);
 }
 
