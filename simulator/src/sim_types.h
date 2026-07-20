@@ -79,6 +79,11 @@ typedef struct {
     double output_scale;
     double rf_reference_power_dbm;
     bool stream_enabled;
+    /* VITA 49 Stream ID carried in every data/context packet for this channel. When
+     * stream_id_set is false, config_validate auto-assigns a value by counting up across all
+     * channels (0, 1, 2, ...) in receiver/channel order. */
+    bool stream_id_set;
+    uint32_t stream_id;
     udp_output_config_t udp_output;
 } channel_config_t;
 
@@ -116,6 +121,12 @@ typedef struct {
     size_t ddc_cache_max_bytes; /* budget for precomputed DDC intermediates (0 disables caching) */
     double audio_prerender_oversample;    /* oversampling factor over content bandwidth (default 2.0) */
     uint32_t audio_prerender_max_rate_hz; /* ceiling on the intermediate pre-render rate (default 4 MHz) */
+    /* Optional VITA 49 Class ID emitted in every data/context packet. Enabled when
+     * class_id_present is set (via any class_id_* config key). */
+    bool class_id_present;
+    uint32_t class_id_oui; /* 24-bit OUI */
+    uint16_t class_id_information_code;
+    uint16_t class_id_packet_code;
     size_t receiver_count;
     receiver_config_t receivers[SIM_MAX_RECEIVERS];
 } simulator_config_t;

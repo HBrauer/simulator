@@ -114,6 +114,9 @@ bytes per complex sample; WAV: the header's frame count).
 | `stream_cpu` | integer | CPU index for stream threads; `-1` disables pinning. Default `-1`. |
 | `asset_cache_max_bytes` | integer (bytes) | In-memory asset budget. Default 16 GiB; `0` = unlimited. |
 | `ddc_cache_max_bytes` | integer (bytes) | DDC intermediate sub-band budget. Default 2 GiB; `0` disables caching. |
+| `class_id_oui` | integer, 24-bit | Optional. Setting any `class_id_*` key adds a VITA 49 Class ID to every data/context packet. |
+| `class_id_information_code` | integer, 16-bit | Optional. Information class code. Default `0`. |
+| `class_id_packet_code` | integer, 16-bit | Optional. Packet class code. Default `0`. |
 | `receivers` | array (`1`–`12`) | Required. |
 
 ### Instance — receiver
@@ -148,6 +151,7 @@ bytes per complex sample; WAV: the header's frame count).
 | channel `output_scale` | number, `> 0` | Default: receiver `output_scale`. |
 | channel `rf_reference_power_dbm` | number (dBm) | Default: receiver value. |
 | channel `stream_enabled` | bool | Default `true`. |
+| channel `stream_id` | integer, 32-bit | Optional VITA 49 Stream ID. When unset, IDs are auto-assigned by counting up (`0`, `1`, …) across all channels in order, skipping explicitly-set values. |
 | channel `udp_output_port` | integer | Required, unique across the instance. |
 
 ---

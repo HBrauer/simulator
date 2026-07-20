@@ -409,7 +409,7 @@ def test_runtime_rest_and_udp_stream(tmp_path):
 
         packet, vita, addr = _recv_if_data(udp_sock)
         assert addr[0] == "127.0.0.1"
-        assert vita["stream_id"] == 0x53440000
+        assert vita["stream_id"] == 0  # count-up default: channel 0
         assert len(vita["payload"]) == 256 * 4
         assert _ci16_payload_has_nonzero(vita["payload"])
         metrics = _wait_json(f"http://127.0.0.1:{rest_port}/api/v1/metrics")
@@ -731,7 +731,7 @@ def test_context_packets_announce_stream_configuration(tmp_path):
         _wait_json(f"http://127.0.0.1:{rest_port}/api/v1/health")
         packet, vita, _ = _recv_vita49(udp_sock, 4)
         context = _parse_vita49_context(packet)
-        assert context["stream_id"] == 0x53440000
+        assert context["stream_id"] == 0  # count-up default: channel 0
         assert context["bandwidth_hz"] == 80000000
         assert context["sample_rate_hz"] == 98304000
         assert context["rf_reference_frequency_hz"] == 10000000000
@@ -759,7 +759,7 @@ def test_vita49_udp_wraps_and_keeps_raw_payload(tmp_path):
         assert vita["tsi"] == 1
         assert vita["tsf"] == 2
         assert vita["sequence"] == 0
-        assert vita["stream_id"] == 0x53440000
+        assert vita["stream_id"] == 0  # count-up default: channel 0
         assert vita["integer_seconds"] == 0
         # The block grid quantises the render time to the block that contains 450000 ns.
         grid_ns = _grid_time_ns(450000, 128)
@@ -824,7 +824,7 @@ def test_channel_4096_sample_vita49_packet_contains_signal(tmp_path):
         assert health["status"] == "ok"
         packet, vita, addr = _recv_if_data(ch1_sock)
         assert addr[0] == "127.0.0.1"
-        assert vita["stream_id"] == 0x53440001
+        assert vita["stream_id"] == 1  # count-up default: channel 1
         assert len(vita["payload"]) == 4096 * 4
         assert _ci16_payload_has_nonzero(vita["payload"])
     finally:

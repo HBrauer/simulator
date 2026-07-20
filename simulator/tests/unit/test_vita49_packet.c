@@ -27,7 +27,7 @@ START_TEST(writes_if_data_packet_header_and_payload)
     uint8_t out[64];
     size_t written = 0;
     const vita49_if_data_packet_t packet = {
-        .stream_id = vita49_stream_id(3, 3),
+        .stream_id = 0x53440303U,
         .sequence = 9,
         .timestamp_ns = 1234567890ULL,
         .payload = samples,
@@ -37,6 +37,7 @@ START_TEST(writes_if_data_packet_header_and_payload)
     ck_assert(vita49_write_if_data_packet(&packet, out, sizeof(out), &written));
     ck_assert_uint_eq(written, VITA49_IF_DATA_HEADER_BYTES + sizeof(samples));
     ck_assert_uint_eq(read_be32(out) >> 28U, VITA49_PACKET_TYPE_IF_DATA);
+    ck_assert_uint_eq((read_be32(out) >> 27U) & 0x01U, 0U); /* class id absent */
     ck_assert_uint_eq((read_be32(out) >> 22U) & 0x03U, VITA49_TSI_UTC);
     ck_assert_uint_eq((read_be32(out) >> 20U) & 0x03U, VITA49_TSF_REAL_TIME);
     ck_assert_uint_eq((read_be32(out) >> 25U) & 0x01U, 1U);
@@ -49,13 +50,46 @@ START_TEST(writes_if_data_packet_header_and_payload)
 }
 END_TEST
 
+START_TEST(writes_if_data_packet_with_class_id)
+{
+    const iq_ci16_t samples[] = {
+        {.i = 7, .q = -8},
+    };
+    uint8_t out[64];
+    size_t written = 0;
+    const vita49_if_data_packet_t packet = {
+        .stream_id = 0x00000005U,
+        .sequence = 4,
+        .timestamp_ns = 1234567890ULL,
+        .class_id_present = true,
+        .class_id = {.oui = 0xABCDEFU, .information_class_code = 0x1234U, .packet_class_code = 0x5678U},
+        .payload = samples,
+        .payload_samples = 1,
+    };
+
+    ck_assert(vita49_write_if_data_packet(&packet, out, sizeof(out), &written));
+    ck_assert_uint_eq(written, vita49_if_data_packet_size(1, true));
+    ck_assert_uint_eq(written, VITA49_IF_DATA_HEADER_BYTES + VITA49_CLASS_ID_BYTES + sizeof(samples));
+    ck_assert_uint_eq((read_be32(out) >> 27U) & 0x01U, 1U); /* class id present */
+    ck_assert_uint_eq(read_be32(out) & 0xffffU, written / 4U);
+    ck_assert_uint_eq(read_be32(out + 4), 0x00000005U);
+    /* Class ID: OUI left-justified into bits 31..8, then info/packet class codes. */
+    ck_assert_uint_eq(read_be32(out + 8) >> 8U, 0xABCDEFU);
+    ck_assert_uint_eq(read_be32(out + 12), (0x1234U << 16U) | 0x5678U);
+    /* Timestamps shift past the two class-id words. */
+    ck_assert_uint_eq(read_be32(out + 16), 1U);
+    ck_assert_uint_eq(read_be64(out + 20), 234567890000ULL);
+    ck_assert(memcmp(out + 28, samples, sizeof(samples)) == 0);
+}
+END_TEST
+
 START_TEST(rejects_too_small_output_buffer)
 {
     const iq_ci16_t sample = {.i = 1, .q = 2};
     uint8_t out[8];
     size_t written = 99;
     const vita49_if_data_packet_t packet = {
-        .stream_id = vita49_stream_id(0, 0),
+        .stream_id = 0,
         .sequence = 0,
         .timestamp_ns = 0,
         .payload = &sample,
@@ -72,7 +106,7 @@ START_TEST(writes_context_packet_fields)
     uint8_t out[64];
     size_t written = 0;
     const vita49_context_packet_t packet = {
-        .stream_id = vita49_stream_id(1, 2),
+        .stream_id = 0x53440102U,
         .sequence = 5,
         .timestamp_ns = 1234567890ULL,
         .changed = true,
@@ -82,9 +116,10 @@ START_TEST(writes_context_packet_fields)
     };
 
     ck_assert(vita49_write_context_packet(&packet, out, sizeof(out), &written));
-    ck_assert_uint_eq(written, vita49_context_packet_size());
+    ck_assert_uint_eq(written, vita49_context_packet_size(false));
     const uint32_t header = read_be32(out);
     ck_assert_uint_eq(header >> 28U, VITA49_PACKET_TYPE_CONTEXT);
+    ck_assert_uint_eq((header >> 27U) & 0x01U, 0U); /* class id absent */
     ck_assert_uint_eq((header >> 22U) & 0x03U, VITA49_TSI_UTC);
     ck_assert_uint_eq((header >> 20U) & 0x03U, VITA49_TSF_REAL_TIME);
     ck_assert_uint_eq((header >> 16U) & 0x0fU, 5U);
@@ -104,6 +139,42 @@ START_TEST(writes_context_packet_fields)
 }
 END_TEST
 
+START_TEST(writes_context_packet_with_class_id)
+{
+    uint8_t out[64];
+    size_t written = 0;
+    const vita49_context_packet_t packet = {
+        .stream_id = 0x00000002U,
+        .sequence = 3,
+        .timestamp_ns = 1234567890ULL,
+        .changed = false,
+        .class_id_present = true,
+        .class_id = {.oui = 0x00A2F5U, .information_class_code = 0x0001U, .packet_class_code = 0x0002U},
+        .rf_reference_frequency_hz = 10005000000ULL,
+        .bandwidth_hz = 20000000ULL,
+        .sample_rate_hz = 24576000ULL,
+    };
+
+    ck_assert(vita49_write_context_packet(&packet, out, sizeof(out), &written));
+    ck_assert_uint_eq(written, vita49_context_packet_size(true));
+    const uint32_t header = read_be32(out);
+    ck_assert_uint_eq(header >> 28U, VITA49_PACKET_TYPE_CONTEXT);
+    ck_assert_uint_eq((header >> 27U) & 0x01U, 1U); /* class id present */
+    ck_assert_uint_eq(header & 0xffffU, written / 4U);
+    ck_assert_uint_eq(read_be32(out + 4), 0x00000002U);
+    ck_assert_uint_eq(read_be32(out + 8) >> 8U, 0x00A2F5U);
+    ck_assert_uint_eq(read_be32(out + 12), (0x0001U << 16U) | 0x0002U);
+    /* CIF0 and its fields shift past the two class-id words. */
+    ck_assert_uint_eq(read_be32(out + 16), 1U); /* integer seconds */
+    ck_assert_uint_eq(read_be64(out + 20), 234567890000ULL);
+    const uint32_t cif0 = read_be32(out + 28);
+    ck_assert_uint_eq(cif0 >> 31U, 0U); /* not changed */
+    ck_assert_uint_eq(read_be64(out + 32) >> 20U, 20000000ULL);
+    ck_assert_uint_eq(read_be64(out + 40) >> 20U, 10005000000ULL);
+    ck_assert_uint_eq(read_be64(out + 48) >> 20U, 24576000ULL);
+}
+END_TEST
+
 START_TEST(context_packet_rejects_small_buffer)
 {
     uint8_t out[16];
@@ -119,8 +190,10 @@ Suite *vita49_packet_suite(void)
     Suite *suite = suite_create("vita49_packet");
     TCase *tc = tcase_create("core");
     tcase_add_test(tc, writes_if_data_packet_header_and_payload);
+    tcase_add_test(tc, writes_if_data_packet_with_class_id);
     tcase_add_test(tc, rejects_too_small_output_buffer);
     tcase_add_test(tc, writes_context_packet_fields);
+    tcase_add_test(tc, writes_context_packet_with_class_id);
     tcase_add_test(tc, context_packet_rejects_small_buffer);
     suite_add_tcase(suite, tc);
     return suite;

@@ -55,6 +55,8 @@ typedef struct {
     int udp_cpu;
     uint8_t vita_sequence;
     uint8_t context_sequence;
+    bool class_id_present;
+    vita49_class_id_t class_id;
 } stream_worker_t;
 
 struct streamer_manager {
@@ -362,10 +364,12 @@ static void maybe_send_context_packet(stream_worker_t *worker, udp_output_t *udp
     }
     const uint64_t scenario_time_ns = timebase_now_ns(worker->timebase);
     const vita49_context_packet_t context = {
-        .stream_id = vita49_stream_id(receiver->id, channel->id),
+        .stream_id = channel->stream_id,
         .sequence = (uint8_t)(worker->context_sequence & 0x0fU),
         .timestamp_ns = scenario_time_ns,
         .changed = changed,
+        .class_id_present = worker->class_id_present,
+        .class_id = worker->class_id,
         .rf_reference_frequency_hz = receiver_channel_center_hz(receiver, channel, scenario_time_ns),
         .bandwidth_hz = channel->bandwidth_hz,
         .sample_rate_hz = channel->sample_rate_hz,
@@ -410,7 +414,7 @@ static void *stream_udp_thread_main(void *arg)
         return NULL;
     }
 
-    const size_t send_capacity = vita49_if_data_packet_size(worker->block_samples);
+    const size_t send_capacity = vita49_if_data_packet_size(worker->block_samples, worker->class_id_present);
     uint8_t *packets = calloc(STREAM_SEND_BATCH_SIZE, send_capacity);
     if (packets == NULL) {
         record_worker_error(worker, "packet buffer allocation failed");
@@ -467,7 +471,7 @@ static void *stream_udp_thread_main(void *arg)
         int send_error = 0;
         size_t prepared_count = 0;
         uint64_t batch_samples = 0;
-        const uint32_t stream_id = vita49_stream_id(receiver_snapshot.id, channel_snapshot.id);
+        const uint32_t stream_id = channel_snapshot.stream_id;
         for (size_t i = 0; i < batch_count; i++) {
             uint8_t *packet = packets + i * send_capacity;
             /* Each record carries the sample count it was rendered with, which may differ
@@ -478,6 +482,8 @@ static void *stream_udp_thread_main(void *arg)
                 .stream_id = stream_id,
                 .sequence = (uint8_t)((worker->vita_sequence + (uint8_t)i) & 0x0fU),
                 .timestamp_ns = payload_timestamps[i],
+                .class_id_present = worker->class_id_present,
+                .class_id = worker->class_id,
                 .payload = record->samples,
                 .payload_samples = (size_t)record->sample_count,
             };
@@ -591,6 +597,12 @@ bool streamer_manager_start(streamer_manager_t **manager, const streamer_config_
                 .block_samples = config->block_samples,
                 .render_cpu = render_cpu,
                 .udp_cpu = udp_cpu,
+                .class_id_present = config->config->class_id_present,
+                .class_id = {
+                    .oui = config->config->class_id_oui,
+                    .information_class_code = config->config->class_id_information_code,
+                    .packet_class_code = config->config->class_id_packet_code,
+                },
             };
             if (!stream_worker_start(worker)) {
                 streamer_manager_stop(m);

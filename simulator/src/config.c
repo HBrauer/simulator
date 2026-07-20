@@ -136,6 +136,9 @@ static bool apply_scalar(simulator_config_t *config, parse_state_t *state, const
             state->current_channel->rf_reference_power_dbm = parse_double_value(value);
         } else if (strcmp(key, "stream_enabled") == 0) {
             state->current_channel->stream_enabled = parse_bool_value(value);
+        } else if (strcmp(key, "stream_id") == 0) {
+            state->current_channel->stream_id = (uint32_t)parse_u64(value);
+            state->current_channel->stream_id_set = true;
         } else if (strcmp(key, "udp_output_port") == 0) {
             state->current_channel->udp_output.port = (uint16_t)parse_u64(value);
         } else if (strcmp(key, "ddc_id") == 0) {
@@ -198,6 +201,15 @@ static bool apply_scalar(simulator_config_t *config, parse_state_t *state, const
         config->audio_prerender_oversample = parse_double_value(value);
     } else if (strcmp(key, "audio_prerender_max_rate_hz") == 0) {
         config->audio_prerender_max_rate_hz = (uint32_t)parse_u64(value);
+    } else if (strcmp(key, "class_id_oui") == 0) {
+        config->class_id_oui = (uint32_t)parse_u64(value) & 0xffffffU;
+        config->class_id_present = true;
+    } else if (strcmp(key, "class_id_information_code") == 0) {
+        config->class_id_information_code = (uint16_t)parse_u64(value);
+        config->class_id_present = true;
+    } else if (strcmp(key, "class_id_packet_code") == 0) {
+        config->class_id_packet_code = (uint16_t)parse_u64(value);
+        config->class_id_present = true;
     }
     return true;
 }
@@ -338,6 +350,20 @@ bool config_load_yaml(const char *path, simulator_config_t *config, char *error,
     return config_validate(config, error, error_size);
 }
 
+static bool config_stream_id_taken(const simulator_config_t *config, uint32_t candidate)
+{
+    for (size_t i = 0; i < config->receiver_count; i++) {
+        const receiver_config_t *receiver = &config->receivers[i];
+        for (size_t c = 0; c < receiver->channel_count; c++) {
+            const channel_config_t *channel = &receiver->channels[c];
+            if (channel->stream_id_set && channel->stream_id == candidate) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 bool config_validate(simulator_config_t *config, char *error, size_t error_size)
 {
     if (config->schema_version != 1 || config->receiver_count == 0) {
@@ -449,6 +475,24 @@ bool config_validate(simulator_config_t *config, char *error, size_t error_size)
                     }
                 }
             }
+        }
+    }
+    /* Assign VITA 49 Stream IDs to channels that did not set one explicitly, counting up
+     * across all receivers/channels in order and skipping any value already claimed by an
+     * explicit stream_id so the identifiers stay unique. */
+    uint32_t next_stream_id = 0;
+    for (size_t i = 0; i < config->receiver_count; i++) {
+        receiver_config_t *receiver = &config->receivers[i];
+        for (size_t c = 0; c < receiver->channel_count; c++) {
+            channel_config_t *channel = &receiver->channels[c];
+            if (channel->stream_id_set) {
+                continue;
+            }
+            while (config_stream_id_taken(config, next_stream_id)) {
+                next_stream_id++;
+            }
+            channel->stream_id = next_stream_id++;
+            channel->stream_id_set = true;
         }
     }
     snprintf(error, error_size, "ok");
