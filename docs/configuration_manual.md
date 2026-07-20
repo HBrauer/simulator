@@ -157,7 +157,7 @@ udp_multicast_interface: "127.0.0.1"
 | channel `channel_id` | integer, `0`–`N−1` | In order. |
 | channel `track_tuner` | bool | Center follows the tuner. Default `false`. |
 | channel `center_frequency_hz` | integer (Hz) | Required when not tracking; ignored when tracking. |
-| channel `rates` | array (`1`–`16`) | Required. `{bandwidth_hz, sample_rate_hz}` options this channel supports; the first is active at load, and a REST retune selects among them. |
+| channel `rates` | array (`1`–`128`) | Required. `{bandwidth_hz, sample_rate_hz}` options this channel supports; the first is active at load, and a REST retune selects among them. |
 | rate `bandwidth_hz` | integer (Hz) | Non-zero, and ≤ the receiver `bandwidth_hz` (front-end window). |
 | rate `sample_rate_hz` | integer, ≥ `bandwidth_hz` | The stream rate paired with this bandwidth. |
 | channel `output_scale` | number, `> 0` | Default: receiver `output_scale`. |

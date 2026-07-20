@@ -43,7 +43,7 @@ channel with `track_tuner: true` and the widest bandwidth):
 | `channel_id` | integer | yes | `0..N-1`, in order. |
 | `track_tuner` | boolean | no | Channel center follows the receiver tuner (fixed center or scan sweep). Defaults to `false`. |
 | `center_frequency_hz` | integer | when not tracking | Absolute RF center frequency. Ignored with `track_tuner: true`. |
-| `rates` | array | yes | The `{bandwidth_hz, sample_rate_hz}` options this channel supports (`1..SIM_MAX_CHANNEL_RATES`, `16`). The first entry is active at load; a REST retune selects among them. |
+| `rates` | array | yes | The `{bandwidth_hz, sample_rate_hz}` options this channel supports (`1..SIM_MAX_CHANNEL_RATES`, `128`). The first entry is active at load; a REST retune selects among them. |
 | `output_scale` | number | no | Channel output multiplier. Defaults to receiver `output_scale`. |
 | `rf_reference_power_dbm` | number | no | Defaults to the receiver value. |
 | `stream_enabled` | boolean | no | Enables this channel's UDP stream. Defaults to `true`. |

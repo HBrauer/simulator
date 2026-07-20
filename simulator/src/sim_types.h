@@ -9,7 +9,7 @@
 /* Sized for the wideband-plus-many-narrow-DDC use case: one track_tuner channel and ~20
  * fixed DDC channels extracting from the same recording. */
 #define SIM_MAX_CHANNELS 24
-#define SIM_MAX_CHANNEL_RATES 16
+#define SIM_MAX_CHANNEL_RATES 128
 #define SIM_MAX_SOURCES 64
 #define SIM_MAX_SIGNALS 256
 #define SIM_MAX_PASSTHROUGH_VARIANTS 8
