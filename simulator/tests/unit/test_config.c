@@ -16,7 +16,7 @@ static const char *write_temp_config_body(const char *top_body, const char *rece
     }
     fputs("schema_version: 1\n", f);
     fputs("instance_id: \"t\"\n", f);
-    fputs("scenario_file: \"simulator/scenarios/test_scenario_001.json\"\n", f);
+    fputs("scenario_file: \"simulator/scenarios/scanner_fsk.json\"\n", f);
     fputs(top_body, f);
     fputs("receivers:\n"
           "  - receiver_id: 0\n"
@@ -87,7 +87,7 @@ START_TEST(loads_instance_config)
 {
     simulator_config_t config;
     char error[128];
-    ck_assert_msg(config_load_yaml("simulator/configs/instance_001.yaml", &config, error, sizeof(error)), "%s", error);
+    ck_assert_msg(config_load_yaml("simulator/configs/receiver_scanner.yaml", &config, error, sizeof(error)), "%s", error);
     ck_assert_uint_eq(config.receiver_count, 1);
     ck_assert_uint_eq(config.receivers[0].id, 0);
     ck_assert_uint_eq(config.receivers[0].rest_port, 8100);

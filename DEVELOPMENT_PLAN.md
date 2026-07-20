@@ -79,8 +79,8 @@ docs/
 
 1. Add `meson.build`, compiler warnings, debug/release options, sanitizer options, and `meson test` wiring.
 2. Add a minimal `simulator/src/main.c` with argument parsing:
-   - `--config simulator/configs/instance_001.yaml`
-   - `--scenario simulator/scenarios/test_scenario_001.json`
+   - `--config simulator/configs/receiver_scanner.yaml`
+   - `--scenario simulator/scenarios/scanner_fsk.json`
    - `--scenario-time-ns` test override
 3. Add logging and error-code conventions matching `Anforderungen.md`.
 4. Add CI-style local commands:
@@ -231,7 +231,7 @@ docs/
 
 ### Integration Tests
 
-- Start simulator with `simulator/configs/instance_001.yaml` and `simulator/scenarios/test_scenario_001.json`.
+- Start simulator with `simulator/configs/receiver_scanner.yaml` and `simulator/scenarios/scanner_fsk.json`.
 - Probe REST health/config/status.
 - Change frequency range and DDC frequency through REST.
 - Capture UDP packets and validate raw CI16 framing.
@@ -256,9 +256,8 @@ docs/
 
 ## Sample Files Included Now
 
-- `simulator/configs/instance_001.yaml`: one receiver on ports 8100/50000..50004.
-- `simulator/configs/instance_002.yaml`: equivalent receiver ID and scenario, different REST/UDP ports for deterministic multi-instance testing.
-- `simulator/scenarios/test_scenario_001.json`: one repeated CI16 tone-like asset placed at 10.005 GHz.
+- `simulator/configs/receiver_scanner.yaml`: one receiver on ports 8100/50000..50004.
+- `simulator/scenarios/scanner_fsk.json`: one repeated CI16 tone-like asset placed at 10.005 GHz.
 - `simulator/scripts/generate_sample_iq.py`: deterministic CI16 IQ asset generator.
 - `simulator/assets/fsk_20mhz.c16`: generated short sample IQ file for tests.
 

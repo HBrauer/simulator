@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "scenario_id": "test_scenario_001",
+  "scenario_id": "scanner_fsk",
   "description": "Deterministic scanner and DDC test scenario with a short generated CI16 IQ asset.",
   "units": {
     "frequency_unit": "Hz",

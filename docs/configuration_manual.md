@@ -15,8 +15,8 @@ They are independent: one scenario can be replayed by many instance configs, and
 You run them together:
 
 ```sh
-./build/sdr-simulator --config simulator/configs/instance_001.yaml \
-                      --scenario simulator/scenarios/benchmark_load.json
+./build/sdr-simulator --config simulator/configs/receiver_scanner.yaml \
+                      --scenario simulator/tests/benchmarks/benchmark_load.json
 ```
 
 If `--scenario` is omitted, the instance's `scenario_file` is used.
@@ -444,8 +444,8 @@ The instance describes the receiver and its output channels.
 
 ```yaml
 schema_version: 1
-instance_id: "sim_instance_001"
-scenario_file: "simulator/scenarios/test_scenario_001.json"
+instance_id: "receiver_scanner"
+scenario_file: "simulator/scenarios/scanner_fsk.json"
 stream_block_samples: 1024        # CI16 samples per VITA 49.2 packet (1..4096)
 receivers:
   - receiver_id: 0
@@ -488,7 +488,7 @@ knobs (`asset_cache_max_bytes`, `ddc_cache_max_bytes`).
 
 ## 9. Worked example: `benchmark_load.json`
 
-The shipped [`benchmark_load.json`](../simulator/scenarios/benchmark_load.json) puts four signals
+The shipped [`benchmark_load.json`](../simulator/tests/benchmarks/benchmark_load.json) puts four signals
 on the air over a −160 dBm/Hz noise floor, all using the **burst** timing model (each has a
 `repeat_interval_s`), from two sources:
 

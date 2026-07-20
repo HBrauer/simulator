@@ -201,7 +201,7 @@ def test_replay_instances_started_apart_stay_sample_synchronous(tmp_path):
         sock_b.close()
 
 
-PASSTHROUGH_SCENARIO = "simulator/scenarios/replay_passthrough_demo.json"
+PASSTHROUGH_SCENARIO = "simulator/tests/fixtures/passthrough_no_80m.json"
 
 
 def _write_passthrough_config(path, rest_port, udp_base):

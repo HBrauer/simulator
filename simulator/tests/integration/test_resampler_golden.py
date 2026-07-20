@@ -59,9 +59,9 @@ def test_80mhz_resampler_matches_python_windowed_sinc_reference():
         [
             str(SIM),
             "--config",
-            "simulator/configs/instance_001.yaml",
+            "simulator/configs/receiver_scanner.yaml",
             "--scenario",
-            "simulator/scenarios/test_scenario_001.json",
+            "simulator/scenarios/scanner_fsk.json",
             "--scenario-time-ns",
             "450000",
             "--render-once-samples",

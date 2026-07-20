@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "scenario_id": "replay_passthrough_80mhz",
-  "description": "80 MHz-wide passthrough replay. The source carries a capture per bandwidth (1 MHz / 20 MHz / 80 MHz); at 80 MHz the channel streams the 98.304 MS/s file verbatim (no resampling) straight into VITA-49. Retune the channel bandwidth via REST to select a different variant. The tone sits at +20 MHz within the captured band so it is visible on a waterfall.",
+  "scenario_id": "replay_passthrough",
+  "description": "Passthrough replay: a channel dedicated to streaming a recorded capture verbatim, one file per bandwidth (1 MHz / 20 MHz / 80 MHz). passthrough:true bypasses the mixer (no float bus, noise floor, or other signals) and streams the variant matching the channel's current sample rate straight into VITA-49 packets. Retune the channel bandwidth via REST and it selects the matching file; at 80 MHz it streams the 98.304 MS/s capture with no resampling. A bandwidth with no matching variant renders silence -- passthrough never resamples. The tone sits at +20 MHz within the captured band so it is visible on a waterfall.",
   "sources": [
     {
       "id": "capture_wideband",

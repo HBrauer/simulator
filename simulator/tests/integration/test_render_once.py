@@ -6,9 +6,9 @@ def test_render_once_is_deterministic():
     cmd = [
         "build/sdr-simulator",
         "--config",
-        "simulator/configs/instance_001.yaml",
+        "simulator/configs/receiver_scanner.yaml",
         "--scenario",
-        "simulator/scenarios/test_scenario_001.json",
+        "simulator/scenarios/scanner_fsk.json",
         "--scenario-time-ns",
         "450000",
         "--render-once-samples",

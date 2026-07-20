@@ -158,11 +158,11 @@ benchmark('renderer_80mhz_scalar_12_receivers', renderer_benchmark, args: ['1000
 # Realistic P9 load: one receiver, all channels (wideband + narrowband), noise plus mixed IQ
 # and audio signals. The realtime_ratio it prints is the headroom on a single core; run against
 # a -O3/native build.
-benchmark('renderer_realistic_load', renderer_benchmark, args: ['500', '4096', '--receivers', '1', '--all-channels', '--scenario', 'simulator/scenarios/benchmark_load.json'], workdir: meson.project_source_root(), timeout: 120)
+benchmark('renderer_realistic_load', renderer_benchmark, args: ['500', '4096', '--receivers', '1', '--all-channels', '--scenario', 'simulator/tests/benchmarks/benchmark_load.json'], workdir: meson.project_source_root(), timeout: 120)
 # DDC load: one 80 MHz track-tuner channel plus 20 narrow DDC channels (500 kHz .. 1 kHz)
 # extracting from the same shift-mode 80 MHz replay. First blocks include the per-channel
 # intermediate cache builds; steady state is dominated by the wideband channel.
-benchmark('renderer_ddc_channels', renderer_benchmark, args: ['200', '4096', '--receivers', '1', '--all-channels', '--sum-rates', '--config', 'simulator/configs/instance_ddc.yaml', '--scenario', 'simulator/scenarios/benchmark_ddc.json'], workdir: meson.project_source_root(), timeout: 180)
+benchmark('renderer_ddc_channels', renderer_benchmark, args: ['200', '4096', '--receivers', '1', '--all-channels', '--sum-rates', '--config', 'simulator/configs/receiver_wideband_ddc.yaml', '--scenario', 'simulator/tests/benchmarks/benchmark_ddc.json'], workdir: meson.project_source_root(), timeout: 180)
 
 pytest = find_program('pytest', required: false)
 if pytest.found()

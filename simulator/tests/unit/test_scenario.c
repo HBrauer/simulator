@@ -55,9 +55,9 @@ START_TEST(loads_and_validates_scenario)
 {
     scenario_t scenario;
     char error[128];
-    ck_assert_msg(scenario_load_json("simulator/scenarios/test_scenario_001.json", &scenario, error, sizeof(error)), "%s", error);
+    ck_assert_msg(scenario_load_json("simulator/scenarios/scanner_fsk.json", &scenario, error, sizeof(error)), "%s", error);
     ck_assert_msg(scenario_validate(&scenario, ".", error, sizeof(error)), "%s", error);
-    ck_assert_str_eq(scenario.scenario_id, "test_scenario_001");
+    ck_assert_str_eq(scenario.scenario_id, "scanner_fsk");
     ck_assert_uint_eq(scenario.source_count, 1);
     ck_assert_uint_eq(scenario.signal_count, 1);
 }
@@ -180,7 +180,7 @@ START_TEST(rejects_duplicate_source_ids)
 {
     scenario_t scenario;
     char error[128];
-    ck_assert_msg(scenario_load_json("simulator/scenarios/test_scenario_001.json", &scenario, error, sizeof(error)), "%s", error);
+    ck_assert_msg(scenario_load_json("simulator/scenarios/scanner_fsk.json", &scenario, error, sizeof(error)), "%s", error);
     scenario.source_count = 2;
     scenario.sources[1] = scenario.sources[0];
     ck_assert(!scenario_validate(&scenario, ".", error, sizeof(error)));
@@ -192,7 +192,7 @@ START_TEST(rejects_duplicate_signal_ids)
 {
     scenario_t scenario;
     char error[128];
-    ck_assert_msg(scenario_load_json("simulator/scenarios/test_scenario_001.json", &scenario, error, sizeof(error)), "%s", error);
+    ck_assert_msg(scenario_load_json("simulator/scenarios/scanner_fsk.json", &scenario, error, sizeof(error)), "%s", error);
     scenario.signal_count = 2;
     scenario.signals[1] = scenario.signals[0];
     ck_assert(!scenario_validate(&scenario, ".", error, sizeof(error)));
@@ -204,7 +204,7 @@ START_TEST(rejects_missing_source_reference)
 {
     scenario_t scenario;
     char error[128];
-    ck_assert_msg(scenario_load_json("simulator/scenarios/test_scenario_001.json", &scenario, error, sizeof(error)), "%s", error);
+    ck_assert_msg(scenario_load_json("simulator/scenarios/scanner_fsk.json", &scenario, error, sizeof(error)), "%s", error);
     snprintf(scenario.signals[0].source_reference, sizeof(scenario.signals[0].source_reference), "%s", "does_not_exist");
     ck_assert(!scenario_validate(&scenario, ".", error, sizeof(error)));
     ck_assert_str_eq(error, "missing_source_reference");
@@ -215,7 +215,7 @@ START_TEST(resolves_relative_asset_path_against_base_dir)
 {
     scenario_t scenario;
     char error[128];
-    ck_assert_msg(scenario_load_json("simulator/scenarios/test_scenario_001.json", &scenario, error, sizeof(error)), "%s", error);
+    ck_assert_msg(scenario_load_json("simulator/scenarios/scanner_fsk.json", &scenario, error, sizeof(error)), "%s", error);
     /* Path relative to base_dir "simulator" resolves to simulator/assets/fsk_20mhz.c16. */
     snprintf(scenario.sources[0].file, sizeof(scenario.sources[0].file), "%s", "assets/fsk_20mhz.c16");
     scenario.sources[0].sample_count = 0;
@@ -247,7 +247,7 @@ START_TEST(defaults_to_fixed_replay_without_new_fields)
 {
     scenario_t scenario;
     char error[128];
-    ck_assert_msg(scenario_load_json("simulator/scenarios/test_scenario_001.json", &scenario, error, sizeof(error)), "%s", error);
+    ck_assert_msg(scenario_load_json("simulator/scenarios/scanner_fsk.json", &scenario, error, sizeof(error)), "%s", error);
     ck_assert_uint_eq(scenario.signals[0].replay_mode, SCENARIO_REPLAY_FIXED);
     ck_assert(!scenario.signals[0].loop);
     ck_assert_uint_eq(scenario.signals[0].replay_range_start_hz, 0);
@@ -420,7 +420,7 @@ START_TEST(rejects_passthrough_without_range_or_shift)
 {
     scenario_t scenario;
     char error[128];
-    ck_assert_msg(scenario_load_json("simulator/scenarios/test_scenario_001.json", &scenario, error, sizeof(error)), "%s", error);
+    ck_assert_msg(scenario_load_json("simulator/scenarios/scanner_fsk.json", &scenario, error, sizeof(error)), "%s", error);
     scenario.signals[0].passthrough = true; /* fixed replay mode by default */
     ck_assert(!scenario_validate(&scenario, ".", error, sizeof(error)));
     ck_assert_str_eq(error, "passthrough_requires_replay_mode");
@@ -446,7 +446,7 @@ START_TEST(loads_passthrough_variant_scenario)
      * passthrough signal; it must parse and validate, with variant rates/counts populated. */
     scenario_t scenario;
     char error[128];
-    ck_assert_msg(scenario_load_json("simulator/scenarios/replay_passthrough_demo.json", &scenario, error, sizeof(error)), "%s", error);
+    ck_assert_msg(scenario_load_json("simulator/tests/fixtures/passthrough_no_80m.json", &scenario, error, sizeof(error)), "%s", error);
     ck_assert_uint_eq(scenario.sources[0].passthrough_variant_count, 2);
     ck_assert_uint_eq(scenario.sources[0].passthrough_variants[0].sample_rate_hz, 1536000);
     ck_assert_uint_eq(scenario.sources[0].passthrough_variants[1].sample_rate_hz, 24576000);

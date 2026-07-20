@@ -1,11 +1,11 @@
 # General-mixer replay demo: two overlapping replay signals (range + shift mode) rendered
 # through the ordinary renderer, so they can be combined with each other or a noise floor.
 # For a channel dedicated to replaying a single file at minimal cost (no mixer, no resampling,
-# a near-literal file-to-VITA49 copy), see instance_replay_passthrough.yaml instead.
+# a near-literal file-to-VITA49 copy), see receiver_passthrough.yaml instead.
 schema_version: 1
-instance_id: "sim_instance_replay"
+instance_id: "receiver_replay_mixer"
 scenario_file: "simulator/scenarios/replay_range_shift.json"
-log_path: "logs/instance_replay.log"
+log_path: "logs/receiver_replay_mixer.log"
 # 1536-sample blocks: at 98.304 MS/s, 1024 fires the per-block pacing 96k times/s and can't
 # sustain an 80 MHz stream (~76 MS/s); 1536 drops it to 64k/s and reaches full real-time rate.
 stream_block_samples: 1536

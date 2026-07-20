@@ -11,9 +11,9 @@
 #     --sample-rate 98304000 --samples 9830400 \
 #     --output simulator/assets/wideband_80mhz_98304ksps.c16
 schema_version: 1
-instance_id: "sim_instance_ddc"
+instance_id: "receiver_wideband_ddc"
 scenario_file: "simulator/scenarios/wideband_ddc.json"
-log_path: "logs/instance_ddc.log"
+log_path: "logs/receiver_wideband_ddc.log"
 stream_block_samples: 1536
 # Budget for precomputed DDC intermediates (ci16, one full source loop per tune area). One
 # entry costs loop_seconds * intermediate_rate * 4 bytes; the 0.1 s demo loop costs at most

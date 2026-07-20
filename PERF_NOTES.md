@@ -133,7 +133,7 @@ Render-only, single core, `-O3` native, 1536-sample blocks (`renderer_benchmark`
 | Scenario (channel 0) | Msamples/s | x real time |
 | --- | --- | --- |
 | Generator (`test_scenario_001`, synth wideband) | ~587 | 6.0 |
-| 80 MHz passthrough (`replay_passthrough_80mhz`) | **~10 300** | **105** |
+| 80 MHz passthrough (`replay_passthrough`) | **~10 300** | **105** |
 
 Passthrough renders ~17x *faster* than generation and ~105x faster than real time -- the render is
 nowhere near the bottleneck. Live sim metrics under the two-channel 80 MHz demo confirm the sim
@@ -149,9 +149,9 @@ receiver scheduling hiccup drops datagrams. `/proc/net/snmp` showed `Udp InError
 Two things make replay *look* worse than generation even though its render is faster:
 1. The 80 MHz passthrough demo config originally streamed a *second* 80 MHz channel (the wideband
    `track_tuner` reference on ch0) alongside the viewed ch1. That doubles loopback to ~196 MS/s /
-   ~786 MB/s and steals CPU from the receiver so its socket overflows sooner. `instance_001`'s extra
+   ~786 MB/s and steals CPU from the receiver so its socket overflows sooner. `receiver_scanner`'s extra
    channels are 20M each, so the single viewed 80M generator stream keeps more headroom. Ch0 is now
-   `stream_enabled: false` in `instance_passthrough_80mhz.yaml`.
+   `stream_enabled: false` in `receiver_passthrough.yaml`.
 2. The default OS receive buffer is ~50x too small for 80 MHz. Fixes, receiver side (not sim code):
    `sudo sysctl -w net.core.rmem_max=16777216` (and `net.core.rmem_default`), and the receiver must
    request it with `setsockopt(SO_RCVBUF, ~8 MB)` -- a socket only gets a big buffer if it asks *and*
@@ -160,7 +160,7 @@ Two things make replay *look* worse than generation even though its render is fa
 
 ## DDC sub-band channels from wideband recordings (ddc.c / ddc_cache.c)
 
-Load: `renderer_ddc_channels` benchmark — `instance_ddc.yaml` (one 80 MHz track-tuner channel +
+Load: `renderer_ddc_channels` benchmark — `receiver_wideband_ddc.yaml` (one 80 MHz track-tuner channel +
 20 narrow DDC channels, 500 kHz .. 1 kHz) extracting from a shift-mode 80 MHz loop replay
 (`benchmark_ddc.json`, the committed 10 ms capture). This entry uses `--sum-rates`, so the
 printed ratio credits every channel's own stream time (the right measure for mixed-rate loads),

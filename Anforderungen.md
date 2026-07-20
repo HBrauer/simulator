@@ -642,7 +642,7 @@ Eine Quelle kann mehrfach als Signal verwendet werden, zum Beispiel mit untersch
 
 Eine Szenariodatei beschreibt die RF-Welt unabhängig von einer konkreten Simulatorinstanz. Mehrere Simulatorinstanzen können dieselbe Datei laden. Instanzspezifische Werte wie UDP-Portbereiche für Ausgänge gehören in die Simulator-Konfiguration, nicht in das Szenario.
 
-Beispiel `scenarios/test_scenario_001.json`:
+Beispiel `scenarios/scanner_fsk.json`:
 
 ```json
 {
@@ -999,7 +999,7 @@ Beispiel `config/simulator.yaml`:
 ```yaml
 instance_id: sim-a
 
-scenario_file: scenarios/test_scenario_001.json
+scenario_file: scenarios/scanner_fsk.json
 
 receivers:
   - receiver_id: 0

@@ -93,7 +93,7 @@ int main(int argc, char **argv)
     const char *once_arg = arg_value(argc, argv, "--render-once-samples");
     const char *block_samples_arg = arg_value(argc, argv, "--stream-block-samples");
     if (config_path == NULL) {
-        config_path = "simulator/configs/instance_001.yaml";
+        config_path = "simulator/configs/receiver_scanner.yaml";
     }
 
     char error[256];

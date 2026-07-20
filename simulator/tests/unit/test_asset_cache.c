@@ -12,7 +12,7 @@ START_TEST(loads_scenario_assets_into_memory)
     scenario_t scenario;
     asset_cache_t cache;
     char error[128];
-    ck_assert_msg(scenario_load_json("simulator/scenarios/test_scenario_001.json", &scenario, error, sizeof(error)), "%s", error);
+    ck_assert_msg(scenario_load_json("simulator/scenarios/scanner_fsk.json", &scenario, error, sizeof(error)), "%s", error);
     ck_assert_msg(scenario_validate(&scenario, ".", error, sizeof(error)), "%s", error);
     ck_assert_msg(asset_cache_load(&cache, &scenario, error, sizeof(error)), "%s", error);
     ck_assert_uint_eq(cache.asset_count, 1);
@@ -29,7 +29,7 @@ START_TEST(loads_assets_in_small_batches)
     scenario_t scenario;
     asset_cache_t cache;
     char error[128];
-    ck_assert_msg(scenario_load_json("simulator/scenarios/test_scenario_001.json", &scenario, error, sizeof(error)), "%s", error);
+    ck_assert_msg(scenario_load_json("simulator/scenarios/scanner_fsk.json", &scenario, error, sizeof(error)), "%s", error);
     ck_assert_msg(scenario_validate(&scenario, ".", error, sizeof(error)), "%s", error);
     ck_assert_msg(asset_cache_load_limited(&cache, &scenario, 0, 17, NULL, error, sizeof(error)), "%s", error);
     const cached_asset_t *asset = asset_cache_find(&cache, "asset_fsk_001");
@@ -46,7 +46,7 @@ START_TEST(mmaps_iq_asset_over_memory_limit)
     asset_cache_t cache;
     asset_cache_t reference;
     char error[128];
-    ck_assert_msg(scenario_load_json("simulator/scenarios/test_scenario_001.json", &scenario, error, sizeof(error)), "%s", error);
+    ck_assert_msg(scenario_load_json("simulator/scenarios/scanner_fsk.json", &scenario, error, sizeof(error)), "%s", error);
     ck_assert_msg(scenario_validate(&scenario, ".", error, sizeof(error)), "%s", error);
     /* An IQ file over the budget is memory-mapped instead of rejected... */
     ck_assert_msg(asset_cache_load_limited(&cache, &scenario, 16, 4096, NULL, error, sizeof(error)), "%s", error);

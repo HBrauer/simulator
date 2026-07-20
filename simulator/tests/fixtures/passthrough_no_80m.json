@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "scenario_id": "replay_passthrough_demo",
-  "description": "A channel dedicated to replaying a recorded capture, one file per bandwidth. passthrough:true bypasses the mixer (no float bus, noise floor, or other signals) and streams the capture matching the channel's current sample rate straight into VITA-49 packets. Retune the channel bandwidth and it selects the matching variant (1 MHz -> 1.536 MS/s file, 20 MHz -> 24.576 MS/s file); a bandwidth with no variant (e.g. 80 MHz) renders silence -- passthrough never resamples.",
+  "scenario_id": "passthrough_no_80m",
+  "description": "TEST FIXTURE (not a usage demo). Passthrough source with variants for 1 MHz and 20 MHz but deliberately NONE for 80 MHz, so the silence-when-no-variant path can be asserted: retuning a channel to 80 MHz must render silence, never an upsampled approximation. The runnable passthrough demo is simulator/scenarios/replay_passthrough.json.",
   "sources": [
     {
       "id": "capture_fm",

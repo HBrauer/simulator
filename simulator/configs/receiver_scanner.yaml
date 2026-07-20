@@ -1,7 +1,7 @@
 schema_version: 1
-instance_id: "sim_instance_001"
-scenario_file: "simulator/scenarios/test_scenario_001.json"
-log_path: "logs/instance_001.log"
+instance_id: "receiver_scanner"
+scenario_file: "simulator/scenarios/scanner_fsk.json"
+log_path: "logs/receiver_scanner.log"
 stream_block_samples: 1024
 stream_cpu: -1
 asset_cache_max_bytes: 0

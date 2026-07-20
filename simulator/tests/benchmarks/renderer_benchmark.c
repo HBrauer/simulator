@@ -51,8 +51,8 @@ int main(int argc, char **argv)
     bool all_channels = false;
     bool sum_rates = false;
     double assert_realtime = 0.0;
-    const char *config_path = "simulator/configs/instance_001.yaml";
-    const char *scenario_path = "simulator/scenarios/test_scenario_001.json";
+    const char *config_path = "simulator/configs/receiver_scanner.yaml";
+    const char *scenario_path = "simulator/scenarios/scanner_fsk.json";
     const char *json_path = NULL;
     if (argc > 1) {
         blocks = (size_t)strtoull(argv[1], NULL, 10);

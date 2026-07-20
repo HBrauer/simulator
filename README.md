@@ -33,9 +33,8 @@ Terminal 1, start the simulator:
 
 ```sh
 build/sdr-simulator \
-  --config simulator/configs/instance_001.yaml \
-  --scenario simulator/scenarios/gnuradio_demo.json \
-  --stream-block-samples 1536
+  --config simulator/configs/receiver_scanner.yaml \
+  --scenario simulator/scenarios/gnuradio_demo.json
 ```
 
 Terminal 2, start the waterfall receiver on channel 1. It discovers the channel's UDP port, sample rate, and bandwidth from the REST API — no `--port`/`--sample-rate-hz` needed:
@@ -53,9 +52,8 @@ For a non-continuous signal, use `simulator/scenarios/burst_1s_every_5s.json`. I
 
 ```sh
 build/sdr-simulator \
-  --config simulator/configs/instance_001.yaml \
-  --scenario simulator/scenarios/burst_1s_every_5s.json \
-  --stream-block-samples 1536
+  --config simulator/configs/receiver_scanner.yaml \
+  --scenario simulator/scenarios/burst_1s_every_5s.json
 ```
 
 ### Recorded-file replay (range and shift modes)
@@ -76,7 +74,7 @@ payloads) at identical wall-clock times**:
 
 ```sh
 build/sdr-simulator \
-  --config simulator/configs/instance_replay.yaml \
+  --config simulator/configs/receiver_replay_mixer.yaml \
   --scenario simulator/scenarios/replay_range_shift.json
 ```
 
@@ -86,8 +84,8 @@ over the remaining budget are memory-mapped read-only instead of copied to RAM, 
 replaying the same capture share the page cache.
 
 If a channel's only job is to replay one capture — no mixing with other signals or noise — add
-`"passthrough": true` to its signal (`simulator/scenarios/replay_passthrough_demo.json`, run with
-`simulator/configs/instance_replay_passthrough.yaml`). The source then supplies one capture file
+`"passthrough": true` to its signal (`simulator/scenarios/replay_passthrough.json`, run with
+`simulator/configs/receiver_passthrough.yaml`). The source then supplies one capture file
 per channel sample rate (`passthrough_variants`); the renderer picks the variant matching the
 channel's current rate and streams it straight into VITA-49 packets, skipping the general mixer
 (no float mix bus, no noise floor, no other signals) — roughly **15x less render time per block**
@@ -100,8 +98,8 @@ a replay capture to combine with other signals or a noise floor.
 
 ```sh
 build/sdr-simulator \
-  --config simulator/configs/instance_replay_passthrough.yaml \
-  --scenario simulator/scenarios/replay_passthrough_demo.json
+  --config simulator/configs/receiver_passthrough.yaml \
+  --scenario simulator/scenarios/replay_passthrough.json
 ```
 
 For an audio-modulated radio demo, create a mono 48 kHz PCM WAV asset first:
@@ -114,9 +112,8 @@ Then run the audio scenario. It places WBFM, AM, USB, and LSB signals from the s
 
 ```sh
 build/sdr-simulator \
-  --config simulator/configs/instance_001.yaml \
-  --scenario simulator/scenarios/audio_radio_demo.json \
-  --stream-block-samples 1536
+  --config simulator/configs/receiver_scanner.yaml \
+  --scenario simulator/scenarios/audio_radio_demo.json
 ```
 
 Each audio-modulated signal is **pre-rendered to complex-baseband IQ once at startup**, at an
@@ -136,11 +133,13 @@ it:
 
 ```sh
 build/sdr-simulator \
-  --config simulator/configs/instance_001.yaml \
-  --scenario simulator/scenarios/test_scenario_001.json
+  --config simulator/configs/receiver_scanner.yaml \
+  --scenario simulator/scenarios/scanner_fsk.json
 ```
 
-`stream_block_samples` in the instance YAML controls the CI16 IQ payload size in samples inside each VITA 49.2 UDP packet. The default is 1024 samples, and the allowed range is 1 to 4096 samples. `--stream-block-samples` overrides the YAML value for ad hoc runs. For high-rate receiver tests over jumbo-frame Ethernet, use `1536` samples; that produces a `6164` byte VITA/UDP payload and avoids IP fragmentation with MTU 9000.
+`stream_block_samples` in the instance YAML controls the CI16 IQ payload size in samples inside each VITA 49.2 UDP packet. The default is 1024 samples, and the allowed range is 1 to 4096 samples. For a real deployment, set this in the config file. For high-rate receiver tests over jumbo-frame Ethernet, use `1536` samples; that produces a `6164` byte VITA/UDP payload and avoids IP fragmentation with MTU 9000.
+
+The `--stream-block-samples <n>` command-line flag overrides the YAML value for a single run. It exists for testing and ad-hoc experimentation (sweeping payload sizes against one config); production runs should use the config field instead.
 
 Each receiver declares its supported `{bandwidth_hz, sample_rate_hz}` **profiles** and a list of **channels** in the instance YAML (see `docs/schemas.md`). Channel 0 in the sample config tracks the tuner at 80 MHz / 98.304 MS/s; channels 1-4 are fixed-center 20 MHz / 24.576 MS/s. Channel center frequency and bandwidth are settable at runtime via REST; selecting a bandwidth always selects its paired sample rate, like real DDC decimation stages.
 
@@ -177,9 +176,14 @@ Compare `sample_rate_hz` to `actual_sample_rate_sps`. `samples_sent` is the numb
 
 ## Multicast UDP
 
-Set `udp_output_host` to an IPv4 multicast group such as `239.10.10.10`. The simulator sends the same VITA 49.2 UDP packets to the multicast group, and receivers join the group explicitly.
+Multicast is not a separate receiver setup — it is just a different output address on any config. In the receiver block of the config you want to run (e.g. `receiver_scanner.yaml`), set `udp_output_host` to an IPv4 multicast group and, for local testing, `udp_multicast_interface`:
 
-For local-machine testing, set `udp_multicast_interface: "127.0.0.1"` in the simulator config and pass `--interface 127.0.0.1` to the receiver. Otherwise the kernel may route multicast over the default physical NIC, which cannot carry a 98 MS/s CI16 stream.
+```yaml
+    udp_output_host: "239.10.10.10"
+    udp_multicast_interface: "127.0.0.1"
+```
+
+The simulator then sends the same VITA 49.2 UDP packets to the multicast group, and receivers join the group explicitly. (`udp_output_host` has no command-line override, so this has to live in the config.) Without `udp_multicast_interface: "127.0.0.1"` the kernel may route multicast over the default physical NIC, which cannot carry a 98 MS/s CI16 stream; pass the matching `--interface 127.0.0.1` to the receiver.
 
 Terminal 1, join channel 1 on multicast:
 
@@ -191,11 +195,11 @@ build/sdr-waterfall-receiver \
   --fft-size 1024
 ```
 
-With `--control-url` the receiver reads `udp_output_host` from the API and joins the multicast group automatically. (Manual mode: `--host 239.10.10.10 --port 50001 --sample-rate-hz 24576000`.) Terminal 2, start the multicast simulator:
+With `--control-url` the receiver reads `udp_output_host` from the API and joins the multicast group automatically. (Manual mode: `--host 239.10.10.10 --port 50001 --sample-rate-hz 24576000`.) Terminal 2, start the simulator with the config you edited above:
 
 ```sh
 build/sdr-simulator \
-  --config simulator/configs/instance_multicast.yaml \
+  --config simulator/configs/receiver_scanner.yaml \
   --scenario simulator/scenarios/burst_1s_every_5s.json
 ```
 
@@ -203,8 +207,8 @@ build/sdr-simulator \
 
 ```sh
 build/sdr-simulator \
-  --config simulator/configs/instance_001.yaml \
-  --scenario simulator/scenarios/test_scenario_001.json \
+  --config simulator/configs/receiver_scanner.yaml \
+  --scenario simulator/scenarios/scanner_fsk.json \
   --scenario-time-ns 450000 \
   --render-once-samples 256 | sha256sum
 ```
@@ -285,7 +289,7 @@ meson test -C build-sanitize
 build/renderer_benchmark 1000 4096
 build/renderer_benchmark 1000 4096 --receivers 4 --json build/renderer_benchmark.json
 build-perf/renderer_benchmark 2000 4096 \
-  --config simulator/configs/instance_multicast.yaml \
+  --config simulator/configs/receiver_scanner.yaml \
   --scenario simulator/scenarios/burst_1s_every_5s.json
 meson test --benchmark -C build -j 1
 ```
@@ -301,7 +305,7 @@ meson setup build-perf --buildtype=release -Dfast_math=true
 meson compile -C build-perf
 
 build-perf/sdr-simulator \
-  --config simulator/configs/instance_001.yaml \
+  --config simulator/configs/receiver_scanner.yaml \
   --scenario simulator/scenarios/gnuradio_demo.json \
   --stream-block-samples 1536
 ```

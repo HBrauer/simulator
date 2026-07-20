@@ -18,8 +18,8 @@ Run this checklist from a clean working tree.
 
 ```sh
 build/sdr-simulator \
-  --config simulator/configs/instance_001.yaml \
-  --scenario simulator/scenarios/test_scenario_001.json \
+  --config simulator/configs/receiver_scanner.yaml \
+  --scenario simulator/scenarios/scanner_fsk.json \
   --scenario-time-ns 450000 \
   --render-once-samples 256 | sha256sum
 ```
@@ -28,7 +28,7 @@ build/sdr-simulator \
 
 ## Runtime Smoke
 
-- Start one instance with `simulator/configs/instance_001.yaml`.
+- Start one instance with `simulator/configs/receiver_scanner.yaml`.
 - Check `/api/v1/health`, `/api/v1/status`, `/api/v1/metrics`, and `/api/v1/streams`.
 - Capture one UDP packet from the receiver stream and confirm it parses as VITA 49.2 with a CI16 payload length of `stream_block_samples * 4`.
 - Run `meson test -C build` for simulator and C waterfall receiver tests.
