@@ -162,7 +162,7 @@ Two things make replay *look* worse than generation even though its render is fa
 
 Load: `renderer_ddc_channels` benchmark — `receiver_wideband_ddc.yaml` (one 80 MHz track-tuner channel +
 20 narrow DDC channels, 500 kHz .. 1 kHz) extracting from a shift-mode 80 MHz loop replay
-(`benchmark_ddc.json`, the committed 10 ms capture). This entry uses `--sum-rates`, so the
+(`benchmark_ddc.yaml`, the committed 10 ms capture). This entry uses `--sum-rates`, so the
 printed ratio credits every channel's own stream time (the right measure for mixed-rate loads),
 unlike the wideband-only crediting of the older entries above.
 

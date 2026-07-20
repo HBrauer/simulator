@@ -19,7 +19,7 @@ Run this checklist from a clean working tree.
 ```sh
 build/sdr-simulator \
   --config simulator/configs/receiver_scanner.yaml \
-  --scenario simulator/scenarios/scanner_fsk.json \
+  --scenario simulator/scenarios/scanner_fsk.yaml \
   --scenario-time-ns 450000 \
   --render-once-samples 256 | sha256sum
 ```

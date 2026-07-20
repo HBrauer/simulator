@@ -52,7 +52,7 @@ int main(int argc, char **argv)
     bool sum_rates = false;
     double assert_realtime = 0.0;
     const char *config_path = "simulator/configs/receiver_scanner.yaml";
-    const char *scenario_path = "simulator/scenarios/scanner_fsk.json";
+    const char *scenario_path = "simulator/scenarios/scanner_fsk.yaml";
     const char *json_path = NULL;
     if (argc > 1) {
         blocks = (size_t)strtoull(argv[1], NULL, 10);
@@ -87,7 +87,7 @@ int main(int argc, char **argv)
     scenario_t scenario;
     asset_cache_t cache;
     if (!config_load_yaml(config_path, &config, error, sizeof(error)) ||
-        !scenario_load_json(scenario_path, &scenario, error, sizeof(error)) ||
+        !scenario_load(scenario_path, &scenario, error, sizeof(error)) ||
         !scenario_validate(&scenario, ".", error, sizeof(error)) ||
         !asset_cache_load(&cache, &scenario, error, sizeof(error))) {
         fprintf(stderr, "setup failed: %s\n", error);

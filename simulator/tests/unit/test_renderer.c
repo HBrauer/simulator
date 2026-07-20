@@ -285,7 +285,7 @@ START_TEST(renders_nonzero_visible_signal)
     scenario_t scenario;
     char error[128];
     ck_assert_msg(config_load_yaml("simulator/configs/receiver_scanner.yaml", &config, error, sizeof(error)), "%s", error);
-    ck_assert_msg(scenario_load_json("simulator/scenarios/scanner_fsk.json", &scenario, error, sizeof(error)), "%s", error);
+    ck_assert_msg(scenario_load("simulator/scenarios/scanner_fsk.yaml", &scenario, error, sizeof(error)), "%s", error);
     ck_assert_msg(scenario_validate(&scenario, ".", error, sizeof(error)), "%s", error);
     asset_cache_t cache;
     ck_assert_msg(asset_cache_load(&cache, &scenario, error, sizeof(error)), "%s", error);
@@ -306,7 +306,7 @@ START_TEST(renderer_80mhz_sinc_resamples_24576_source_to_98304_output)
     scenario_t scenario;
     char error[128];
     ck_assert_msg(config_load_yaml("simulator/configs/receiver_scanner.yaml", &config, error, sizeof(error)), "%s", error);
-    ck_assert_msg(scenario_load_json("simulator/scenarios/scanner_fsk.json", &scenario, error, sizeof(error)), "%s", error);
+    ck_assert_msg(scenario_load("simulator/scenarios/scanner_fsk.yaml", &scenario, error, sizeof(error)), "%s", error);
     ck_assert_msg(scenario_validate(&scenario, ".", error, sizeof(error)), "%s", error);
     asset_cache_t cache;
     ck_assert_msg(asset_cache_load(&cache, &scenario, error, sizeof(error)), "%s", error);
@@ -394,7 +394,7 @@ START_TEST(renderer_applies_rf_power_relative_to_reference)
     scenario_t scenario;
     char error[128];
     ck_assert_msg(config_load_yaml("simulator/configs/receiver_scanner.yaml", &config, error, sizeof(error)), "%s", error);
-    ck_assert_msg(scenario_load_json("simulator/scenarios/scanner_fsk.json", &scenario, error, sizeof(error)), "%s", error);
+    ck_assert_msg(scenario_load("simulator/scenarios/scanner_fsk.yaml", &scenario, error, sizeof(error)), "%s", error);
     ck_assert_msg(scenario_validate(&scenario, ".", error, sizeof(error)), "%s", error);
     scenario.signals[0].power_dbm = -49.0;
     config.receivers[0].channels[0].rf_reference_power_dbm = -55.0;
@@ -579,7 +579,7 @@ START_TEST(renders_ddc_nonzero_visible_signal)
 {
     scenario_t scenario;
     char error[128];
-    ck_assert_msg(scenario_load_json("simulator/scenarios/scanner_fsk.json", &scenario, error, sizeof(error)), "%s", error);
+    ck_assert_msg(scenario_load("simulator/scenarios/scanner_fsk.yaml", &scenario, error, sizeof(error)), "%s", error);
     ck_assert_msg(scenario_validate(&scenario, ".", error, sizeof(error)), "%s", error);
     asset_cache_t cache;
     ck_assert_msg(asset_cache_load(&cache, &scenario, error, sizeof(error)), "%s", error);
@@ -599,7 +599,7 @@ START_TEST(renders_ddc_4096_sample_block_for_waterfall)
 {
     scenario_t scenario;
     char error[128];
-    ck_assert_msg(scenario_load_json("simulator/scenarios/scanner_fsk.json", &scenario, error, sizeof(error)), "%s", error);
+    ck_assert_msg(scenario_load("simulator/scenarios/scanner_fsk.yaml", &scenario, error, sizeof(error)), "%s", error);
     ck_assert_msg(scenario_validate(&scenario, ".", error, sizeof(error)), "%s", error);
     asset_cache_t cache;
     ck_assert_msg(asset_cache_load(&cache, &scenario, error, sizeof(error)), "%s", error);
@@ -869,7 +869,7 @@ START_TEST(renders_burst_scenario_only_during_active_second)
 {
     scenario_t scenario;
     char error[128];
-    ck_assert_msg(scenario_load_json("simulator/scenarios/burst_1s_every_5s.json", &scenario, error, sizeof(error)), "%s", error);
+    ck_assert_msg(scenario_load("simulator/scenarios/burst_1s_every_5s.yaml", &scenario, error, sizeof(error)), "%s", error);
     ck_assert_msg(scenario_validate(&scenario, ".", error, sizeof(error)), "%s", error);
     asset_cache_t cache;
     ck_assert_msg(asset_cache_load(&cache, &scenario, error, sizeof(error)), "%s", error);

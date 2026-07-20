@@ -1,12 +1,12 @@
 # Passthrough replay: channel 1 is dedicated to streaming a recorded capture verbatim.
-# The scenario (replay_passthrough.json) carries one capture per bandwidth (1M / 20M / 80M).
+# The scenario (replay_passthrough.yaml) carries one capture per bandwidth (1M / 20M / 80M).
 # Channel 1 defaults to the full 80 MHz / 98.304 MS/s profile and streams that capture with no
 # resampling; retune its bandwidth via REST (PUT /api/v1/channels/1) to 20M or 1M to select a
 # different variant. Retuning to a bandwidth with no matching variant renders silence --
 # passthrough never resamples.
 schema_version: 1
 instance_id: "receiver_passthrough"
-scenario_file: "simulator/scenarios/replay_passthrough.json"
+scenario_file: "simulator/scenarios/replay_passthrough.yaml"
 log_path: "logs/receiver_passthrough.log"
 # 1536-sample blocks reach full real-time rate at 80 MHz; 1024 cannot (see receiver_replay_mixer.yaml).
 stream_block_samples: 1536

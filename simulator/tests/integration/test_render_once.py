@@ -8,7 +8,7 @@ def test_render_once_is_deterministic():
         "--config",
         "simulator/configs/receiver_scanner.yaml",
         "--scenario",
-        "simulator/scenarios/scanner_fsk.json",
+        "simulator/scenarios/scanner_fsk.yaml",
         "--scenario-time-ns",
         "450000",
         "--render-once-samples",

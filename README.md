@@ -8,7 +8,7 @@ This repository contains two applications:
 Current implementation includes:
 
 - YAML instance configuration.
-- JSON RF scenario loading.
+- YAML RF scenario loading.
 - deterministic scenario-time override.
 - unified channel model: every stream is a channel with a supported {bandwidth, sample rate} profile; the wideband stream is channel 0 tracking the tuner.
 - per-receiver REST API with capability discovery and runtime channel frequency/bandwidth control.
@@ -34,7 +34,7 @@ Terminal 1, start the simulator:
 ```sh
 build/sdr-simulator \
   --config simulator/configs/receiver_scanner.yaml \
-  --scenario simulator/scenarios/gnuradio_demo.json
+  --scenario simulator/scenarios/gnuradio_demo.yaml
 ```
 
 Terminal 2, start the waterfall receiver on channel 1. It discovers the channel's UDP port, sample rate, and bandwidth from the REST API — no `--port`/`--sample-rate-hz` needed:
@@ -48,17 +48,17 @@ build/sdr-waterfall-receiver \
 
 The receiver opens an SDL2 window, parses VITA 49.2 packets at UDP line rate, and displays the selected history duration across automatically computed waterfall rows. The toolbar's left control group has a channel combo box, a center-frequency input field (click, type MHz, Enter), and a bandwidth combo box listing the supported profiles (keyboard: PgUp/PgDn or `0`-`7` for channels, Left/Right with Shift for x10 retune steps, `B` to cycle bandwidth). The wideband scanner stream is channel `0` on port `50000`; the quick start uses channel `1` (port `50001`) because it is centered on the demo signal and is easier to verify visually. Manual mode still works: `--host 127.0.0.1 --port 50001 --sample-rate-hz 24576000`.
 
-For a non-continuous signal, use `simulator/scenarios/burst_1s_every_5s.json`. It emits a one-second burst every five seconds on channel 1 over a continuous simulated noise floor:
+For a non-continuous signal, use `simulator/scenarios/burst_1s_every_5s.yaml`. It emits a one-second burst every five seconds on channel 1 over a continuous simulated noise floor:
 
 ```sh
 build/sdr-simulator \
   --config simulator/configs/receiver_scanner.yaml \
-  --scenario simulator/scenarios/burst_1s_every_5s.json
+  --scenario simulator/scenarios/burst_1s_every_5s.yaml
 ```
 
 ### Recorded-file replay (range and shift modes)
 
-`simulator/scenarios/replay_range_shift.json` demonstrates replaying recorded IQ captures tied to
+`simulator/scenarios/replay_range_shift.yaml` demonstrates replaying recorded IQ captures tied to
 the tuned frequency (see `docs/schemas.md` for the full schema):
 
 - **range mode** — the file plays *centered at the tuned frequency* whenever the channel's center
@@ -75,7 +75,7 @@ payloads) at identical wall-clock times**:
 ```sh
 build/sdr-simulator \
   --config simulator/configs/receiver_replay_mixer.yaml \
-  --scenario simulator/scenarios/replay_range_shift.json
+  --scenario simulator/scenarios/replay_range_shift.yaml
 ```
 
 Large captures are handled by the asset budget (`asset_cache_max_bytes`, default 16 GiB): IQ files
@@ -84,7 +84,7 @@ over the remaining budget are memory-mapped read-only instead of copied to RAM, 
 replaying the same capture share the page cache.
 
 If a channel's only job is to replay one capture — no mixing with other signals or noise — add
-`"passthrough": true` to its signal (`simulator/scenarios/replay_passthrough.json`, run with
+`passthrough: true` to its signal (`simulator/scenarios/replay_passthrough.yaml`, run with
 `simulator/configs/receiver_passthrough.yaml`). The source then supplies one capture file
 per channel sample rate (`passthrough_variants`); the renderer picks the variant matching the
 channel's current rate and streams it straight into VITA-49 packets, skipping the general mixer
@@ -99,7 +99,7 @@ a replay capture to combine with other signals or a noise floor.
 ```sh
 build/sdr-simulator \
   --config simulator/configs/receiver_passthrough.yaml \
-  --scenario simulator/scenarios/replay_passthrough.json
+  --scenario simulator/scenarios/replay_passthrough.yaml
 ```
 
 For an audio-modulated radio demo, create a mono 48 kHz PCM WAV asset first:
@@ -113,7 +113,7 @@ Then run the audio scenario. It places WBFM, AM, USB, and LSB signals from the s
 ```sh
 build/sdr-simulator \
   --config simulator/configs/receiver_scanner.yaml \
-  --scenario simulator/scenarios/audio_radio_demo.json
+  --scenario simulator/scenarios/audio_radio_demo.yaml
 ```
 
 Each audio-modulated signal is **pre-rendered to complex-baseband IQ once at startup**, at an
@@ -134,7 +134,7 @@ it:
 ```sh
 build/sdr-simulator \
   --config simulator/configs/receiver_scanner.yaml \
-  --scenario simulator/scenarios/scanner_fsk.json
+  --scenario simulator/scenarios/scanner_fsk.yaml
 ```
 
 `stream_block_samples` in the instance YAML controls the CI16 IQ payload size in samples inside each VITA 49.2 UDP packet. The default is 1024 samples, and the allowed range is 1 to 4096 samples. For a real deployment, set this in the config file. For high-rate receiver tests over jumbo-frame Ethernet, use `1536` samples; that produces a `6164` byte VITA/UDP payload and avoids IP fragmentation with MTU 9000.
@@ -200,7 +200,7 @@ With `--control-url` the receiver reads `udp_output_host` from the API and joins
 ```sh
 build/sdr-simulator \
   --config simulator/configs/receiver_scanner.yaml \
-  --scenario simulator/scenarios/burst_1s_every_5s.json
+  --scenario simulator/scenarios/burst_1s_every_5s.yaml
 ```
 
 ## Deterministic Render Check
@@ -208,7 +208,7 @@ build/sdr-simulator \
 ```sh
 build/sdr-simulator \
   --config simulator/configs/receiver_scanner.yaml \
-  --scenario simulator/scenarios/scanner_fsk.json \
+  --scenario simulator/scenarios/scanner_fsk.yaml \
   --scenario-time-ns 450000 \
   --render-once-samples 256 | sha256sum
 ```
@@ -244,7 +244,7 @@ configuration are not retroactively changed.
   and/or ranges, e.g. `"2-7"` or `"0,2,4-6"`. Render and UDP threads are placed on distinct cores.
   Absent means no pinning. The older single-integer `stream_cpu` still works and maps to a
   one-element set.
-- `noise_floor.power_dbm_per_hz` (scenario JSON): preferred way to specify the noise floor as a
+- `noise_floor.power_dbm_per_hz` (scenario YAML): preferred way to specify the noise floor as a
   spectral density that scales with window bandwidth. The legacy total-power `power_dbm` is still
   accepted; see `docs/schemas.md`.
 
@@ -290,7 +290,7 @@ build/renderer_benchmark 1000 4096
 build/renderer_benchmark 1000 4096 --receivers 4 --json build/renderer_benchmark.json
 build-perf/renderer_benchmark 2000 4096 \
   --config simulator/configs/receiver_scanner.yaml \
-  --scenario simulator/scenarios/burst_1s_every_5s.json
+  --scenario simulator/scenarios/burst_1s_every_5s.yaml
 meson test --benchmark -C build -j 1
 ```
 
@@ -306,7 +306,7 @@ meson compile -C build-perf
 
 build-perf/sdr-simulator \
   --config simulator/configs/receiver_scanner.yaml \
-  --scenario simulator/scenarios/gnuradio_demo.json \
+  --scenario simulator/scenarios/gnuradio_demo.yaml \
   --stream-block-samples 1536
 ```
 

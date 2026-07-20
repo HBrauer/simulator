@@ -1,0 +1,30 @@
+schema_version: 1
+scenario_id: burst_1s_every_5s
+description: One-second FSK-like CI16 burst centered on DDC0, repeating every five seconds over a continuous receiver noise floor.
+units:
+  frequency_unit: Hz
+  time_unit: s
+  level_unit: dBm
+noise_floor:
+  enabled: true
+  power_dbm_per_hz: -160.0
+  seed: 49152
+sources:
+- id: asset_burst_1s_1msps
+  source_type: iq_file
+  file: simulator/assets/burst_1s_1msps.c16
+  format: ci16
+  byte_order: little_endian
+  iq_layout: interleaved_iq
+  sample_rate_hz: 1024000
+  bandwidth_hz: 1000000
+  center_frequency_hz: 0
+  nominal_level_dbfs: -10.0
+signals:
+- signal_id: sig_burst_1s_every_5s_ddc0
+  source_reference: asset_burst_1s_1msps
+  center_frequency_hz: 10005000000
+  bandwidth_hz: 1000000
+  power_dbm: -55.0
+  start_time_s: 0.0
+  repeat_interval_s: 5.0

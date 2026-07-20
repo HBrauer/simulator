@@ -1,0 +1,26 @@
+schema_version: 1
+scenario_id: passthrough_no_80m
+description: 'TEST FIXTURE (not a usage demo). Passthrough source with variants for 1 MHz and 20 MHz but deliberately NONE for 80 MHz, so the silence-when-no-variant path can be asserted: retuning a channel to 80 MHz must render silence, never an upsampled approximation. The runnable passthrough demo is simulator/scenarios/replay_passthrough.yaml.'
+sources:
+- id: capture_fm
+  source_type: iq_file
+  format: ci16
+  byte_order: little_endian
+  iq_layout: interleaved_iq
+  passthrough_variants:
+  - sample_rate_hz: 1536000
+    bandwidth_hz: 1000000
+    file: simulator/assets/replay_tone_1536ksps.c16
+  - sample_rate_hz: 24576000
+    bandwidth_hz: 20000000
+    file: simulator/assets/replay_tone_20m_24576ksps.c16
+signals:
+- signal_id: replay_passthrough_fm
+  source_reference: capture_fm
+  replay_mode: range
+  frequency_range:
+    start_hz: 99900000
+    stop_hz: 100100000
+  bandwidth_hz: 1000000
+  power_dbm: -55.0
+  passthrough: true

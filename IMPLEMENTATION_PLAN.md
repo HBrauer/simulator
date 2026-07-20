@@ -579,7 +579,7 @@ target `renderer_benchmark`. Use `timebase_set_override` for all determinism tes
 12. **Scenario/WAV/receiver:** relative-path resolution; probe-not-load; extensible WAV; data=0xFFFFFFFF; error-message format; scan-rate validation; noise field conflict; legacy fields with deprecation behavior.
 
 ### Integration tests (pytest, `simulator/tests/integration`)
-- Start the simulator with `audio_radio_demo.json` + an IQ scenario, capture UDP for N seconds,
+- Start the simulator with `audio_radio_demo.yaml` + an IQ scenario, capture UDP for N seconds,
   parse VITA-49: (a) timestamps advance by exactly block_duration per packet per stream,
   (b) all streams' timestamps come from the same grid, (c) demodulate the WBFM channel in
   Python (numpy) and assert audio SNR above a threshold and **no periodic click energy at the

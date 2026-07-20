@@ -16,7 +16,7 @@ static const char *write_temp_config_body(const char *top_body, const char *rece
     }
     fputs("schema_version: 1\n", f);
     fputs("instance_id: \"t\"\n", f);
-    fputs("scenario_file: \"simulator/scenarios/scanner_fsk.json\"\n", f);
+    fputs("scenario_file: \"simulator/scenarios/scanner_fsk.yaml\"\n", f);
     fputs(top_body, f);
     fputs("receivers:\n"
           "  - receiver_id: 0\n"

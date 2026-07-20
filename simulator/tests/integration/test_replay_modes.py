@@ -1,6 +1,6 @@
 """Range/shift file replay over the live UDP pipeline.
 
-Uses scenarios/replay_range_shift.json: a range-mode capture active for tunes inside
+Uses scenarios/replay_range_shift.yaml: a range-mode capture active for tunes inside
 99.9-100.1 MHz and a shift-mode capture pinned to 100 MHz absolute while tuned anywhere
 in 80-120 MHz. Noise floor is disabled in the scenario, so "silent" means all-zero payloads.
 """
@@ -24,7 +24,7 @@ from test_runtime_rest_udp import (
 
 ROOT = Path(__file__).resolve().parents[3]
 SIM = ROOT / "build" / "sdr-simulator"
-SCENARIO = "simulator/scenarios/replay_range_shift.json"
+SCENARIO = "simulator/scenarios/replay_range_shift.yaml"
 
 
 def _write_replay_config(path, rest_port, udp_base):
@@ -201,7 +201,7 @@ def test_replay_instances_started_apart_stay_sample_synchronous(tmp_path):
         sock_b.close()
 
 
-PASSTHROUGH_SCENARIO = "simulator/tests/fixtures/passthrough_no_80m.json"
+PASSTHROUGH_SCENARIO = "simulator/tests/fixtures/passthrough_no_80m.yaml"
 
 
 def _write_passthrough_config(path, rest_port, udp_base):

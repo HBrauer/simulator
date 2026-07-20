@@ -3,10 +3,10 @@
 The simulator is split into deterministic RF rendering, runtime control, and UDP streaming.
 
 ```text
-YAML config             JSON scenario              IQ assets
+YAML config             YAML scenario              IQ assets
     |                       |                         |
     v                       v                         v
-config_load_yaml       scenario_load_json       asset_cache_load
+config_load_yaml       scenario_load       asset_cache_load
     |                       |                         |
     +-----------------------+-------------------------+
                             |
@@ -67,7 +67,7 @@ Receiver configuration updates from REST are protected by `receiver_lock`. Strea
 
 The deterministic inputs are:
 
-- scenario JSON.
+- scenario YAML.
 - IQ asset files.
 - scenario time.
 - receiver tuner/channel configuration at that scenario time.

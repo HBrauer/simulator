@@ -56,7 +56,7 @@ def _write_config(path, rest_port, udp_base, ch1_center=10005000000, stream_bloc
     path.write_text(
         f"""schema_version: 1
 instance_id: "pytest_runtime"
-scenario_file: "simulator/scenarios/scanner_fsk.json"
+scenario_file: "simulator/scenarios/scanner_fsk.yaml"
 log_path: "logs/pytest_runtime.log"
 {stream_block_samples_line}\
 receivers:
@@ -82,7 +82,7 @@ def _write_two_receiver_config(path, rest_port_0, rest_port_1, udp_base):
     path.write_text(
         f"""schema_version: 1
 instance_id: "pytest_two_receivers"
-scenario_file: "simulator/scenarios/scanner_fsk.json"
+scenario_file: "simulator/scenarios/scanner_fsk.yaml"
 log_path: "logs/pytest_two_receivers.log"
 receivers:
   - receiver_id: 0
@@ -372,7 +372,7 @@ def _start_sim(config, extra_args=()):
             "--config",
             str(config),
             "--scenario",
-            "simulator/scenarios/scanner_fsk.json",
+            "simulator/scenarios/scanner_fsk.yaml",
             "--scenario-time-ns",
             "450000",
             *extra_args,
@@ -475,7 +475,7 @@ def test_runtime_rest_and_udp_stream(tmp_path):
                 "--config",
                 str(config),
                 "--scenario",
-                "simulator/scenarios/scanner_fsk.json",
+                "simulator/scenarios/scanner_fsk.yaml",
                 "--scenario-time-ns",
                 str(_grid_time_ns(450000, 256)),
                 "--render-once-samples",
@@ -772,7 +772,7 @@ def test_vita49_udp_wraps_and_keeps_raw_payload(tmp_path):
                 "--config",
                 str(config),
                 "--scenario",
-                "simulator/scenarios/scanner_fsk.json",
+                "simulator/scenarios/scanner_fsk.yaml",
                 "--scenario-time-ns",
                 str(grid_ns),
                 "--render-once-samples",

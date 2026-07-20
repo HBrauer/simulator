@@ -4,7 +4,7 @@
 # a near-literal file-to-VITA49 copy), see receiver_passthrough.yaml instead.
 schema_version: 1
 instance_id: "receiver_replay_mixer"
-scenario_file: "simulator/scenarios/replay_range_shift.json"
+scenario_file: "simulator/scenarios/replay_range_shift.yaml"
 log_path: "logs/receiver_replay_mixer.log"
 # 1536-sample blocks: at 98.304 MS/s, 1024 fires the per-block pacing 96k times/s and can't
 # sustain an 80 MHz stream (~76 MS/s); 1536 drops it to 64k/s and reaches full real-time rate.

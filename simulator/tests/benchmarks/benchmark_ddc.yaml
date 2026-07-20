@@ -1,0 +1,28 @@
+schema_version: 1
+scenario_id: benchmark_ddc
+description: 'DDC benchmark load: the committed 10 ms 80 MHz tone capture replayed in shift mode at 100-180 MHz, extracted by the receiver_wideband_ddc.yaml channel set (one 80 MHz track-tuner channel plus 20 narrow DDCs). Its 983040-sample loop is divisible by every DDC front decimation, so all channels use the cached-intermediate path.'
+units:
+  frequency_unit: Hz
+  time_unit: s
+  level_unit: dBm
+sources:
+- id: wideband_recording
+  source_type: iq_file
+  file: simulator/assets/replay_tone_80m_98304ksps.c16
+  format: ci16
+  byte_order: little_endian
+  iq_layout: interleaved_iq
+  sample_rate_hz: 98304000
+  bandwidth_hz: 80000000
+  center_frequency_hz: 140000000
+  nominal_level_dbfs: -12.0
+signals:
+- signal_id: wideband_replay
+  source_reference: wideband_recording
+  replay_mode: shift
+  center_frequency_hz: 140000000
+  frequency_range:
+    start_hz: 100000000
+    stop_hz: 180000000
+  bandwidth_hz: 80000000
+  power_dbm: -55.0

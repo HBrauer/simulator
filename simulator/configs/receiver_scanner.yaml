@@ -1,6 +1,6 @@
 schema_version: 1
 instance_id: "receiver_scanner"
-scenario_file: "simulator/scenarios/scanner_fsk.json"
+scenario_file: "simulator/scenarios/scanner_fsk.yaml"
 log_path: "logs/receiver_scanner.log"
 stream_block_samples: 1024
 stream_cpu: -1

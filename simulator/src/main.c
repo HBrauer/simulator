@@ -106,7 +106,7 @@ int main(int argc, char **argv)
         scenario_path = config.scenario_file;
     }
     scenario_t scenario;
-    if (!scenario_load_json(scenario_path, &scenario, error, sizeof(error)) ||
+    if (!scenario_load(scenario_path, &scenario, error, sizeof(error)) ||
         !scenario_validate(&scenario, ".", error, sizeof(error))) {
         fprintf(stderr, "scenario error: %s\n", error);
         return 3;

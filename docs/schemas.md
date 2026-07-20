@@ -87,7 +87,7 @@ Validation error codes include:
 - `legacy_key_ddc_use_channels` (and the other `legacy_key_...` codes)
 - `invalid_output_scale`
 
-## Scenario JSON
+## Scenario YAML
 
 Top-level fields:
 
@@ -121,20 +121,17 @@ The number of samples in each source is derived from the file at load (CI16: fil
 
 `audio_file` sources currently support PCM16 WAV, mono or stereo. Stereo is folded to mono in the asset cache.
 
-**`passthrough_variants`** — an IQ-file source that feeds a `passthrough` signal supplies one capture per channel sample rate instead of a single `file`. Each entry is `{ "sample_rate_hz": ..., "bandwidth_hz": ..., "file": ... }`; the rates must be distinct. At render time the passthrough path selects the variant whose `sample_rate_hz` matches the channel's current rate and streams it verbatim; a channel bandwidth with no matching variant is silent. Example:
+**`passthrough_variants`** — an IQ-file source that feeds a `passthrough` signal supplies one capture per channel sample rate instead of a single `file`. Each entry is `{ sample_rate_hz: ..., bandwidth_hz: ..., file: ... }`; the rates must be distinct. At render time the passthrough path selects the variant whose `sample_rate_hz` matches the channel's current rate and streams it verbatim; a channel bandwidth with no matching variant is silent. Example:
 
-```json
-{
-  "id": "capture_fm",
-  "source_type": "iq_file",
-  "format": "ci16",
-  "byte_order": "little_endian",
-  "iq_layout": "interleaved_iq",
-  "passthrough_variants": [
-    { "sample_rate_hz": 1536000,  "bandwidth_hz": 1000000,  "file": "assets/cap_1m.c16" },
-    { "sample_rate_hz": 24576000, "bandwidth_hz": 20000000, "file": "assets/cap_20m.c16" }
-  ]
-}
+```yaml
+- id: capture_fm
+  source_type: iq_file
+  format: ci16
+  byte_order: little_endian
+  iq_layout: interleaved_iq
+  passthrough_variants:
+    - { sample_rate_hz: 1536000,  bandwidth_hz: 1000000,  file: assets/cap_1m.c16 }
+    - { sample_rate_hz: 24576000, bandwidth_hz: 20000000, file: assets/cap_20m.c16 }
 ```
 
 Signal fields:
@@ -152,7 +149,7 @@ Signal fields:
 | `start_time_s` | number | no | Scenario start time before the first playback. Defaults to `0`. |
 | `repeat_interval_s` | number | see notes | **Selects the timing model** (see "Timing model" below). Present → the signal is a recurring *burst* with this period; absent → the signal plays the source continuously. In `range`/`shift` replay mode it must be absent (`replay_mode_no_repeat`). |
 | `replay_mode` | string | no | `fixed` (default), `range`, or `shift`. See below. |
-| `frequency_range` | object | range/shift | `{ "start_hz": ..., "stop_hz": ... }`. The tune interval in which the signal is active. |
+| `frequency_range` | object | range/shift | `{ start_hz: ..., stop_hz: ... }`. The tune interval in which the signal is active. |
 | `passthrough` | bool | no | Bypasses the mixer entirely for a channel dedicated to this one capture (see below). Requires `replay_mode` `range`/`shift`, no `repeat_interval_s` (i.e. a looping signal), and a source with `passthrough_variants`. Defaults to `false`. |
 
 **Timing model** — a signal is one of two kinds, chosen solely by whether `repeat_interval_s` is present; there is no separate `loop` field:

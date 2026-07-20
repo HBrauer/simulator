@@ -2,55 +2,11 @@
 #include "iq_file_reader.h"
 #include "util.h"
 #include "wav_reader.h"
+#include "yaml_tree.h"
 
-#include <jansson.h>
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
-
-static bool get_json_string(json_t *object, const char *key, char *dst, size_t dst_size)
-{
-    json_t *value = json_object_get(object, key);
-    if (!json_is_string(value)) {
-        return false;
-    }
-    sim_strlcpy(dst, json_string_value(value), dst_size);
-    return true;
-}
-
-static bool get_json_u64(json_t *object, const char *key, uint64_t *out)
-{
-    json_t *value = json_object_get(object, key);
-    if (!json_is_integer(value)) {
-        return false;
-    }
-    json_int_t v = json_integer_value(value);
-    if (v < 0) {
-        return false;
-    }
-    *out = (uint64_t)v;
-    return true;
-}
-
-static bool get_json_u32(json_t *object, const char *key, uint32_t *out)
-{
-    uint64_t v = 0;
-    if (!get_json_u64(object, key, &v) || v > UINT32_MAX) {
-        return false;
-    }
-    *out = (uint32_t)v;
-    return true;
-}
-
-static bool get_json_double(json_t *object, const char *key, double *out)
-{
-    json_t *value = json_object_get(object, key);
-    if (json_is_real(value) || json_is_integer(value)) {
-        *out = json_number_value(value);
-        return true;
-    }
-    return false;
-}
 
 static bool parse_source_kind(const char *source_type, scenario_source_kind_t *out)
 {
@@ -107,28 +63,29 @@ static bool parse_replay_mode(const char *name, scenario_replay_mode_t *out)
     return false;
 }
 
-static bool parse_passthrough_variants(json_t *src, scenario_source_t *out, char *error, size_t error_size)
+static bool parse_passthrough_variants(const yaml_tree_node_t *src, scenario_source_t *out, char *error, size_t error_size)
 {
-    json_t *arr = json_object_get(src, "passthrough_variants");
+    const yaml_tree_node_t *arr = yaml_tree_get(src, "passthrough_variants");
     if (arr == NULL) {
         return true; /* optional */
     }
-    if (!json_is_array(arr)) {
+    if (yaml_tree_kind(arr) != YAML_TREE_SEQUENCE) {
         snprintf(error, error_size, "passthrough_variants_invalid");
         return false;
     }
-    const size_t n = json_array_size(arr);
+    const size_t n = yaml_tree_count(arr);
     if (n == 0 || n > SIM_MAX_PASSTHROUGH_VARIANTS) {
         snprintf(error, error_size, "passthrough_variants_invalid");
         return false;
     }
     out->passthrough_variant_count = n;
     for (size_t k = 0; k < n; k++) {
-        json_t *v = json_array_get(arr, k);
+        const yaml_tree_node_t *v = yaml_tree_at(arr, k);
         scenario_passthrough_variant_t *pv = &out->passthrough_variants[k];
-        if (!get_json_string(v, "file", pv->file, sizeof(pv->file)) ||
-            !get_json_u32(v, "sample_rate_hz", &pv->sample_rate_hz) ||
-            !get_json_u32(v, "bandwidth_hz", &pv->bandwidth_hz)) {
+        if (v == NULL || yaml_tree_kind(v) != YAML_TREE_MAPPING ||
+            !yaml_tree_get_string(v, "file", pv->file, sizeof(pv->file)) ||
+            !yaml_tree_get_u32(v, "sample_rate_hz", &pv->sample_rate_hz) ||
+            !yaml_tree_get_u32(v, "bandwidth_hz", &pv->bandwidth_hz)) {
             snprintf(error, error_size, "passthrough_variant_invalid");
             return false;
         }
@@ -137,87 +94,93 @@ static bool parse_passthrough_variants(json_t *src, scenario_source_t *out, char
     return true;
 }
 
-bool scenario_load_json(const char *path, scenario_t *scenario, char *error, size_t error_size)
+bool scenario_load(const char *path, scenario_t *scenario, char *error, size_t error_size)
 {
     memset(scenario, 0, sizeof(*scenario));
-    json_error_t json_error;
-    json_t *root = json_load_file(path, 0, &json_error);
+    yaml_tree_node_t *root = yaml_tree_load_file(path, error, error_size);
     if (root == NULL) {
-        snprintf(error, error_size, "scenario_invalid:%s", json_error.text);
+        return false; /* yaml_tree_load_file set the error message */
+    }
+    if (yaml_tree_kind(root) != YAML_TREE_MAPPING) {
+        yaml_tree_free(root);
+        snprintf(error, error_size, "scenario_invalid:not_a_mapping");
         return false;
     }
-    scenario->schema_version = (int)json_integer_value(json_object_get(root, "schema_version"));
-    if (!get_json_string(root, "scenario_id", scenario->scenario_id, sizeof(scenario->scenario_id))) {
-        json_decref(root);
+
+    uint64_t schema_version = 0;
+    yaml_tree_get_u64(root, "schema_version", &schema_version);
+    scenario->schema_version = (int)schema_version;
+    if (!yaml_tree_get_string(root, "scenario_id", scenario->scenario_id, sizeof(scenario->scenario_id))) {
+        yaml_tree_free(root);
         snprintf(error, error_size, "scenario_missing_id");
         return false;
     }
-    json_t *desc = json_object_get(root, "description");
-    if (json_is_string(desc)) {
-        sim_strlcpy(scenario->description, json_string_value(desc), sizeof(scenario->description));
-    }
-    json_t *noise = json_object_get(root, "noise_floor");
-    if (json_is_object(noise)) {
-        json_t *enabled = json_object_get(noise, "enabled");
-        scenario->noise_floor.enabled = enabled == NULL ? true : json_is_true(enabled);
+    yaml_tree_get_string(root, "description", scenario->description, sizeof(scenario->description));
+
+    const yaml_tree_node_t *noise = yaml_tree_get(root, "noise_floor");
+    if (noise != NULL && yaml_tree_kind(noise) == YAML_TREE_MAPPING) {
+        const yaml_tree_node_t *enabled = yaml_tree_get(noise, "enabled");
+        scenario->noise_floor.enabled = enabled == NULL ? true : yaml_tree_is_true(enabled);
         if (scenario->noise_floor.enabled) {
-            const bool has_density = get_json_double(noise, "power_dbm_per_hz", &scenario->noise_floor.power_dbm_per_hz);
-            const bool has_total = get_json_double(noise, "power_dbm", &scenario->noise_floor.power_dbm);
+            const bool has_density = yaml_tree_get_double(noise, "power_dbm_per_hz", &scenario->noise_floor.power_dbm_per_hz);
+            const bool has_total = yaml_tree_get_double(noise, "power_dbm", &scenario->noise_floor.power_dbm);
             if (has_density && has_total) {
-                json_decref(root);
+                yaml_tree_free(root);
                 snprintf(error, error_size, "noise_floor_conflicting_power");
                 return false;
             }
             if (!has_density && !has_total) {
-                json_decref(root);
+                yaml_tree_free(root);
                 snprintf(error, error_size, "noise_floor_invalid");
                 return false;
             }
             scenario->noise_floor.use_density = has_density;
-            if (!get_json_u64(noise, "seed", &scenario->noise_floor.seed)) {
+            if (!yaml_tree_get_u64(noise, "seed", &scenario->noise_floor.seed)) {
                 scenario->noise_floor.seed = 1ULL;
             }
         }
     }
 
-    json_t *sources = json_object_get(root, "sources");
-    json_t *signals = json_object_get(root, "signals");
-    if (!json_is_array(sources) || !json_is_array(signals)) {
-        json_decref(root);
+    const yaml_tree_node_t *sources = yaml_tree_get(root, "sources");
+    const yaml_tree_node_t *signals = yaml_tree_get(root, "signals");
+    if (sources == NULL || yaml_tree_kind(sources) != YAML_TREE_SEQUENCE ||
+        signals == NULL || yaml_tree_kind(signals) != YAML_TREE_SEQUENCE) {
+        yaml_tree_free(root);
         snprintf(error, error_size, "scenario_missing_arrays");
         return false;
     }
-    scenario->source_count = json_array_size(sources);
-    scenario->signal_count = json_array_size(signals);
+    scenario->source_count = yaml_tree_count(sources);
+    scenario->signal_count = yaml_tree_count(signals);
     if (scenario->source_count > SIM_MAX_SOURCES || scenario->signal_count > SIM_MAX_SIGNALS) {
-        json_decref(root);
+        yaml_tree_free(root);
         snprintf(error, error_size, "scenario_too_large");
         return false;
     }
 
     for (size_t i = 0; i < scenario->source_count; i++) {
-        json_t *src = json_array_get(sources, i);
+        const yaml_tree_node_t *src = yaml_tree_at(sources, i);
         scenario_source_t *out = &scenario->sources[i];
-        if (!get_json_string(src, "id", out->id, sizeof(out->id)) ||
-            !get_json_string(src, "source_type", out->source_type, sizeof(out->source_type)) ||
-            !get_json_string(src, "format", out->format, sizeof(out->format))) {
-            json_decref(root);
+        if (src == NULL || yaml_tree_kind(src) != YAML_TREE_MAPPING ||
+            !yaml_tree_get_string(src, "id", out->id, sizeof(out->id)) ||
+            !yaml_tree_get_string(src, "source_type", out->source_type, sizeof(out->source_type)) ||
+            !yaml_tree_get_string(src, "format", out->format, sizeof(out->format))) {
+            yaml_tree_free(root);
             snprintf(error, error_size, "source_invalid");
             return false;
         }
         if (!parse_source_kind(out->source_type, &out->source_kind)) {
-            json_decref(root);
+            yaml_tree_free(root);
             snprintf(error, error_size, "source_unsupported");
             return false;
         }
         if (!parse_passthrough_variants(src, out, error, error_size)) {
-            json_decref(root);
+            yaml_tree_free(root);
             return false;
         }
         if (out->source_kind == SCENARIO_SOURCE_IQ_FILE) {
-            if (!get_json_string(src, "byte_order", out->byte_order, sizeof(out->byte_order)) ||
-                !get_json_string(src, "iq_layout", out->iq_layout, sizeof(out->iq_layout))) {
-                json_decref(root);
+            if (!yaml_tree_get_string(src, "byte_order", out->byte_order, sizeof(out->byte_order)) ||
+                !yaml_tree_get_string(src, "iq_layout", out->iq_layout, sizeof(out->iq_layout))) {
+                yaml_tree_free(root);
                 snprintf(error, error_size, "source_invalid");
                 return false;
             }
@@ -225,63 +188,68 @@ bool scenario_load_json(const char *path, scenario_t *scenario, char *error, siz
         if (out->passthrough_variant_count > 0) {
             /* Variant source: the top-level file/rate/bandwidth are unused (each variant carries
              * its own). nominal_level is optional and irrelevant to verbatim passthrough. */
-            get_json_double(src, "nominal_level_dbfs", &out->nominal_level_dbfs);
+            yaml_tree_get_double(src, "nominal_level_dbfs", &out->nominal_level_dbfs);
             continue;
         }
-        if (!get_json_string(src, "file", out->file, sizeof(out->file)) ||
-            !get_json_u32(src, "sample_rate_hz", &out->sample_rate_hz) ||
-            !get_json_u32(src, "bandwidth_hz", &out->bandwidth_hz) ||
-            !get_json_double(src, "nominal_level_dbfs", &out->nominal_level_dbfs)) {
-            json_decref(root);
+        if (!yaml_tree_get_string(src, "file", out->file, sizeof(out->file)) ||
+            !yaml_tree_get_u32(src, "sample_rate_hz", &out->sample_rate_hz) ||
+            !yaml_tree_get_u32(src, "bandwidth_hz", &out->bandwidth_hz) ||
+            !yaml_tree_get_double(src, "nominal_level_dbfs", &out->nominal_level_dbfs)) {
+            yaml_tree_free(root);
             snprintf(error, error_size, "source_invalid");
             return false;
         }
         /* sample_count is derived from the file at validate time (see iq_file_reader_open). */
-        out->center_frequency_hz = json_integer_value(json_object_get(src, "center_frequency_hz"));
+        yaml_tree_get_i64(src, "center_frequency_hz", &out->center_frequency_hz);
     }
 
     for (size_t i = 0; i < scenario->signal_count; i++) {
-        json_t *sig = json_array_get(signals, i);
+        const yaml_tree_node_t *sig = yaml_tree_at(signals, i);
         scenario_signal_t *out = &scenario->signals[i];
+        if (sig == NULL || yaml_tree_kind(sig) != YAML_TREE_MAPPING) {
+            yaml_tree_free(root);
+            snprintf(error, error_size, "signal_invalid");
+            return false;
+        }
         char replay_mode_name[16];
-        if (!get_json_string(sig, "replay_mode", replay_mode_name, sizeof(replay_mode_name))) {
+        if (!yaml_tree_get_string(sig, "replay_mode", replay_mode_name, sizeof(replay_mode_name))) {
             sim_strlcpy(replay_mode_name, "fixed", sizeof(replay_mode_name));
         }
         if (!parse_replay_mode(replay_mode_name, &out->replay_mode)) {
-            json_decref(root);
+            yaml_tree_free(root);
             snprintf(error, error_size, "signal_replay_mode_invalid");
             return false;
         }
-        json_t *range = json_object_get(sig, "frequency_range");
-        if (json_is_object(range)) {
-            if (!get_json_u64(range, "start_hz", &out->replay_range_start_hz) ||
-                !get_json_u64(range, "stop_hz", &out->replay_range_stop_hz)) {
-                json_decref(root);
+        const yaml_tree_node_t *range = yaml_tree_get(sig, "frequency_range");
+        if (range != NULL && yaml_tree_kind(range) == YAML_TREE_MAPPING) {
+            if (!yaml_tree_get_u64(range, "start_hz", &out->replay_range_start_hz) ||
+                !yaml_tree_get_u64(range, "stop_hz", &out->replay_range_stop_hz)) {
+                yaml_tree_free(root);
                 snprintf(error, error_size, "signal_frequency_range_invalid");
                 return false;
             }
         } else if (range != NULL) {
-            json_decref(root);
+            yaml_tree_free(root);
             snprintf(error, error_size, "signal_frequency_range_invalid");
             return false;
         }
-        json_t *passthrough = json_object_get(sig, "passthrough");
-        out->passthrough = json_is_boolean(passthrough) && json_is_true(passthrough);
-        if (!get_json_string(sig, "signal_id", out->signal_id, sizeof(out->signal_id)) ||
-            !get_json_string(sig, "source_reference", out->source_reference, sizeof(out->source_reference)) ||
-            !get_json_double(sig, "power_dbm", &out->power_dbm)) {
-            json_decref(root);
+        const yaml_tree_node_t *passthrough = yaml_tree_get(sig, "passthrough");
+        out->passthrough = yaml_tree_is_bool(passthrough) && yaml_tree_is_true(passthrough);
+        if (!yaml_tree_get_string(sig, "signal_id", out->signal_id, sizeof(out->signal_id)) ||
+            !yaml_tree_get_string(sig, "source_reference", out->source_reference, sizeof(out->source_reference)) ||
+            !yaml_tree_get_double(sig, "power_dbm", &out->power_dbm)) {
+            yaml_tree_free(root);
             snprintf(error, error_size, "signal_invalid");
             return false;
         }
-        if (!get_json_u32(sig, "bandwidth_hz", &out->bandwidth_hz)) {
+        if (!yaml_tree_get_u32(sig, "bandwidth_hz", &out->bandwidth_hz)) {
             /* An IQ signal defaults its on-air footprint to the referenced source's bandwidth (the
              * recording already is that width). An audio signal must state it: the modulation, not
              * the source, sets the RF width (WBFM ~200 kHz vs AM ~10 kHz from the same clip). */
             const scenario_source_t *bw_source = scenario_find_source(scenario, out->source_reference);
             if (bw_source == NULL || bw_source->source_kind != SCENARIO_SOURCE_IQ_FILE ||
                 bw_source->bandwidth_hz == 0U) {
-                json_decref(root);
+                yaml_tree_free(root);
                 snprintf(error, error_size, "signal_invalid");
                 return false;
             }
@@ -289,16 +257,16 @@ bool scenario_load_json(const char *path, scenario_t *scenario, char *error, siz
         }
         /* center_frequency_hz is ignored in range mode (content follows the tune) and may be
          * omitted there; every other mode needs the absolute placement. */
-        if (!get_json_u64(sig, "center_frequency_hz", &out->center_frequency_hz) &&
+        if (!yaml_tree_get_u64(sig, "center_frequency_hz", &out->center_frequency_hz) &&
             out->replay_mode != SCENARIO_REPLAY_RANGE) {
-            json_decref(root);
+            yaml_tree_free(root);
             snprintf(error, error_size, "signal_invalid");
             return false;
         }
-        if (!get_json_double(sig, "start_time_s", &out->start_time_s)) {
+        if (!yaml_tree_get_double(sig, "start_time_s", &out->start_time_s)) {
             out->start_time_s = 0.0;
         }
-        const bool has_repeat = get_json_double(sig, "repeat_interval_s", &out->repeat_interval_s);
+        const bool has_repeat = yaml_tree_get_double(sig, "repeat_interval_s", &out->repeat_interval_s);
         /* The timing model follows directly from repeat_interval_s -- there is no separate `loop`
          * knob. A signal that carries an interval is a recurring burst (the source plays once per
          * interval, silent in between); a signal without one loops the source continuously. */
@@ -306,30 +274,27 @@ bool scenario_load_json(const char *path, scenario_t *scenario, char *error, siz
         if (has_repeat && out->replay_mode != SCENARIO_REPLAY_FIXED) {
             /* Range/shift replay streams the capture verbatim as the receiver tunes across it:
              * an inherently continuous mode, so a repeat interval has no meaning there. */
-            json_decref(root);
+            yaml_tree_free(root);
             snprintf(error, error_size, "replay_mode_no_repeat");
             return false;
         }
-        json_t *modulation = json_object_get(sig, "modulation");
-        if (json_is_string(modulation)) {
-            sim_strlcpy(out->modulation_name, json_string_value(modulation), sizeof(out->modulation_name));
-        } else {
+        if (!yaml_tree_get_string(sig, "modulation", out->modulation_name, sizeof(out->modulation_name))) {
             sim_strlcpy(out->modulation_name, "iq", sizeof(out->modulation_name));
         }
         if (!parse_modulation(out->modulation_name, &out->modulation)) {
-            json_decref(root);
+            yaml_tree_free(root);
             snprintf(error, error_size, "signal_modulation_invalid");
             return false;
         }
-        if (!get_json_double(sig, "fm_deviation_hz", &out->fm_deviation_hz)) {
+        if (!yaml_tree_get_double(sig, "fm_deviation_hz", &out->fm_deviation_hz)) {
             out->fm_deviation_hz = 75000.0;
         }
-        if (!get_json_double(sig, "am_depth", &out->am_depth)) {
+        if (!yaml_tree_get_double(sig, "am_depth", &out->am_depth)) {
             out->am_depth = 0.8;
         }
     }
 
-    json_decref(root);
+    yaml_tree_free(root);
     snprintf(error, error_size, "ok");
     return true;
 }

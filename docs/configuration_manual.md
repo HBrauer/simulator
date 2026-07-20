@@ -9,14 +9,14 @@ There are two configuration files:
 | File | Format | Describes | Parsed by |
 | --- | --- | --- | --- |
 | **Instance** | YAML | The *receiver* hardware: tuner range, front-end, output channels, UDP/REST | `src/config.c` |
-| **Scenario** | JSON | The *RF environment*: signal sources and where/when they appear on the air | `src/scenario.c` |
+| **Scenario** | YAML | The *RF environment*: signal sources and where/when they appear on the air | `src/scenario.c` |
 
 They are independent: one scenario can be replayed by many instance configs, and vice versa.
 You run them together:
 
 ```sh
 ./build/sdr-simulator --config simulator/configs/receiver_scanner.yaml \
-                      --scenario simulator/tests/benchmarks/benchmark_load.json
+                      --scenario simulator/tests/benchmarks/benchmark_load.yaml
 ```
 
 If `--scenario` is omitted, the instance's `scenario_file` is used.
@@ -156,70 +156,62 @@ bytes per complex sample; WAV: the header's frame count).
 
 ---
 
-## 3. Scenario JSON
+## 3. Scenario YAML
 
 ### 3.1 Skeleton
 
-```json
-{
-  "schema_version": 1,
-  "scenario_id": "my_scenario",
-  "description": "optional human-readable text",
-  "noise_floor": { "enabled": true, "power_dbm_per_hz": -160.0, "seed": 12345 },
-  "sources": [ /* ... */ ],
-  "signals": [ /* ... */ ]
-}
+```yaml
+schema_version: 1
+scenario_id: my_scenario
+description: optional human-readable text
+noise_floor: { enabled: true, power_dbm_per_hz: -160.0, seed: 12345 }
+sources: []   # one or more source mappings (see 3.2)
+signals: []   # one or more signal mappings (see 3.3)
 ```
 
 ### 3.2 Sources
 
 **IQ file** — complex baseband samples, interleaved `ci16` (little-endian I,Q pairs):
 
-```json
-{
-  "id": "fsk_iq",
-  "source_type": "iq_file",
-  "file": "simulator/assets/fsk_20mhz.c16",
-  "format": "ci16",
-  "byte_order": "little_endian",
-  "iq_layout": "interleaved_iq",
-  "sample_rate_hz": 24576000,
-  "bandwidth_hz": 20000000,
-  "center_frequency_hz": 0,
-  "nominal_level_dbfs": -12.0
-}
+```yaml
+- id: fsk_iq
+  source_type: iq_file
+  file: simulator/assets/fsk_20mhz.c16
+  format: ci16
+  byte_order: little_endian
+  iq_layout: interleaved_iq
+  sample_rate_hz: 24576000
+  bandwidth_hz: 20000000
+  center_frequency_hz: 0
+  nominal_level_dbfs: -12.0
 ```
 
 **Audio file** — a PCM16 WAV (mono, or stereo folded to mono), to be modulated onto a carrier:
 
-```json
-{
-  "id": "radio_clip_wav",
-  "source_type": "audio_file",
-  "file": "simulator/assets/radio_clip.wav",
-  "format": "wav",
-  "sample_rate_hz": 48000,
-  "bandwidth_hz": 200000,
-  "center_frequency_hz": 0,
-  "nominal_level_dbfs": -6.0
-}
+```yaml
+- id: radio_clip_wav
+  source_type: audio_file
+  file: simulator/assets/radio_clip.wav
+  format: wav
+  sample_rate_hz: 48000
+  bandwidth_hz: 200000
+  center_frequency_hz: 0
+  nominal_level_dbfs: -6.0
 ```
 
 ### 3.3 Signals
 
 A signal binds a source to a place on the air:
 
-```json
-{
-  "signal_id": "iq_lower",
-  "source_reference": "fsk_iq",
-  "modulation": "iq",
-  "center_frequency_hz": 9985000000,
-  "bandwidth_hz": 20000000,
-  "power_dbm": -60.0,
-  "start_time_s": 0.0,
-  "repeat_interval_s": 1.0
-}
+```yaml
+- signal_id: iq_lower
+  source_reference: fsk_iq
+  modulation: iq
+  center_frequency_hz: 9985000000
+  bandwidth_hz: 20000000
+  power_dbm: -60.0
+  start_time_s: 0.0
+  repeat_interval_s: 1.0
 ```
 
 **Modulations**: `iq` (for `iq_file` sources — replayed as-is), and `wbfm`, `am`, `usb`, `lsb`
@@ -250,7 +242,7 @@ source does not band-limit it — it only mis-scales the overlap math (and trips
 warning).
 
 **Audio sources must state it**, because the modulation — not the source — sets the RF width: one
-48 kHz clip is ≈ 200 kHz as WBFM but ≈ 10 kHz as AM (see [`audio_radio_demo.json`](../simulator/scenarios/audio_radio_demo.json),
+48 kHz clip is ≈ 200 kHz as WBFM but ≈ 10 kHz as AM (see [`audio_radio_demo.yaml`](../simulator/scenarios/audio_radio_demo.yaml),
 where one WAV feeds signals of 200 k / 10 k / 3 k Hz).
 
 **IQ sources may omit it** — the recording already *is* a given width, so an IQ signal that leaves
@@ -286,18 +278,16 @@ Rules:
 
 Example — the same audio clip as a station that re-broadcasts every 30 seconds:
 
-```json
-{
-  "signal_id": "wbfm_station",
-  "source_reference": "radio_clip_wav",
-  "modulation": "wbfm",
-  "center_frequency_hz": 10005000000,
-  "bandwidth_hz": 200000,
-  "power_dbm": -65.0,
-  "fm_deviation_hz": 75000,
-  "start_time_s": 0.0,
-  "repeat_interval_s": 30.0
-}
+```yaml
+- signal_id: wbfm_station
+  source_reference: radio_clip_wav
+  modulation: wbfm
+  center_frequency_hz: 10005000000
+  bandwidth_hz: 200000
+  power_dbm: -65.0
+  fm_deviation_hz: 75000
+  start_time_s: 0.0
+  repeat_interval_s: 30.0
 ```
 
 To play something essentially once, set a very large interval (e.g. `86400.0` = once a day).
@@ -340,30 +330,26 @@ load cost is somewhat higher.
 
 Example — a continuous IQ emitter with no gaps:
 
-```json
-{
-  "signal_id": "iq_beacon",
-  "source_reference": "fsk_iq",
-  "modulation": "iq",
-  "center_frequency_hz": 10005000000,
-  "bandwidth_hz": 20000000,
-  "power_dbm": -60.0,
-  "start_time_s": 0.0
-}
+```yaml
+- signal_id: iq_beacon
+  source_reference: fsk_iq
+  modulation: iq
+  center_frequency_hz: 10005000000
+  bandwidth_hz: 20000000
+  power_dbm: -60.0
+  start_time_s: 0.0
 ```
 
 Example — an endless FM radio station from an audio clip (the clip repeats seam-conditioned,
 with no gap and no click):
 
-```json
-{
-  "signal_id": "fm_station",
-  "source_reference": "radio_clip_wav",
-  "modulation": "wbfm",
-  "center_frequency_hz": 10005000000,
-  "bandwidth_hz": 200000,
-  "power_dbm": -65.0
-}
+```yaml
+- signal_id: fm_station
+  source_reference: radio_clip_wav
+  modulation: wbfm
+  center_frequency_hz: 10005000000
+  bandwidth_hz: 200000
+  power_dbm: -65.0
 ```
 
 ### 4.3 Quick reference
@@ -387,16 +373,14 @@ tune across them, so they carry no `repeat_interval_s` (`replay_mode_no_repeat` 
 | `range` | The file is played **centered on the tuned frequency** whenever the channel center is inside `frequency_range`; identical output anywhere in the range, silent outside. |
 | `shift` | The file content stays at its **absolute** RF position; while tuned inside `frequency_range` the IQ is rotated by `e^{j·2π·(center_frequency_hz − f_tune)·t}`. |
 
-```json
-{
-  "signal_id": "replay_range_fm",
-  "source_reference": "fsk_iq",
-  "modulation": "iq",
-  "replay_mode": "range",
-  "frequency_range": { "start_hz": 9990000000, "stop_hz": 10010000000 },
-  "bandwidth_hz": 20000000,
-  "power_dbm": -55.0
-}
+```yaml
+- signal_id: replay_range_fm
+  source_reference: fsk_iq
+  modulation: iq
+  replay_mode: range
+  frequency_range: { start_hz: 9990000000, stop_hz: 10010000000 }
+  bandwidth_hz: 20000000
+  power_dbm: -55.0
 ```
 
 Note `center_frequency_hz` is omitted here — in `range` mode the content follows the tune, so it
@@ -427,8 +411,8 @@ performance rationale.
 Optional; applied to every channel that isn't a passthrough. Prefer the spectral **density**
 form so a narrow channel and the wide stream carry the same dBm/Hz:
 
-```json
-"noise_floor": { "enabled": true, "power_dbm_per_hz": -160.0, "seed": 12345 }
+```yaml
+noise_floor: { enabled: true, power_dbm_per_hz: -160.0, seed: 12345 }
 ```
 
 In-window power is `power_dbm_per_hz + 10·log10(window_bandwidth_hz)`. The legacy `power_dbm`
@@ -445,7 +429,7 @@ The instance describes the receiver and its output channels.
 ```yaml
 schema_version: 1
 instance_id: "receiver_scanner"
-scenario_file: "simulator/scenarios/scanner_fsk.json"
+scenario_file: "simulator/scenarios/scanner_fsk.yaml"
 stream_block_samples: 1024        # CI16 samples per VITA 49.2 packet (1..4096)
 receivers:
   - receiver_id: 0
@@ -486,9 +470,9 @@ knobs (`asset_cache_max_bytes`, `ddc_cache_max_bytes`).
 
 ---
 
-## 9. Worked example: `benchmark_load.json`
+## 9. Worked example: `benchmark_load.yaml`
 
-The shipped [`benchmark_load.json`](../simulator/tests/benchmarks/benchmark_load.json) puts four signals
+The shipped [`benchmark_load.yaml`](../simulator/tests/benchmarks/benchmark_load.yaml) puts four signals
 on the air over a −160 dBm/Hz noise floor, all using the **burst** timing model (each has a
 `repeat_interval_s`), from two sources:
 

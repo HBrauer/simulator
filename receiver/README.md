@@ -19,7 +19,7 @@ build/sdr-waterfall-receiver \
   --fft-size 1024
 ```
 
-Use that with `simulator/scenarios/gnuradio_demo.json`; channel `1` (port `50001`) is centered on the demo signal and should show colored waterfall lines immediately. The full 80-MHz scanner stream is channel `0` on port `50000`.
+Use that with `simulator/scenarios/gnuradio_demo.yaml`; channel `1` (port `50001`) is centered on the demo signal and should show colored waterfall lines immediately. The full 80-MHz scanner stream is channel `0` on port `50000`.
 
 With `--control-url` the toolbar gains a control group on the left:
 

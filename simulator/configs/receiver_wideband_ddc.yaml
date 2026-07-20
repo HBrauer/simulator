@@ -12,7 +12,7 @@
 #     --output simulator/assets/wideband_80mhz_98304ksps.c16
 schema_version: 1
 instance_id: "receiver_wideband_ddc"
-scenario_file: "simulator/scenarios/wideband_ddc.json"
+scenario_file: "simulator/scenarios/wideband_ddc.yaml"
 log_path: "logs/receiver_wideband_ddc.log"
 stream_block_samples: 1536
 # Budget for precomputed DDC intermediates (ci16, one full source loop per tune area). One
