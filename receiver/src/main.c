@@ -1200,17 +1200,31 @@ static SDL_Rect ui_dropdown_item_rect(int x, size_t index)
     };
 }
 
+/* Compact bandwidth label for the toolbar combo/channel summaries: MHz with an "M"
+ * suffix at 1 MHz and above, kHz with a "k" suffix below (so sub-MHz channels don't
+ * round to "0M"). %g trims trailing zeros to keep the label short. */
+static void ui_format_bandwidth_compact(uint64_t bandwidth_hz, char *out, size_t out_size)
+{
+    if (bandwidth_hz >= 1000000ULL) {
+        snprintf(out, out_size, "%gM", (double)bandwidth_hz / 1000000.0);
+    } else {
+        snprintf(out, out_size, "%gk", (double)bandwidth_hz / 1000.0);
+    }
+}
+
 static void ui_channel_item_label(const control_channel_t *channel, char *out, size_t out_size)
 {
+    char bandwidth[16];
+    ui_format_bandwidth_compact(channel->bandwidth_hz, bandwidth, sizeof(bandwidth));
     if (channel->track_tuner) {
-        snprintf(out, out_size, "CH%u TUNER %.0fM", channel->channel_id, (double)channel->bandwidth_hz / 1000000.0);
+        snprintf(out, out_size, "CH%u TUNER %s", channel->channel_id, bandwidth);
     } else {
         snprintf(out,
                  out_size,
-                 "CH%u %.3f MHZ %.0fM",
+                 "CH%u %.3f MHZ %s",
                  channel->channel_id,
                  (double)channel->center_frequency_hz / 1000000.0,
-                 (double)channel->bandwidth_hz / 1000000.0);
+                 bandwidth);
     }
 }
 
@@ -1427,7 +1441,7 @@ static void ui_draw_toolbar(ui_t *ui, const app_config_t *config, const control_
         ui_text_draw(ui->renderer, ui->freq_field.x + ui->freq_field.w + 6, ui_widget_text_y(ui->freq_field), UI_TEXT_SCALE, "MHZ");
 
         char bandwidth_label[16];
-        snprintf(bandwidth_label, sizeof(bandwidth_label), "%.0fM", (double)channel->bandwidth_hz / 1000000.0);
+        ui_format_bandwidth_compact(channel->bandwidth_hz, bandwidth_label, sizeof(bandwidth_label));
         ui_draw_combo(ui->renderer, ui->bandwidth_combo, bandwidth_label, ui->open_combo == UI_COMBO_BANDWIDTH);
     }
 
