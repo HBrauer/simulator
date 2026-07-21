@@ -9,6 +9,7 @@
 #include "timebase.h"
 #include "udp_output.h"
 
+#include <math.h>
 #include <signal.h>
 #include <pthread.h>
 #include <stdbool.h>
@@ -85,6 +86,125 @@ static void warn_ddc_rate_combinations(const simulator_config_t *config, const s
     }
 }
 
+/* Largest sample magnitude (in ci16 counts) in a buffer. After the mixer rotates a source to its
+ * window offset, a single output I or Q component can reach the full sample magnitude, so this is
+ * the amplitude that decides whether the signal clips -- not the per-component peak. */
+static double buffer_peak_magnitude(const iq_ci16_t *samples, uint64_t count)
+{
+    int64_t peak_sq = 0;
+    for (uint64_t k = 0; k < count; k++) {
+        const int64_t i = samples[k].i;
+        const int64_t q = samples[k].q;
+        const int64_t m = i * i + q * q;
+        if (m > peak_sq) {
+            peak_sq = m;
+        }
+    }
+    return sqrt((double)peak_sq);
+}
+
+/* Predict, per channel, whether a mixed signal would overdrive the ADC when the channel is tuned
+ * onto it, and warn if so. This is the load-time counterpart of the clipping that turned the
+ * default POCSAG scene into a comb of ghost carriers: a signal whose configured power exceeds the
+ * channel's full-scale reference (after output_scale and the source's own peak level) rails the
+ * ci16 output, and the hard clipping intermodulates overlapping signals across the band.
+ *
+ * The check is deliberately tune-independent -- it assumes the worst case that the channel is
+ * centred on the signal -- because the tuner is retunable at runtime (the reproducing scenario
+ * runs a channel far outside the config's nominal front-end range), so the receiver's frequency
+ * bounds cannot be used to rule a signal out. Passthrough signals are excluded: they stream a
+ * capture verbatim and carry no float mix bus to overflow. */
+static void warn_signal_clipping(const simulator_config_t *config, const scenario_t *scenario, const asset_cache_t *cache)
+{
+    for (size_t s = 0; s < scenario->signal_count; s++) {
+        const scenario_signal_t *sig = &scenario->signals[s];
+        if (sig->passthrough) {
+            continue;
+        }
+        const scenario_source_t *src = scenario_find_source(scenario, sig->source_reference);
+        const cached_asset_t *asset = asset_cache_find(cache, sig->source_reference);
+        if (src == NULL || asset == NULL) {
+            continue;
+        }
+        /* Amplitude the renderer actually feeds the gain chain: the pre-rendered baseband for audio
+         * (its recorded peak folded back through prerender->gain), the raw file samples otherwise. */
+        double peak;
+        double extra_gain = 1.0;
+        if (src->source_kind == SCENARIO_SOURCE_AUDIO_FILE) {
+            const cached_prerender_t *prerender = asset_cache_prerender(cache, s);
+            if (prerender == NULL) {
+                continue;
+            }
+            peak = buffer_peak_magnitude(prerender->samples, prerender->sample_count);
+            extra_gain = prerender->gain;
+        } else {
+            peak = buffer_peak_magnitude(asset->samples, asset->sample_count);
+        }
+        if (!(peak > 0.0)) {
+            continue;
+        }
+
+        /* Report at most one line per signal: the worst-overdriven channel, plus a count of the
+         * others that also clip. Every channel is a distinct combination but they mostly share
+         * output_scale/reference, so a per-channel line would flood startup for no extra insight. */
+        unsigned worst_receiver = 0;
+        unsigned worst_channel = 0;
+        double worst_overdrive = 0.0;
+        double worst_reference = 0.0;
+        double worst_output_scale = 0.0;
+        double worst_predicted = 0.0;
+        size_t clip_count = 0;
+        for (size_t r = 0; r < config->receiver_count; r++) {
+            const receiver_config_t *receiver = &config->receivers[r];
+            for (size_t c = 0; c < receiver->channel_count; c++) {
+                const channel_config_t *channel = &receiver->channels[c];
+                /* Worst-case passband weighting: a signal no wider than the window, centred, keeps
+                 * its full amplitude (gain 1.0); a signal wider than the window is attenuated by the
+                 * captured fraction, matching signal_passband_gain at best overlap. */
+                double passband = 1.0;
+                if (sig->bandwidth_hz > channel->bandwidth_hz && sig->bandwidth_hz > 0U) {
+                    passband = sqrt((double)channel->bandwidth_hz / (double)sig->bandwidth_hz);
+                }
+                const double gain = passband * channel->output_scale * extra_gain *
+                    pow(10.0, (sig->power_dbm - channel->rf_reference_power_dbm) / 20.0);
+                const double predicted_peak = peak * gain;
+                if (predicted_peak <= 32767.0) {
+                    continue;
+                }
+                const double overdrive_db = 20.0 * log10(predicted_peak / 32767.0);
+                clip_count++;
+                if (overdrive_db > worst_overdrive) {
+                    worst_overdrive = overdrive_db;
+                    worst_receiver = receiver->id;
+                    worst_channel = channel->id;
+                    worst_reference = channel->rf_reference_power_dbm;
+                    worst_output_scale = channel->output_scale;
+                    worst_predicted = predicted_peak;
+                }
+            }
+        }
+        if (clip_count == 0) {
+            continue;
+        }
+        /* output_scale that brings the worst channel's predicted peak just to full scale, with ~3 dB
+         * of margin so it does not sit on the rail. Signals that overlap in a channel sum, so a
+         * channel carrying several needs more headroom than this per-signal figure. */
+        const double suggested_scale = worst_output_scale * (32767.0 / worst_predicted) * 0.707;
+        char others[64] = "";
+        if (clip_count > 1) {
+            snprintf(others, sizeof(others), " (+%zu other channel%s)", clip_count - 1, clip_count - 1 == 1 ? "" : "s");
+        }
+        fprintf(stderr,
+                "warning: signal '%s' overdrives receiver %u channel %u%s by %.1f dB when tuned onto it "
+                "(source peak %.1f dBFS, power %.1f dBm vs full-scale reference %.1f dBm, output_scale %.3g); "
+                "the hard clipping intermodulates signals into ghost carriers. Set channel output_scale <= %.3g, "
+                "lower the signal power/snr_db, or raise rf_reference_power_dbm.\n",
+                sig->signal_id, worst_receiver, worst_channel, others, worst_overdrive,
+                20.0 * log10(peak / 32767.0), sig->power_dbm, worst_reference, worst_output_scale,
+                suggested_scale);
+    }
+}
+
 int main(int argc, char **argv)
 {
     const char *config_path = arg_value(argc, argv, "--config");
@@ -122,6 +242,7 @@ int main(int argc, char **argv)
     }
     renderer_ddc_cache_configure(config.ddc_cache_max_bytes);
     warn_ddc_rate_combinations(&config, &scenario);
+    warn_signal_clipping(&config, &scenario, &asset_cache);
 
     timebase_t timebase;
     timebase_init(&timebase);
