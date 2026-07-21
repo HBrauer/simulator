@@ -35,6 +35,7 @@
 #define UI_BUTTON_SIZE 32
 #define UI_BUTTON_MARGIN 8
 #define UI_TEXT_SCALE 2
+#define UI_AXIS_TEXT_SCALE 1 /* compact 5x7 labels for the spectrum dB axis */
 #define UI_CHANNEL_COMBO_WIDTH 76
 #define UI_FREQ_FIELD_WIDTH 176
 #define UI_BANDWIDTH_COMBO_WIDTH 110
@@ -87,6 +88,9 @@ typedef struct {
     /* Last in-band stream configuration seen in a VITA context packet. */
     uint64_t stream_center_hz;
     uint64_t stream_bandwidth_hz;
+    /* Reference level (RF power at 0 dBFS) from the context packet, for an absolute dBm axis. */
+    bool have_reference_level;
+    double reference_level_dbm;
     /* Rate measurement window, restarted on channel/rate changes so the title shows the
      * current stream rate instead of a lifetime average. */
     uint64_t rate_window_samples;
@@ -787,6 +791,10 @@ static bool handle_received_packet(
         stats->bytes += (uint64_t)packet_bytes;
         stats->stream_center_hz = context.rf_reference_frequency_hz;
         stats->stream_bandwidth_hz = context.bandwidth_hz;
+        if (context.has_reference_level) {
+            stats->reference_level_dbm = context.reference_level_dbm;
+            stats->have_reference_level = true;
+        }
         apply_sample_rate(config, waterfall, sampler, stats, (uint32_t)context.sample_rate_hz);
         return false;
     }
@@ -1484,6 +1492,20 @@ static void ui_draw_toolbar(ui_t *ui, const app_config_t *config, const control_
                    true);
 }
 
+/* Pick a "nice" dB spacing between axis gridlines so the plot shows roughly 4-6 labeled
+ * divisions regardless of the current dynamic range (fixed or auto-levelled). */
+static float spectrum_nice_step_db(float range)
+{
+    static const float steps[] = {2.0f, 5.0f, 10.0f, 20.0f, 25.0f, 50.0f, 100.0f, 200.0f};
+    const float target = range / 5.0f;
+    for (size_t i = 0; i < sizeof(steps) / sizeof(steps[0]); i++) {
+        if (steps[i] >= target) {
+            return steps[i];
+        }
+    }
+    return steps[sizeof(steps) / sizeof(steps[0]) - 1];
+}
+
 static int spectrum_y_for_db(SDL_Rect rect, float db, float min_db, float max_db)
 {
     float x = (db - min_db) / (max_db - min_db);
@@ -1495,7 +1517,12 @@ static int spectrum_y_for_db(SDL_Rect rect, float db, float min_db, float max_db
     return rect.y + (int)((1.0f - x) * (float)(rect.h - 1) + 0.5f);
 }
 
-static void ui_draw_spectrum(ui_t *ui, const waterfall_t *wf, SDL_Rect rect, float min_db, float max_db)
+/* label_offset_db shifts the axis from the stored dBFS scale into the labelled units: 0 leaves
+ * the axis in dBFS, a VITA reference level turns it into absolute dBm. unit_label ("DBFS"/"DBM")
+ * is the caption. Gridlines/labels are chosen "nice" in the labelled domain, then mapped back to
+ * dBFS for placement, so the numbers stay round whatever the offset is. */
+static void ui_draw_spectrum(ui_t *ui, const waterfall_t *wf, SDL_Rect rect, float min_db, float max_db,
+                             float label_offset_db, const char *unit_label)
 {
     if (rect.w <= 1 || rect.h <= 1) {
         return;
@@ -1504,14 +1531,26 @@ static void ui_draw_spectrum(ui_t *ui, const waterfall_t *wf, SDL_Rect rect, flo
     SDL_SetRenderDrawColor(ui->renderer, 4, 6, 28, 255);
     SDL_RenderFillRect(ui->renderer, &rect);
 
+    /* Vertical frequency divisions (kept column-aligned with the waterfall below). */
     SDL_SetRenderDrawColor(ui->renderer, 13, 28, 58, 255);
-    for (int i = 1; i < 4; i++) {
-        const int y = rect.y + (rect.h * i) / 4;
-        SDL_RenderDrawLine(ui->renderer, rect.x, y, rect.x + rect.w - 1, y);
-    }
     for (int i = 1; i < 8; i++) {
         const int x = rect.x + (rect.w * i) / 8;
         SDL_RenderDrawLine(ui->renderer, x, rect.y, x, rect.y + rect.h - 1);
+    }
+
+    /* Horizontal dB grid at "nice" levels, like a spectrum analyzer. Ticks are iterated in the
+     * labelled domain (dBFS or dBm) and converted back to dBFS (subtract the offset) for y. Drawn
+     * behind the trace; the value labels are drawn on top of the trace further down. */
+    const float range = max_db - min_db;
+    const float step = range > 0.0f ? spectrum_nice_step_db(range) : 0.0f;
+    const float disp_min = min_db + label_offset_db;
+    const float disp_max = max_db + label_offset_db;
+    if (step > 0.0f) {
+        SDL_SetRenderDrawColor(ui->renderer, 20, 40, 74, 255);
+        for (float disp = ceilf(disp_min / step) * step; disp <= disp_max + 0.001f; disp += step) {
+            const int y = spectrum_y_for_db(rect, disp - label_offset_db, min_db, max_db);
+            SDL_RenderDrawLine(ui->renderer, rect.x, y, rect.x + rect.w - 1, y);
+        }
     }
 
     SDL_SetRenderDrawColor(ui->renderer, 28, 55, 96, 255);
@@ -1534,6 +1573,35 @@ static void ui_draw_spectrum(ui_t *ui, const waterfall_t *wf, SDL_Rect rect, flo
     const int zero_x = rect.x + rect.w / 2;
     SDL_SetRenderDrawColor(ui->renderer, 94, 206, 172, 255);
     SDL_RenderDrawLine(ui->renderer, zero_x, rect.y, zero_x, rect.y + rect.h - 1);
+
+    /* Axis value labels, drawn last so they stay legible over the trace. When a VITA reference
+     * level has been received these read absolute dBm; otherwise they read dBFS (0 = full scale).
+     * Kept at the left edge so the plot stays full width and column-aligned with the waterfall
+     * below; a small dark shadow keeps them readable wherever the trace runs. */
+    if (step > 0.0f) {
+        const int text_h = ui_text_height(UI_AXIS_TEXT_SCALE);
+        for (float disp = ceilf(disp_min / step) * step; disp <= disp_max + 0.001f; disp += step) {
+            const int y = spectrum_y_for_db(rect, disp - label_offset_db, min_db, max_db);
+            char label[16];
+            snprintf(label, sizeof(label), "%.0f", (double)disp);
+            int text_y = y - text_h / 2;
+            if (text_y < rect.y + 1) {
+                text_y = rect.y + 1;
+            } else if (text_y + text_h > rect.y + rect.h - 1) {
+                text_y = rect.y + rect.h - 1 - text_h;
+            }
+            SDL_SetRenderDrawColor(ui->renderer, 2, 4, 16, 255);
+            ui_text_draw(ui->renderer, rect.x + 5, text_y + 1, UI_AXIS_TEXT_SCALE, label);
+            SDL_SetRenderDrawColor(ui->renderer, 165, 195, 220, 255);
+            ui_text_draw(ui->renderer, rect.x + 4, text_y, UI_AXIS_TEXT_SCALE, label);
+        }
+        SDL_SetRenderDrawColor(ui->renderer, 110, 140, 170, 255);
+        ui_text_draw(ui->renderer,
+                     rect.x + rect.w - ui_text_width(UI_AXIS_TEXT_SCALE, unit_label) - 4,
+                     rect.y + 3,
+                     UI_AXIS_TEXT_SCALE,
+                     unit_label);
+    }
 }
 
 static void ui_update(ui_t *ui, const waterfall_t *wf, const app_config_t *config, const control_state_t *control, const rx_stats_t *stats, struct timespec start)
@@ -1570,7 +1638,9 @@ static void ui_update(ui_t *ui, const waterfall_t *wf, const app_config_t *confi
         .h = window_height > waterfall_y ? window_height - waterfall_y : 1,
     };
     SDL_RenderCopy(ui->renderer, ui->texture, 0, &waterfall_rect);
-    ui_draw_spectrum(ui, wf, spectrum_rect, min_db, max_db);
+    const float label_offset_db = stats->have_reference_level ? (float)stats->reference_level_dbm : 0.0f;
+    const char *unit_label = stats->have_reference_level ? "DBM" : "DBFS";
+    ui_draw_spectrum(ui, wf, spectrum_rect, min_db, max_db, label_offset_db, unit_label);
     ui_draw_toolbar(ui, config, control, stats, window_width);
     ui_draw_dropdowns(ui, control);
     SDL_RenderPresent(ui->renderer);

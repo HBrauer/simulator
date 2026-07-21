@@ -373,6 +373,7 @@ static void maybe_send_context_packet(stream_worker_t *worker, udp_output_t *udp
         .rf_reference_frequency_hz = receiver_channel_center_hz(receiver, channel, scenario_time_ns),
         .bandwidth_hz = channel->bandwidth_hz,
         .sample_rate_hz = channel->sample_rate_hz,
+        .reference_level_dbm = channel->rf_reference_power_dbm,
     };
     uint8_t packet[64];
     size_t packet_bytes = 0;

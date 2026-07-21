@@ -17,6 +17,9 @@ typedef struct {
     float *history;
     float last_min_db;
     float last_max_db;
+    /* 20*log10(sum(window)): the FFT-bin magnitude a full-scale on-bin tone produces. Subtracted
+     * from every bin so the spectrum reads true dBFS (a full-scale tone = 0 dBFS). */
+    float full_scale_db;
     size_t next_row;
 } waterfall_t;
 

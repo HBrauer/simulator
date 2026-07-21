@@ -2,6 +2,7 @@
 #include "test_suites.h"
 
 #include <check.h>
+#include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -70,9 +71,76 @@ START_TEST(loads_optional_noise_floor)
     ck_assert_msg(scenario_load("simulator/scenarios/burst_1s_every_5s.yaml", &scenario, error, sizeof(error)), "%s", error);
     ck_assert_msg(scenario_validate(&scenario, ".", error, sizeof(error)), "%s", error);
     ck_assert(scenario.noise_floor.enabled);
-    ck_assert(scenario.noise_floor.use_density);
     ck_assert_double_eq_tol(scenario.noise_floor.power_dbm_per_hz, -160.0, 0.001);
     ck_assert_uint_eq(scenario.noise_floor.seed, 49152);
+}
+END_TEST
+
+/* A signal may set snr_db (dB above the in-band noise) or omit power entirely (default SNR)
+ * instead of an absolute power_dbm; the loader resolves it against the noise density and the
+ * signal bandwidth. Setting both power_dbm and snr_db is rejected. */
+START_TEST(resolves_signal_power_from_snr)
+{
+    char path[] = "/tmp/sdr_scenario_snr_XXXXXX";
+    int fd = mkstemp(path);
+    ck_assert_int_ge(fd, 0);
+    FILE *file = fdopen(fd, "w");
+    ck_assert_ptr_nonnull(file);
+    /* fsk_20mhz.c16 is a 20 MHz source, so in-band noise = -160 + 10*log10(20e6) ~= -86.99 dBm. */
+    fprintf(file,
+        "{"
+        "\"schema_version\":1,\"scenario_id\":\"snr\","
+        "\"noise_floor\":{\"enabled\":true,\"power_dbm_per_hz\":-160.0,\"seed\":7},"
+        "\"sources\":[{"
+        "\"id\":\"iq\",\"source_type\":\"iq_file\",\"file\":\"simulator/assets/fsk_20mhz.c16\","
+        "\"format\":\"ci16\",\"byte_order\":\"little_endian\",\"iq_layout\":\"interleaved_iq\","
+        "\"sample_rate_hz\":24576000,\"bandwidth_hz\":20000000,\"center_frequency_hz\":0,\"nominal_level_dbfs\":-12.0"
+        "}],"
+        "\"signals\":["
+        "{\"signal_id\":\"sig_snr\",\"source_reference\":\"iq\",\"modulation\":\"iq\","
+        "\"center_frequency_hz\":10005000000,\"snr_db\":6.0,\"repeat_interval_s\":1.0},"
+        "{\"signal_id\":\"sig_default\",\"source_reference\":\"iq\",\"modulation\":\"iq\","
+        "\"center_frequency_hz\":10005000000,\"repeat_interval_s\":1.0}"
+        "]"
+        "}");
+    fclose(file);
+    scenario_t scenario;
+    char error[128];
+    ck_assert_msg(scenario_load(path, &scenario, error, sizeof(error)), "%s", error);
+    unlink(path);
+    ck_assert_uint_eq(scenario.signal_count, 2);
+    const double in_band_noise = -160.0 + 10.0 * log10(20000000.0);
+    ck_assert_double_eq_tol(scenario.signals[0].power_dbm, in_band_noise + 6.0, 0.01);
+    ck_assert_double_eq_tol(scenario.signals[1].power_dbm, in_band_noise + SIM_DEFAULT_SIGNAL_SNR_DB, 0.01);
+}
+END_TEST
+
+START_TEST(rejects_signal_with_both_power_and_snr)
+{
+    char path[] = "/tmp/sdr_scenario_snr_conflict_XXXXXX";
+    int fd = mkstemp(path);
+    ck_assert_int_ge(fd, 0);
+    FILE *file = fdopen(fd, "w");
+    ck_assert_ptr_nonnull(file);
+    fprintf(file,
+        "{"
+        "\"schema_version\":1,\"scenario_id\":\"snr_conflict\","
+        "\"sources\":[{"
+        "\"id\":\"iq\",\"source_type\":\"iq_file\",\"file\":\"simulator/assets/fsk_20mhz.c16\","
+        "\"format\":\"ci16\",\"byte_order\":\"little_endian\",\"iq_layout\":\"interleaved_iq\","
+        "\"sample_rate_hz\":24576000,\"bandwidth_hz\":20000000,\"center_frequency_hz\":0,\"nominal_level_dbfs\":-12.0"
+        "}],"
+        "\"signals\":[{"
+        "\"signal_id\":\"sig\",\"source_reference\":\"iq\",\"modulation\":\"iq\","
+        "\"center_frequency_hz\":10005000000,\"power_dbm\":-60.0,\"snr_db\":6.0,\"repeat_interval_s\":1.0"
+        "}]"
+        "}");
+    fclose(file);
+    scenario_t scenario;
+    char error[128];
+    ck_assert(!scenario_load(path, &scenario, error, sizeof(error)));
+    ck_assert_str_eq(error, "signal_power_conflict");
+    unlink(path);
 }
 END_TEST
 
@@ -487,6 +555,8 @@ Suite *scenario_suite(void)
     tcase_add_test(tc, rejects_replay_repeat_and_bad_mode);
     tcase_add_test(tc, loads_and_validates_scenario);
     tcase_add_test(tc, loads_optional_noise_floor);
+    tcase_add_test(tc, resolves_signal_power_from_snr);
+    tcase_add_test(tc, rejects_signal_with_both_power_and_snr);
     tcase_add_test(tc, loads_audio_wav_modulation_scenario);
     tcase_add_test(tc, derives_source_sample_count_from_file_size);
     tcase_add_test(tc, rejects_duplicate_source_ids);

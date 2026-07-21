@@ -35,9 +35,14 @@ bool waterfall_init(waterfall_t *wf, size_t fft_size, size_t rows)
         waterfall_free(wf);
         return false;
     }
+    double window_sum = 0.0;
     for (size_t i = 0; i < fft_size; i++) {
         wf->window[i] = 0.5f - 0.5f * (float)cos((2.0 * M_PI * (double)i) / (double)(fft_size - 1U));
+        window_sum += (double)wf->window[i];
     }
+    /* An on-bin full-scale complex tone (|z| = 1 after the 1/32768 normalization) produces an
+     * FFT-bin magnitude of sum(window). Subtracting 20*log10 of that puts full scale at 0 dBFS. */
+    wf->full_scale_db = 20.0f * log10f((float)window_sum);
     for (size_t i = 0; i < rows * fft_size; i++) {
         wf->history[i] = -120.0f;
     }
@@ -85,7 +90,7 @@ bool waterfall_push_ci16(waterfall_t *wf, const int16_t *iq, size_t sample_count
         const float re = wf->fft_out[src][0];
         const float im = wf->fft_out[src][1];
         const float mag = sqrtf(re * re + im * im) + 1.0e-12f;
-        wf->spectrum_db[i] = 20.0f * log10f(mag);
+        wf->spectrum_db[i] = 20.0f * log10f(mag) - wf->full_scale_db;
         row[i] = wf->spectrum_db[i];
         if (row[i] < row_min_db) {
             row_min_db = row[i];

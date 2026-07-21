@@ -41,10 +41,12 @@ size_t vita49_if_data_packet_size(size_t payload_samples, bool class_id_present)
 #define VITA49_CIF0_CHANGE_INDICATOR (1U << 31U)
 #define VITA49_CIF0_BANDWIDTH (1U << 29U)
 #define VITA49_CIF0_RF_REFERENCE_FREQUENCY (1U << 27U)
+#define VITA49_CIF0_REFERENCE_LEVEL (1U << 24U)
 #define VITA49_CIF0_SAMPLE_RATE (1U << 21U)
 
-/* Header, stream id, integer seconds, fractional ps (2), CIF0, then three 64-bit fields. */
-#define VITA49_CONTEXT_BASE_WORDS (6U + 3U * 2U)
+/* Header, stream id, integer seconds, fractional ps (2), CIF0, three 64-bit fields, and a
+ * single 32-bit reference-level word. */
+#define VITA49_CONTEXT_BASE_WORDS (6U + 3U * 2U + 1U)
 #define VITA49_CLASS_ID_WORDS 2U
 
 /* Frequency/rate context fields are 64-bit two's complement Hz with the radix point after
@@ -52,6 +54,21 @@ size_t vita49_if_data_packet_size(size_t payload_samples, bool class_id_present)
 static uint64_t vita49_fixed_hz(uint64_t hz)
 {
     return hz << 20U;
+}
+
+/* Reference Level (VITA 49.2 section 9.5.9): a 32-bit field whose low 16 bits are a two's
+ * complement value in dBm with the radix point after bit 7 (dBm * 2^7); the high 16 bits are
+ * reserved (zero). */
+static uint32_t vita49_reference_level(double dbm)
+{
+    double scaled = dbm * 128.0;
+    if (scaled > 32767.0) {
+        scaled = 32767.0;
+    } else if (scaled < -32768.0) {
+        scaled = -32768.0;
+    }
+    const int32_t rounded = (int32_t)(scaled + (scaled >= 0.0 ? 0.5 : -0.5));
+    return (uint32_t)((int16_t)rounded) & 0xffffU;
 }
 
 size_t vita49_context_packet_size(bool class_id_present)
@@ -80,7 +97,8 @@ bool vita49_write_context_packet(const vita49_context_packet_t *packet, uint8_t 
     if (packet->class_id_present) {
         header |= VITA49_HDR_CLASS_ID_PRESENT;
     }
-    uint32_t cif0 = VITA49_CIF0_BANDWIDTH | VITA49_CIF0_RF_REFERENCE_FREQUENCY | VITA49_CIF0_SAMPLE_RATE;
+    uint32_t cif0 = VITA49_CIF0_BANDWIDTH | VITA49_CIF0_RF_REFERENCE_FREQUENCY |
+                    VITA49_CIF0_REFERENCE_LEVEL | VITA49_CIF0_SAMPLE_RATE;
     if (packet->changed) {
         cif0 |= VITA49_CIF0_CHANGE_INDICATOR;
     }
@@ -99,11 +117,14 @@ bool vita49_write_context_packet(const vita49_context_packet_t *packet, uint8_t 
     offset += 8;
     write_be32(out + offset, cif0);
     offset += 4;
-    /* Fields follow in descending CIF0 bit order. */
+    /* Fields follow in descending CIF0 bit order: bandwidth (29), RF reference frequency (27),
+     * reference level (24), sample rate (21). */
     write_be64(out + offset, vita49_fixed_hz(packet->bandwidth_hz));
     offset += 8;
     write_be64(out + offset, vita49_fixed_hz(packet->rf_reference_frequency_hz));
     offset += 8;
+    write_be32(out + offset, vita49_reference_level(packet->reference_level_dbm));
+    offset += 4;
     write_be64(out + offset, vita49_fixed_hz(packet->sample_rate_hz));
     offset += 8;
     if (written != NULL) {

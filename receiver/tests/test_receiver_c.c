@@ -4,6 +4,7 @@
 #include "waterfall.h"
 
 #include <check.h>
+#include <math.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -62,7 +63,45 @@ END_TEST
 
 START_TEST(parses_simulator_vita49_context_packet)
 {
-    /* Mirror of the simulator's vita49_write_context_packet layout. */
+    /* Mirror of the simulator's vita49_write_context_packet layout: bandwidth (bit 29), RF
+     * reference frequency (27), reference level (24, a single 32-bit word), sample rate (21). */
+    uint8_t packet[52];
+    memset(packet, 0, sizeof(packet));
+    const uint32_t header = (4U << 28U) | (1U << 22U) | (2U << 20U) | (5U << 16U) | 13U;
+    write_be32(packet, header);
+    write_be32(packet + 4, 0x53440001U);
+    write_be32(packet + 8, 1U);
+    write_be64(packet + 12, 234567890000ULL);
+    const uint32_t cif0 = (1U << 31U) | (1U << 29U) | (1U << 27U) | (1U << 24U) | (1U << 21U);
+    write_be32(packet + 20, cif0);
+    write_be64(packet + 24, 20000000ULL << 20U);
+    write_be64(packet + 32, 10005000000ULL << 20U);
+    write_be32(packet + 40, (uint32_t)((uint16_t)(int16_t)(-55 * 128))); /* -55 dBm, dBm*2^7 */
+    write_be64(packet + 44, 24576000ULL << 20U);
+
+    ck_assert_uint_eq(vita49_rx_packet_type(packet, sizeof(packet)), VITA49_RX_PACKET_TYPE_CONTEXT);
+    vita49_rx_context_t context;
+    ck_assert(vita49_rx_parse_context(packet, sizeof(packet), &context));
+    ck_assert_uint_eq(context.sequence, 5);
+    ck_assert(context.changed);
+    ck_assert_uint_eq(context.stream_id, 0x53440001U);
+    ck_assert_uint_eq(context.timestamp_ns, 1234567890ULL);
+    ck_assert_uint_eq(context.bandwidth_hz, 20000000ULL);
+    ck_assert_uint_eq(context.rf_reference_frequency_hz, 10005000000ULL);
+    ck_assert_uint_eq(context.sample_rate_hz, 24576000ULL);
+    ck_assert(context.has_reference_level);
+    ck_assert_double_eq_tol(context.reference_level_dbm, -55.0, 0.01);
+
+    /* Unknown CIF0 bits shift the field layout, so parsing must refuse. */
+    write_be32(packet + 20, cif0 | (1U << 15U));
+    ck_assert(!vita49_rx_parse_context(packet, sizeof(packet), &context));
+}
+END_TEST
+
+/* A context packet without the Reference Level field (older simulators) must still parse; the
+ * receiver simply has no absolute-power reference and stays on a dBFS axis. */
+START_TEST(parses_context_packet_without_reference_level)
+{
     uint8_t packet[48];
     memset(packet, 0, sizeof(packet));
     const uint32_t header = (4U << 28U) | (1U << 22U) | (2U << 20U) | (5U << 16U) | 12U;
@@ -76,20 +115,10 @@ START_TEST(parses_simulator_vita49_context_packet)
     write_be64(packet + 32, 10005000000ULL << 20U);
     write_be64(packet + 40, 24576000ULL << 20U);
 
-    ck_assert_uint_eq(vita49_rx_packet_type(packet, sizeof(packet)), VITA49_RX_PACKET_TYPE_CONTEXT);
     vita49_rx_context_t context;
     ck_assert(vita49_rx_parse_context(packet, sizeof(packet), &context));
-    ck_assert_uint_eq(context.sequence, 5);
-    ck_assert(context.changed);
-    ck_assert_uint_eq(context.stream_id, 0x53440001U);
-    ck_assert_uint_eq(context.timestamp_ns, 1234567890ULL);
-    ck_assert_uint_eq(context.bandwidth_hz, 20000000ULL);
-    ck_assert_uint_eq(context.rf_reference_frequency_hz, 10005000000ULL);
     ck_assert_uint_eq(context.sample_rate_hz, 24576000ULL);
-
-    /* Unknown CIF0 bits shift the field layout, so parsing must refuse. */
-    write_be32(packet + 20, cif0 | (1U << 15U));
-    ck_assert(!vita49_rx_parse_context(packet, sizeof(packet), &context));
+    ck_assert(!context.has_reference_level);
 }
 END_TEST
 
@@ -109,6 +138,39 @@ START_TEST(pushes_ci16_into_waterfall)
         any = any || wf.history[i] > -120.0f;
     }
     ck_assert(any);
+    waterfall_free(&wf);
+}
+END_TEST
+
+/* The spectrum is calibrated so a full-scale on-bin complex tone reads 0 dBFS, and level scales
+ * 1:1 in dB. This is what lets the axis read absolute dBm once the VITA reference level (RF power
+ * at 0 dBFS) is added. */
+START_TEST(full_scale_tone_reads_zero_dbfs)
+{
+    const size_t n = 1024;
+    const size_t bin = 64; /* on-bin: frequency = bin * fs / n */
+    waterfall_t wf;
+    ck_assert(waterfall_init(&wf, n, 4));
+
+    int16_t iq[2U * 1024];
+    for (size_t i = 0; i < n; i++) {
+        const double phase = 2.0 * M_PI * (double)bin * (double)i / (double)n;
+        iq[2U * i] = (int16_t)lround(32767.0 * cos(phase));
+        iq[2U * i + 1U] = (int16_t)lround(32767.0 * sin(phase));
+    }
+    ck_assert(waterfall_push_ci16(&wf, iq, n));
+    /* Full scale -> 0 dBFS at the tone bin (small negative from the 32767/32768 scale). */
+    ck_assert_double_eq_tol(wf.last_max_db, 0.0, 0.2);
+
+    /* Half amplitude (-6 dB) must move the peak down by ~6 dB: 1:1 dB scaling. */
+    for (size_t i = 0; i < n; i++) {
+        const double phase = 2.0 * M_PI * (double)bin * (double)i / (double)n;
+        iq[2U * i] = (int16_t)lround(16384.0 * cos(phase));
+        iq[2U * i + 1U] = (int16_t)lround(16384.0 * sin(phase));
+    }
+    ck_assert(waterfall_push_ci16(&wf, iq, n));
+    ck_assert_double_eq_tol(wf.last_max_db, -6.0, 0.2);
+
     waterfall_free(&wf);
 }
 END_TEST
@@ -140,7 +202,9 @@ Suite *receiver_c_suite(void)
     tcase_add_test(tc, parses_simulator_vita49_if_data_packet);
     tcase_add_test(tc, rejects_malformed_vita49_packet_size);
     tcase_add_test(tc, parses_simulator_vita49_context_packet);
+    tcase_add_test(tc, parses_context_packet_without_reference_level);
     tcase_add_test(tc, pushes_ci16_into_waterfall);
+    tcase_add_test(tc, full_scale_tone_reads_zero_dbfs);
     tcase_add_test(tc, calculates_history_stride_from_duration);
     suite_add_tcase(suite, tc);
     return suite;

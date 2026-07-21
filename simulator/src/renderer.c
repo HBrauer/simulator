@@ -397,15 +397,12 @@ static void render_noise_floor(
         return;
     }
 
-    /* Target RMS amplitude of each I/Q component in ci16 counts. In density mode the total
-     * in-window power is (density + 10*log10(window_bandwidth)); in legacy mode it is the total
-     * power directly. Because the pool is unit-RMS, the amplitude is exactly the RMS -- no
-     * distribution-dependent correction is needed. */
-    double power_dbm = scenario->noise_floor.power_dbm;
-    if (scenario->noise_floor.use_density) {
-        const double bandwidth = window_bandwidth_hz > 0U ? (double)window_bandwidth_hz : 1.0;
-        power_dbm = scenario->noise_floor.power_dbm_per_hz + 10.0 * log10(bandwidth);
-    }
+    /* Target RMS amplitude of each I/Q component in ci16 counts. The total in-window power is the
+     * spectral density spread over the window bandwidth (density + 10*log10(window_bandwidth)).
+     * Because the pool is unit-RMS, the amplitude is exactly the RMS -- no distribution-dependent
+     * correction is needed. */
+    const double bandwidth = window_bandwidth_hz > 0U ? (double)window_bandwidth_hz : 1.0;
+    const double power_dbm = scenario->noise_floor.power_dbm_per_hz + 10.0 * log10(bandwidth);
     const double amplitude = 32767.0 * output_scale * pow(10.0, (power_dbm - rf_reference_power_dbm) / 20.0);
     if (!(amplitude > 0.0)) {
         return;

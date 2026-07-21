@@ -23,6 +23,15 @@
 #define SIM_DEFAULT_STREAM_BLOCK_SAMPLES 1024U
 #define SIM_MAX_STREAM_BLOCK_SAMPLES 4096U
 
+/* A signal with neither power_dbm nor snr_db configured is placed this many dB above the
+ * in-band noise floor. Because the margin is relative to the noise, one fixed value keeps a
+ * signal comfortably visible at any bandwidth or noise level -- no hand-computed dBm needed. */
+#define SIM_DEFAULT_SIGNAL_SNR_DB 20.0
+/* Reference noise density used to resolve snr_db (and the default SNR) when the noise floor is
+ * disabled. With no actual noise the signal is visible regardless; this only fixes the absolute
+ * power the SNR margin is measured from, so behaviour is continuous when noise is toggled off. */
+#define SIM_NOISE_FLOOR_DISABLED_DENSITY_DBM_PER_HZ -110.0
+
 typedef struct {
     int16_t i;
     int16_t q;
@@ -165,7 +174,8 @@ typedef struct {
     scenario_modulation_t modulation;
     uint64_t center_frequency_hz;
     uint32_t bandwidth_hz;
-    double power_dbm;
+    double power_dbm;         /* absolute transmit power; resolved at load from snr_db (or the
+                               * default SNR) when not given explicitly, so it is always set here */
     double fm_deviation_hz;
     double am_depth;
     double start_time_s;
@@ -185,9 +195,7 @@ typedef struct {
 
 typedef struct {
     bool enabled;
-    bool use_density;         /* true: power_dbm_per_hz is set; false: legacy total power_dbm */
-    double power_dbm;         /* legacy: total noise power in the window */
-    double power_dbm_per_hz;  /* preferred: noise power spectral density */
+    double power_dbm_per_hz;  /* noise power spectral density (total in-window power scales with bandwidth) */
     uint64_t seed;
 } scenario_noise_floor_t;
 

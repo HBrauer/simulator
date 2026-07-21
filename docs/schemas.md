@@ -140,7 +140,8 @@ Signal fields:
 | `modulation` | string | no | Defaults to `iq`. Use `iq` for `iq_file`; use `wbfm`, `am`, `usb`, or `lsb` for `audio_file`. |
 | `center_frequency_hz` | integer | see notes | Absolute RF center frequency. Required except in `range` replay mode (where the content follows the tune and the field is ignored). |
 | `bandwidth_hz` | integer | see notes | The signal's on-air footprint (used for channel-overlap gain and the Nyquist guard; it does **not** filter the samples). Required for audio sources — the modulation, not the source, sets the RF width. Optional for IQ sources: when omitted it defaults to the referenced source's `bandwidth_hz`. |
-| `power_dbm` | number | yes | RF power. Digital level is `nominal_level_dbfs + (power_dbm - rf_reference_power_dbm)` before `output_scale`. |
+| `power_dbm` | number | no | Absolute RF power. Digital level is `nominal_level_dbfs + (power_dbm - rf_reference_power_dbm)` before `output_scale`. Omit to set the power via `snr_db` instead. |
+| `snr_db` | number | no | RF power expressed as dB above the in-band noise: `power_dbm = noise_power_dbm_per_hz + 10*log10(bandwidth_hz) + snr_db`. Mutually exclusive with `power_dbm` (`signal_power_conflict` if both are given). When neither is given the signal defaults to `+20 dB` SNR, so it is always comfortably visible. If the noise floor is disabled a base density of `-110 dBm/Hz` stands in for the reference. |
 | `fm_deviation_hz` | number | WBFM only | FM peak deviation. Defaults to `75000`. |
 | `am_depth` | number | AM only | AM modulation depth from `0.0` to `1.0`. Defaults to `0.8`. |
 | `start_time_s` | number | no | Scenario start time before the first playback. Defaults to `0`. |
@@ -177,11 +178,10 @@ Optional `noise_floor` object:
 | Field | Type | Required | Notes |
 | --- | --- | --- | --- |
 | `enabled` | bool | no | Defaults to `true` when the object is present. |
-| `power_dbm_per_hz` | number | one of | Preferred. Noise power spectral **density**. In-window power is `power_dbm_per_hz + 10*log10(window_bandwidth_hz)`, so a narrow DDC and the wide stream carry the same density (constant dBm/Hz) rather than the same total power. |
-| `power_dbm` | number | one of | Legacy. Total noise power in the window, independent of bandwidth. Kept for backward compatibility; prefer `power_dbm_per_hz`. |
+| `power_dbm_per_hz` | number | yes | Noise power spectral **density**. In-window power is `power_dbm_per_hz + 10*log10(window_bandwidth_hz)`, so a narrow DDC and the wide stream carry the same density (constant dBm/Hz) rather than the same total power. |
 | `seed` | integer | no | Selects the noise realization. Same seed + same scenario time yields identical noise across instances. Defaults to `1`. |
 
-Exactly one of `power_dbm_per_hz` or `power_dbm` must be given when the noise floor is enabled; specifying both is an error (`noise_floor_conflicting_power`). The noise is Gaussian with unit crest factor, so the produced RMS matches the configured level (the earlier uniform noise ran ~4.8 dB low).
+`power_dbm_per_hz` must be given when the noise floor is enabled (`noise_floor_invalid` otherwise). The noise is Gaussian with unit crest factor, so the produced RMS matches the configured level (the earlier uniform noise ran ~4.8 dB low).
 
 Validation error codes include:
 
@@ -193,6 +193,7 @@ Validation error codes include:
 - `source_unsupported`
 - `duplicate_source_id`
 - `signal_invalid`
+- `signal_power_conflict`
 - `signal_modulation_invalid`
 - `signal_modulation_source_mismatch`
 - `duplicate_signal_id`
@@ -212,4 +213,3 @@ Validation error codes include:
 - `passthrough_variant_invalid`
 - `passthrough_variant_duplicate_rate`
 - `noise_floor_invalid`
-- `noise_floor_conflicting_power`

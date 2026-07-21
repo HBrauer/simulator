@@ -113,6 +113,7 @@ START_TEST(writes_context_packet_fields)
         .rf_reference_frequency_hz = 10005000000ULL,
         .bandwidth_hz = 20000000ULL,
         .sample_rate_hz = 24576000ULL,
+        .reference_level_dbm = -55.0,
     };
 
     ck_assert(vita49_write_context_packet(&packet, out, sizeof(out), &written));
@@ -131,11 +132,14 @@ START_TEST(writes_context_packet_fields)
     ck_assert_uint_eq(cif0 >> 31U, 1U);              /* change indicator */
     ck_assert_uint_eq((cif0 >> 29U) & 1U, 1U);       /* bandwidth */
     ck_assert_uint_eq((cif0 >> 27U) & 1U, 1U);       /* rf reference frequency */
+    ck_assert_uint_eq((cif0 >> 24U) & 1U, 1U);       /* reference level */
     ck_assert_uint_eq((cif0 >> 21U) & 1U, 1U);       /* sample rate */
     /* 64-bit fixed point, radix point after bit 20: value_hz << 20. */
     ck_assert_uint_eq(read_be64(out + 24) >> 20U, 20000000ULL);
     ck_assert_uint_eq(read_be64(out + 32) >> 20U, 10005000000ULL);
-    ck_assert_uint_eq(read_be64(out + 40) >> 20U, 24576000ULL);
+    /* Reference level: 32-bit word, low 16 bits are dBm * 2^7 two's complement. */
+    ck_assert_int_eq((int16_t)(read_be32(out + 40) & 0xffffU), (int16_t)(-55 * 128));
+    ck_assert_uint_eq(read_be64(out + 44) >> 20U, 24576000ULL);
 }
 END_TEST
 
@@ -153,6 +157,7 @@ START_TEST(writes_context_packet_with_class_id)
         .rf_reference_frequency_hz = 10005000000ULL,
         .bandwidth_hz = 20000000ULL,
         .sample_rate_hz = 24576000ULL,
+        .reference_level_dbm = -55.0,
     };
 
     ck_assert(vita49_write_context_packet(&packet, out, sizeof(out), &written));
@@ -171,7 +176,8 @@ START_TEST(writes_context_packet_with_class_id)
     ck_assert_uint_eq(cif0 >> 31U, 0U); /* not changed */
     ck_assert_uint_eq(read_be64(out + 32) >> 20U, 20000000ULL);
     ck_assert_uint_eq(read_be64(out + 40) >> 20U, 10005000000ULL);
-    ck_assert_uint_eq(read_be64(out + 48) >> 20U, 24576000ULL);
+    ck_assert_int_eq((int16_t)(read_be32(out + 48) & 0xffffU), (int16_t)(-55 * 128));
+    ck_assert_uint_eq(read_be64(out + 52) >> 20U, 24576000ULL);
 }
 END_TEST
 

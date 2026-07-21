@@ -61,8 +61,7 @@ At-a-glance tables for every parameter. The sections that follow explain the beh
 | Parameter | Type / range | Description |
 | --- | --- | --- |
 | `enabled` | bool | Defaults to `true` when the object is present. |
-| `power_dbm_per_hz` | number (dBm/Hz) | Spectral density (preferred). Give exactly one of this or `power_dbm`. |
-| `power_dbm` | number (dBm) | Total in-window power (legacy). Give exactly one of this or `power_dbm_per_hz`. |
+| `power_dbm_per_hz` | number (dBm/Hz) | Spectral density. Required when the noise floor is enabled. In-window power is `power_dbm_per_hz + 10·log10(window_bandwidth_hz)`. |
 | `seed` | integer | Noise realization; identical across instances for a given seed. Default `1`. |
 
 ### Scenario — source
@@ -93,7 +92,8 @@ bytes per complex sample; WAV: the header's frame count).
 | `modulation` | `iq` \| `wbfm` \| `am` \| `usb` \| `lsb` | Default `iq`. `iq` for IQ sources; the rest for audio. |
 | `center_frequency_hz` | integer (Hz) | Absolute RF center. Required except in `range` replay mode. |
 | `bandwidth_hz` | integer (Hz) | On-air footprint. Required for audio; optional for IQ (defaults to the source's bandwidth). |
-| `power_dbm` | number (dBm) | Required. RF power. |
+| `power_dbm` | number (dBm) | Absolute RF power. Optional — omit to set power via `snr_db`. Mutually exclusive with `snr_db`. |
+| `snr_db` | number (dB) | RF power as dB above the in-band noise (`noise_dbm_per_hz + 10·log10(bandwidth_hz) + snr_db`). Mutually exclusive with `power_dbm`. If neither is set, defaults to `+20 dB` SNR so the signal is always visible; with the noise floor disabled a base density of `-110 dBm/Hz` is assumed. |
 | `fm_deviation_hz` | number (Hz) | WBFM only. Peak deviation, default `75000`. |
 | `am_depth` | number, `0.0`–`1.0` | AM only. Modulation depth, default `0.8`. |
 | `start_time_s` | number, `0` ≤ t < `86400` | First playback time. Default `0`. |
@@ -427,10 +427,13 @@ form so a narrow channel and the wide stream carry the same dBm/Hz:
 noise_floor: { enabled: true, power_dbm_per_hz: -160.0, seed: 12345 }
 ```
 
-In-window power is `power_dbm_per_hz + 10·log10(window_bandwidth_hz)`. The legacy `power_dbm`
-form (total power, bandwidth-independent) is still accepted but you must give exactly one of the
-two (`noise_floor_conflicting_power` otherwise). `seed` makes the noise reproducible across
-instances.
+In-window power is `power_dbm_per_hz + 10·log10(window_bandwidth_hz)`, so a narrow DDC and the
+wide stream carry the same density rather than the same total power. `seed` makes the noise
+reproducible across instances.
+
+Signals set their power relative to this floor with `snr_db` (dB above the in-band noise) instead
+of an absolute `power_dbm`; a signal that sets neither defaults to `+20 dB` SNR and is always
+visible without hand-computing dBm. See the signal table above.
 
 ---
 

@@ -36,8 +36,8 @@ typedef struct {
 } vita49_if_data_packet_t;
 
 /* IF Context packet (VITA 49.2 packet type 4) announcing the stream's RF reference
- * frequency, bandwidth, and sample rate in-band, so UDP consumers can follow retunes
- * without polling the REST API. */
+ * frequency, bandwidth, sample rate, and reference level in-band, so UDP consumers can
+ * follow retunes and calibrate absolute power without polling the REST API. */
 typedef struct {
     uint32_t stream_id;
     uint8_t sequence;
@@ -48,6 +48,10 @@ typedef struct {
     uint64_t rf_reference_frequency_hz;
     uint64_t bandwidth_hz;
     uint64_t sample_rate_hz;
+    /* RF power (dBm) that maps to digital full scale (0 dBFS): the VITA 49.2 Reference Level
+     * (CIF0 bit 24). A consumer adds this to its full-scale-normalized dBFS spectrum to read
+     * absolute dBm. */
+    double reference_level_dbm;
 } vita49_context_packet_t;
 
 size_t vita49_if_data_packet_size(size_t payload_samples, bool class_id_present);

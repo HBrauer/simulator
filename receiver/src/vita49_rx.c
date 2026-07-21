@@ -28,6 +28,7 @@ uint8_t vita49_rx_packet_type(const uint8_t *data, size_t bytes)
 #define VITA49_RX_CIF0_CHANGE (1U << 31U)
 #define VITA49_RX_CIF0_BANDWIDTH (1U << 29U)
 #define VITA49_RX_CIF0_RF_REFERENCE (1U << 27U)
+#define VITA49_RX_CIF0_REFERENCE_LEVEL (1U << 24U)
 #define VITA49_RX_CIF0_SAMPLE_RATE (1U << 21U)
 
 /* Header "Class ID present" indicator (bit 27). When set, two Class ID words sit between
@@ -54,7 +55,8 @@ bool vita49_rx_parse_context(const uint8_t *data, size_t bytes, vita49_rx_contex
     }
     const uint32_t cif0 = read_be32(data + cif0_offset);
     const uint32_t known = VITA49_RX_CIF0_CHANGE | VITA49_RX_CIF0_BANDWIDTH |
-                           VITA49_RX_CIF0_RF_REFERENCE | VITA49_RX_CIF0_SAMPLE_RATE;
+                           VITA49_RX_CIF0_RF_REFERENCE | VITA49_RX_CIF0_REFERENCE_LEVEL |
+                           VITA49_RX_CIF0_SAMPLE_RATE;
     if ((cif0 & ~known) != 0U) {
         return false; /* unknown fields shift the layout; refuse rather than misread */
     }
@@ -81,6 +83,17 @@ bool vita49_rx_parse_context(const uint8_t *data, size_t bytes, vita49_rx_contex
         }
         context->rf_reference_frequency_hz = read_be64(data + offset) >> 20U;
         offset += 8U;
+    }
+    if ((cif0 & VITA49_RX_CIF0_REFERENCE_LEVEL) != 0U) {
+        if (offset + 4U > bytes) {
+            return false;
+        }
+        /* 32-bit field; the low 16 bits are a two's-complement dBm value with the radix point
+         * after bit 7 (dBm * 2^7). The high 16 bits are reserved. */
+        const int16_t raw = (int16_t)(read_be32(data + offset) & 0xffffU);
+        context->reference_level_dbm = (double)raw / 128.0;
+        context->has_reference_level = true;
+        offset += 4U;
     }
     if ((cif0 & VITA49_RX_CIF0_SAMPLE_RATE) != 0U) {
         if (offset + 8U > bytes) {

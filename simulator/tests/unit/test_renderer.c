@@ -630,7 +630,9 @@ START_TEST(renderer_adds_deterministic_noise_floor_without_active_signals)
     scenario.schema_version = 1;
     snprintf(scenario.scenario_id, sizeof(scenario.scenario_id), "%s", "unit_noise_floor");
     scenario.noise_floor.enabled = true;
-    scenario.noise_floor.power_dbm = -85.0;
+    /* Density chosen so the total in the 80 MHz window (density + 10*log10(bw)) is ~-85 dBm,
+     * matching the receiver reference below -- present, deterministic, not fully saturated. */
+    scenario.noise_floor.power_dbm_per_hz = -164.0;
     scenario.noise_floor.seed = 1234;
 
     asset_cache_t cache;
@@ -662,7 +664,6 @@ static double measure_noise_rms(uint64_t window_bw_hz, double density_dbm_per_hz
     memset(&scenario, 0, sizeof(scenario));
     scenario.schema_version = 1;
     scenario.noise_floor.enabled = true;
-    scenario.noise_floor.use_density = true;
     scenario.noise_floor.power_dbm_per_hz = density_dbm_per_hz;
     scenario.noise_floor.seed = 42;
     asset_cache_t cache;

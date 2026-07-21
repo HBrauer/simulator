@@ -122,19 +122,11 @@ bool scenario_load(const char *path, scenario_t *scenario, char *error, size_t e
         const yaml_tree_node_t *enabled = yaml_tree_get(noise, "enabled");
         scenario->noise_floor.enabled = enabled == NULL ? true : yaml_tree_is_true(enabled);
         if (scenario->noise_floor.enabled) {
-            const bool has_density = yaml_tree_get_double(noise, "power_dbm_per_hz", &scenario->noise_floor.power_dbm_per_hz);
-            const bool has_total = yaml_tree_get_double(noise, "power_dbm", &scenario->noise_floor.power_dbm);
-            if (has_density && has_total) {
-                yaml_tree_free(root);
-                snprintf(error, error_size, "noise_floor_conflicting_power");
-                return false;
-            }
-            if (!has_density && !has_total) {
+            if (!yaml_tree_get_double(noise, "power_dbm_per_hz", &scenario->noise_floor.power_dbm_per_hz)) {
                 yaml_tree_free(root);
                 snprintf(error, error_size, "noise_floor_invalid");
                 return false;
             }
-            scenario->noise_floor.use_density = has_density;
             if (!yaml_tree_get_u64(noise, "seed", &scenario->noise_floor.seed)) {
                 scenario->noise_floor.seed = 1ULL;
             }
@@ -236,8 +228,7 @@ bool scenario_load(const char *path, scenario_t *scenario, char *error, size_t e
         const yaml_tree_node_t *passthrough = yaml_tree_get(sig, "passthrough");
         out->passthrough = yaml_tree_is_bool(passthrough) && yaml_tree_is_true(passthrough);
         if (!yaml_tree_get_string(sig, "signal_id", out->signal_id, sizeof(out->signal_id)) ||
-            !yaml_tree_get_string(sig, "source_reference", out->source_reference, sizeof(out->source_reference)) ||
-            !yaml_tree_get_double(sig, "power_dbm", &out->power_dbm)) {
+            !yaml_tree_get_string(sig, "source_reference", out->source_reference, sizeof(out->source_reference))) {
             yaml_tree_free(root);
             snprintf(error, error_size, "signal_invalid");
             return false;
@@ -254,6 +245,36 @@ bool scenario_load(const char *path, scenario_t *scenario, char *error, size_t e
                 return false;
             }
             out->bandwidth_hz = bw_source->bandwidth_hz;
+        }
+        /* Resolve transmit power. Precedence: explicit power_dbm > snr_db (dB above the in-band
+         * noise) > default SNR. snr_db is relative to the noise floor, so a signal with no power
+         * configured lands a fixed margin above the noise at any bandwidth or noise level and is
+         * always visible without hand-computing dBm. bandwidth_hz is resolved above, so the
+         * in-band noise (density + 10*log10(bandwidth)) is known here. */
+        {
+            double snr_db = 0.0;
+            const bool has_power = yaml_tree_get_double(sig, "power_dbm", &out->power_dbm);
+            const bool has_snr = yaml_tree_get_double(sig, "snr_db", &snr_db);
+            if (has_power && has_snr) {
+                yaml_tree_free(root);
+                snprintf(error, error_size, "signal_power_conflict");
+                return false;
+            }
+            if (!has_power) {
+                if (!has_snr) {
+                    snr_db = SIM_DEFAULT_SIGNAL_SNR_DB;
+                }
+                const double density = scenario->noise_floor.enabled
+                                           ? scenario->noise_floor.power_dbm_per_hz
+                                           : SIM_NOISE_FLOOR_DISABLED_DENSITY_DBM_PER_HZ;
+                const double bandwidth = out->bandwidth_hz > 0U ? (double)out->bandwidth_hz : 1.0;
+                out->power_dbm = density + 10.0 * log10(bandwidth) + snr_db;
+                fprintf(stderr,
+                        "signal %s: power %.1f dBm resolved from SNR %.1f dB over noise %.1f dBm/Hz "
+                        "in %.0f Hz%s\n",
+                        out->signal_id, out->power_dbm, snr_db, density, bandwidth,
+                        scenario->noise_floor.enabled ? "" : " (noise floor disabled, using base density)");
+            }
         }
         /* center_frequency_hz is ignored in range mode (content follows the tune) and may be
          * omitted there; every other mode needs the absolute placement. */
@@ -355,9 +376,7 @@ static void scenario_warn_signal_bandwidth(const scenario_signal_t *signal, cons
 bool scenario_validate(scenario_t *scenario, const char *base_dir, char *error, size_t error_size)
 {
     if (scenario->noise_floor.enabled) {
-        const double level = scenario->noise_floor.use_density ? scenario->noise_floor.power_dbm_per_hz
-                                                               : scenario->noise_floor.power_dbm;
-        if (!isfinite(level)) {
+        if (!isfinite(scenario->noise_floor.power_dbm_per_hz)) {
             snprintf(error, error_size, "noise_floor_invalid");
             return false;
         }
