@@ -1,10 +1,6 @@
 schema_version: 1
 scenario_id: gnuradio_demo
 description: Continuous multitone CI16 scenario for checking GNU Radio UDP Source, IShort to Complex, frequency sink, and waterfall setup.
-units:
-  frequency_unit: Hz
-  time_unit: s
-  level_unit: dBm
 sources:
 - id: asset_gr_multitone_001
   source_type: iq_file

@@ -6,7 +6,7 @@
 # bandwidth/rate with no matching variant renders silence -- passthrough never resamples.
 schema_version: 1
 instance_id: "receiver_passthrough"
-scenario_file: "simulator/scenarios/replay_passthrough.yaml"
+scenario_file: "simulator/scenarios/default.yaml"
 log_path: "logs/receiver_passthrough.log"
 # 1536-sample blocks reach full real-time rate at 80 MHz; 1024 cannot (see receiver_replay_mixer.yaml).
 stream_block_samples: 1536

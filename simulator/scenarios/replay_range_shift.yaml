@@ -1,10 +1,6 @@
 schema_version: 1
 scenario_id: replay_range_shift
 description: 'File replay demo: a range-mode capture that follows the tune inside 99.9-100.1 MHz and a shift-mode capture pinned to its absolute 100 MHz position while tuned anywhere in 80-120 MHz. Noise floor off so range-mode output is bit-identical anywhere in the range.'
-units:
-  frequency_unit: Hz
-  time_unit: s
-  level_unit: dBm
 sources:
 - id: capture_tone_100k
   source_type: iq_file

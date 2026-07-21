@@ -1,0 +1,46 @@
+schema_version: 1
+scenario_id: default
+description: 'Passthrough replay: a channel dedicated to streaming a recorded capture verbatim, one file per bandwidth (1 MHz / 20 MHz / 80 MHz). passthrough:true bypasses the mixer (no float bus, noise floor, or other signals) and streams the variant matching the channel''s current sample rate straight into VITA-49 packets. Retune the channel bandwidth via REST and it selects the matching file; at 80 MHz it streams the 98.304 MS/s capture with no resampling. A bandwidth with no matching variant renders silence -- passthrough never resamples. The tone sits at +20 MHz within the captured band so it is visible on a waterfall.'
+sources:
+- id: capture_wideband
+  source_type: iq_file
+  format: ci16
+  byte_order: little_endian
+  iq_layout: interleaved_iq
+  passthrough_variants:
+  - sample_rate_hz: 1536000
+    bandwidth_hz: 1000000
+    file: simulator/assets/replay_tone_1536ksps.c16
+  - sample_rate_hz: 24576000
+    bandwidth_hz: 20000000
+    file: simulator/assets/replay_tone_20m_24576ksps.c16
+  - sample_rate_hz: 98304000
+    bandwidth_hz: 80000000
+    file: simulator/assets/replay_tone_80m_98304ksps.c16
+- id: asset_burst_1s_1msps
+  source_type: iq_file
+  file: simulator/assets/burst_1s_1msps.c16
+  format: ci16
+  byte_order: little_endian
+  iq_layout: interleaved_iq
+  sample_rate_hz: 1024000
+  bandwidth_hz: 1000000
+  center_frequency_hz: 0
+  nominal_level_dbfs: -10.0
+signals:
+- signal_id: replay_passthrough_wideband
+  source_reference: capture_wideband
+  replay_mode: range
+  frequency_range:
+    start_hz: 60000000
+    stop_hz: 140000000
+  bandwidth_hz: 80000000
+  power_dbm: -55.0
+  passthrough: true
+- signal_id: sig_burst_1s_every_5s_ddc0
+  source_reference: asset_burst_1s_1msps
+  center_frequency_hz: 200000000
+  bandwidth_hz: 1000000
+  power_dbm: -55.0
+  start_time_s: 0.0
+  repeat_interval_s: 5.0

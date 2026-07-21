@@ -1,10 +1,6 @@
 schema_version: 1
 scenario_id: scanner_fsk
 description: Deterministic scanner and DDC test scenario with a short generated CI16 IQ asset.
-units:
-  frequency_unit: Hz
-  time_unit: s
-  level_unit: dBm
 sources:
 - id: asset_fsk_001
   source_type: iq_file

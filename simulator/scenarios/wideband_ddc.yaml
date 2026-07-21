@@ -1,10 +1,6 @@
 schema_version: 1
 scenario_id: wideband_ddc
 description: 'One 80 MHz recording pinned at its absolute RF position (100-180 MHz, shift mode, epoch-synced loop). Narrow DDC channels extract sub-bands from it at runtime. Generate the asset with: python3 simulator/scripts/generate_sample_iq.py --pattern multitone --sample-rate 98304000 --samples 9830400 --output simulator/assets/wideband_80mhz_98304ksps.c16 (loop length divisible by every DDC front decimation).'
-units:
-  frequency_unit: Hz
-  time_unit: s
-  level_unit: dBm
 sources:
 - id: wideband_recording
   source_type: iq_file

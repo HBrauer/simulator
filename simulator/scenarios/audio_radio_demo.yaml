@@ -1,10 +1,6 @@
 schema_version: 1
 scenario_id: audio_radio_demo
 description: Audio-file modulation demo with WBFM, AM, USB, and LSB signals generated from one mono WAV asset.
-units:
-  frequency_unit: Hz
-  time_unit: s
-  level_unit: dBm
 noise_floor:
   enabled: true
   power_dbm_per_hz: -160.0
