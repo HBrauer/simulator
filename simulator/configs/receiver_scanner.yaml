@@ -26,29 +26,24 @@ receivers:
           - { bandwidth_hz: 10000000, sample_rate_hz: 12288000 }
           - { bandwidth_hz:  5000000, sample_rate_hz:  6144000 }
           - { bandwidth_hz:  1000000, sample_rate_hz:  1536000 }
-        stream_enabled: true
         udp_output_port: 50000
       - channel_id: 1
         center_frequency_hz: 10005000000
         rates:
           - { bandwidth_hz: 20000000, sample_rate_hz: 24576000 }
-        stream_enabled: true
         udp_output_port: 50001
       - channel_id: 2
         center_frequency_hz: 10010000000
         rates:
           - { bandwidth_hz: 20000000, sample_rate_hz: 24576000 }
-        stream_enabled: true
         udp_output_port: 50002
       - channel_id: 3
         center_frequency_hz: 9995000000
         rates:
           - { bandwidth_hz: 20000000, sample_rate_hz: 24576000 }
-        stream_enabled: true
         udp_output_port: 50003
       - channel_id: 4
         center_frequency_hz: 10030000000
         rates:
           - { bandwidth_hz: 20000000, sample_rate_hz: 24576000 }
-        stream_enabled: true
         udp_output_port: 50004

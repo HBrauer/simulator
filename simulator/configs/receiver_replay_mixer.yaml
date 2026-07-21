@@ -28,11 +28,9 @@ receivers:
         track_tuner: true
         rates:
           - { bandwidth_hz: 80000000, sample_rate_hz: 98304000 }
-        stream_enabled: true
         udp_output_port: 51000
       - channel_id: 1
         center_frequency_hz: 100000000
         rates:
           - { bandwidth_hz: 1000000, sample_rate_hz: 1536000 }
-        stream_enabled: true
         udp_output_port: 51001

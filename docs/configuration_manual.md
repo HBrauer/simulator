@@ -162,7 +162,7 @@ udp_multicast_interface: "127.0.0.1"
 | rate `sample_rate_hz` | integer, ≥ `bandwidth_hz` | The stream rate paired with this bandwidth. |
 | channel `output_scale` | number, `> 0` | Default: receiver `output_scale`. |
 | channel `rf_reference_power_dbm` | number (dBm) | Default: receiver value. |
-| channel `stream_enabled` | bool | Default `true`. |
+| channel `stream_enabled` | bool | Whether the channel emits its rendered IQ over `udp_output_port`. Default `true`; set `false` to keep the channel defined (e.g. a `track_tuner` reference) without putting its packets on the wire, which saves loopback bandwidth and receiver CPU. |
 | channel `stream_id` | integer, 32-bit | Optional VITA 49 Stream ID. When unset, IDs are auto-assigned by counting up (`0`, `1`, …) across all channels in order, skipping explicitly-set values. |
 | channel `udp_output_port` | integer | Required, unique across the instance. |
 

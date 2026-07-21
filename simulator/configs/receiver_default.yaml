@@ -41,7 +41,22 @@ receivers:
       - channel_id: 1
         center_frequency_hz: 100000000
         rates:
-          - { bandwidth_hz: 80000000, sample_rate_hz: 98304000 }
-          - { bandwidth_hz: 20000000, sample_rate_hz: 24576000 }
-          - { bandwidth_hz:  1000000, sample_rate_hz:  1536000 }
+          - { bandwidth_hz: 21000000, sample_rate_hz: 24576000 }
+          - { bandwidth_hz: 10000000, sample_rate_hz: 12288000 }
+          - { bandwidth_hz: 5000000, sample_rate_hz: 6144000 }
+          - { bandwidth_hz: 2500000, sample_rate_hz: 3072000 }
+          - { bandwidth_hz: 1250000, sample_rate_hz: 1536000 }
         udp_output_port: 51101
+      - channel_id: 2
+        center_frequency_hz: 100000000
+        rates:
+          - { bandwidth_hz: 500000, sample_rate_hz: 768000 }
+          - { bandwidth_hz: 300000, sample_rate_hz: 384000 }
+          - { bandwidth_hz: 200000, sample_rate_hz: 256000 }
+          - { bandwidth_hz: 100000, sample_rate_hz: 128000 }
+          - { bandwidth_hz: 50000, sample_rate_hz: 64000 }
+          - { bandwidth_hz: 30000, sample_rate_hz: 48000 }
+          - { bandwidth_hz: 25000, sample_rate_hz: 32000 }
+          - { bandwidth_hz: 15000, sample_rate_hz: 24000 }
+          - { bandwidth_hz: 10000, sample_rate_hz: 16000 }
+        udp_output_port: 51102
