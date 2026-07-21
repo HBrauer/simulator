@@ -360,12 +360,14 @@ START_TEST(renderer_low_rate_upsample_uses_linear_path)
     snprintf(scenario.sources[0].byte_order, sizeof(scenario.sources[0].byte_order), "%s", "little_endian");
     snprintf(scenario.sources[0].iq_layout, sizeof(scenario.sources[0].iq_layout), "%s", "interleaved_iq");
     scenario.sources[0].sample_rate_hz = 1000;
-    scenario.sources[0].bandwidth_hz = 1000;
+    /* Occupied bandwidth well under source_rate / LINEAR_MIN_SOURCE_OVERSAMPLE, so this source
+     * qualifies for the linear upsampling shortcut this test exercises. */
+    scenario.sources[0].bandwidth_hz = 100;
     scenario.sources[0].sample_count = 4;
     snprintf(scenario.signals[0].signal_id, sizeof(scenario.signals[0].signal_id), "%s", "low_sig");
     snprintf(scenario.signals[0].source_reference, sizeof(scenario.signals[0].source_reference), "%s", "low_src");
     scenario.signals[0].center_frequency_hz = 10000000000ULL;
-    scenario.signals[0].bandwidth_hz = 1000;
+    scenario.signals[0].bandwidth_hz = 100;
     scenario.signals[0].power_dbm = -40.0;
     scenario.signals[0].start_time_s = 0.0;
     scenario.signals[0].repeat_interval_s = 1.0;

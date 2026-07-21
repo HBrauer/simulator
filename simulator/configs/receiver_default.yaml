@@ -59,4 +59,11 @@ receivers:
           - { bandwidth_hz: 25000, sample_rate_hz: 32000 }
           - { bandwidth_hz: 15000, sample_rate_hz: 24000 }
           - { bandwidth_hz: 10000, sample_rate_hz: 16000 }
+        # ~20 dB of digital headroom below the -55 dBm full-scale reference. The POCSAG signals in
+        # default.yaml are 30 dB SNR (-48.2 dBm) -- already above the reference -- and two overlap
+        # in this 500 kHz window, so at unity scale they overdrive the ADC (68% of samples railed)
+        # and the hard clipping intermodulates them into a 52 kHz comb of ghost carriers across the
+        # band. output_scale attenuates signal and noise together, so SNR is unchanged; it only
+        # buys back the headroom the clipping needs.
+        output_scale: 0.1
         udp_output_port: 51102

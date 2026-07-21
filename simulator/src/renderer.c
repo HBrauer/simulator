@@ -42,6 +42,14 @@
 #define RESAMPLER_MAX_RADIUS 128
 #define RESAMPLER_MAX_TAPS (2U * RESAMPLER_MAX_RADIUS)
 #define LOW_RATE_LINEAR_MAX_SOURCE_PER_OUTPUT 0.125
+/* Linear interpolation upsampling only rejects the spectral images at multiples of the source
+ * rate by its triangular-kernel sinc^2 response, whose first image edge sits at
+ * source_rate - bandwidth/2. That is deep in the stopband only when the occupied bandwidth is a
+ * small fraction of the source rate; a source oversampled >= 8x relative to its content keeps the
+ * first image >~50 dB down (measured), which is below any usable channel SNR. Below that -- e.g. a
+ * 15 kHz POCSAG capture in a 32 kHz file (~2x) -- linear leaves the images at only ~-22 dB, so
+ * they smear across the channel as ghost carriers; those sources must take the polyphase path. */
+#define LINEAR_MIN_SOURCE_OVERSAMPLE 8U
 
 static void resample_ci16(const iq_ci16_t *samples, size_t sample_count, double source_position, double cutoff, double *out_i, double *out_q);
 static void mix_accumulate_sample(float *bus, size_t index, double sample_i, double sample_q, double gain, double osc_c, double osc_s);
@@ -1082,8 +1090,13 @@ static bool renderer_render_window_block(
         const uint64_t total_samples = is_audio ? prerender->sample_count : asset->sample_count;
         const uint32_t source_rate_hz = is_audio ? prerender->sample_rate_hz : source->sample_rate_hz;
         /* Pre-rendered assets always take the polyphase path: linear interpolation (~-24 dB image
-         * rejection) is too poor for a modulated carrier (AR3). Plain IQ files keep the shortcut. */
-        const bool allow_linear = !is_audio;
+         * rejection) is too poor for a modulated carrier (AR3). Plain IQ files keep the shortcut,
+         * but only when the source is oversampled enough (>= LINEAR_MIN_SOURCE_OVERSAMPLE) that the
+         * linear images stay deep in the stopband; a source occupying a large fraction of its own
+         * rate (e.g. narrowband captures like POCSAG at 15 kHz in 32 ksps) images visibly under
+         * linear and takes the polyphase path instead. */
+        const bool allow_linear = !is_audio && signal->bandwidth_hz > 0U &&
+            (uint64_t)signal->bandwidth_hz * LINEAR_MIN_SOURCE_OVERSAMPLE <= (uint64_t)source_rate_hz;
 
         scenario_source_t active_source = *source;
         active_source.sample_rate_hz = source_rate_hz;
