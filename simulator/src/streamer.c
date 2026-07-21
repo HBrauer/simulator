@@ -11,6 +11,7 @@
 #include <errno.h>
 #include <pthread.h>
 #include <stdatomic.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -44,6 +45,7 @@ typedef struct {
     size_t channel_index;
     pthread_mutex_t *receiver_lock;
     size_t block_samples;
+    uint64_t max_batch_latency_ns;
     size_t packet_bytes;
     ringbuffer_t ringbuffer;
     pthread_t render_thread;
@@ -77,6 +79,22 @@ size_t streamer_block_samples_for_rate(size_t configured_block_samples, uint32_t
         cap *= 2U;
     }
     return configured_block_samples < cap ? configured_block_samples : cap;
+}
+
+size_t streamer_batch_blocks_for_latency(size_t block_samples, uint32_t sample_rate_hz, uint64_t max_batch_latency_ns)
+{
+    if (max_batch_latency_ns == 0U) {
+        return SIZE_MAX;
+    }
+    const uint64_t block_duration_ns = streamer_block_duration_ns(block_samples, sample_rate_hz);
+    if (block_duration_ns == 0U) {
+        return SIZE_MAX;
+    }
+    const uint64_t blocks = max_batch_latency_ns / block_duration_ns;
+    if (blocks <= 1ULL) {
+        return 1U;
+    }
+    return blocks > (uint64_t)SIZE_MAX ? SIZE_MAX : (size_t)blocks;
 }
 
 uint64_t streamer_block_duration_ns(size_t block_samples, uint32_t sample_rate_hz)
@@ -449,8 +467,16 @@ static void *stream_udp_thread_main(void *arg)
 
         maybe_send_context_packet(worker, &udp, &receiver_snapshot, &channel_snapshot, &context_state);
 
+        /* Bound the batch by both a fixed count (syscall amortisation) and a wall-clock span
+         * (update latency), taking whichever is smaller. High rates hit the count cap; low rates
+         * hit the time cap, so a 100 kS/s stream sends a block or two at a time instead of lumping
+         * 16 blocks (~250 ms) into one paced burst that scrolls the waterfall in jerks. */
+        size_t batch_cap = streamer_batch_blocks_for_latency(block_samples, channel_snapshot.sample_rate_hz, worker->max_batch_latency_ns);
+        if (batch_cap > STREAM_SEND_BATCH_SIZE) {
+            batch_cap = STREAM_SEND_BATCH_SIZE;
+        }
         size_t batch_count = 0;
-        while (batch_count < STREAM_SEND_BATCH_SIZE) {
+        while (batch_count < batch_cap) {
             uint8_t *record = records + batch_count * record_stride;
             if (!ringbuffer_try_pop(&worker->ringbuffer, &payload_timestamps[batch_count], record)) {
                 break;
@@ -596,6 +622,7 @@ bool streamer_manager_start(streamer_manager_t **manager, const streamer_config_
                 .channel_index = c,
                 .receiver_lock = config->receiver_lock,
                 .block_samples = config->block_samples,
+                .max_batch_latency_ns = config->max_batch_latency_ns,
                 .render_cpu = render_cpu,
                 .udp_cpu = udp_cpu,
                 .class_id_present = config->config->class_id_present,

@@ -127,8 +127,20 @@ START_TEST(defaults_stream_block_samples)
     char error[128];
     ck_assert_msg(config_validate(&config, error, sizeof(error)), "%s", error);
     ck_assert_uint_eq(config.stream_block_samples, SIM_DEFAULT_STREAM_BLOCK_SAMPLES);
+    ck_assert_uint_eq(config.stream_max_batch_latency_us, SIM_DEFAULT_STREAM_MAX_BATCH_LATENCY_US);
     ck_assert_uint_eq(config.receivers[0].channels[0].sample_rate_hz, SIM_RECEIVER_SAMPLE_RATE_HZ);
     ck_assert_uint_eq(config.receivers[0].channels[1].sample_rate_hz, SIM_DDC_SAMPLE_RATE_HZ);
+}
+END_TEST
+
+START_TEST(parses_stream_max_batch_latency_us)
+{
+    const char *path = write_temp_config("stream_max_batch_latency_us: 10000\n");
+    ck_assert_ptr_nonnull(path);
+    simulator_config_t config;
+    char error[128];
+    ck_assert_msg(config_load_yaml(path, &config, error, sizeof(error)), "%s", error);
+    ck_assert_uint_eq(config.stream_max_batch_latency_us, 10000);
 }
 END_TEST
 
@@ -532,6 +544,7 @@ Suite *config_suite(void)
     tcase_add_test(tc, ddc_cache_budget_defaults_to_2gib);
     tcase_add_test(tc, loads_instance_config);
     tcase_add_test(tc, defaults_stream_block_samples);
+    tcase_add_test(tc, parses_stream_max_batch_latency_us);
     tcase_add_test(tc, active_rate_is_first_listed);
     tcase_add_test(tc, rejects_invalid_channel_rates);
     tcase_add_test(tc, rejects_active_rate_not_in_list);

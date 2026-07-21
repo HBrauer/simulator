@@ -13,6 +13,7 @@ Top-level fields:
 | `scenario_file` | string | yes | Default scenario path used when `--scenario` is omitted. |
 | `log_path` | string | no | Reserved for runtime logging. |
 | `stream_block_samples` | integer | no | CI16 IQ samples per VITA 49.2 IF-data packet. Defaults to `1024`; valid range is `1..4096`. Use `1536` for the MTU 9000 high-rate profile. |
+| `stream_max_batch_latency_us` | integer | no | Max wall-clock span (µs) of samples the UDP thread coalesces into one paced `sendmmsg` burst. Bounds send-side latency so low-rate channels update smoothly; high-rate channels are unaffected. Defaults to `25000` (25 ms); `0` uses the default. |
 | `stream_cpu` | integer | no | Linux CPU index used for stream render/UDP threads. `-1` disables pinning. Defaults to `-1`. |
 | `asset_cache_max_bytes` | integer | no | Maximum total in-memory asset bytes. Defaults to 16 GiB. IQ files over the remaining budget are memory-mapped read-only (the OS pages them in lazily) instead of copied to RAM; audio sources must fit the budget. `0` means unlimited RAM loading (legacy). |
 | `ddc_cache_max_bytes` | integer | no | Budget for precomputed DDC intermediate sub-bands (narrow channels extracting from wideband loop replays; see "DDC sub-band extraction" below). One cache entry holds a full source loop at the intermediate rate as CI16 (`loop_seconds * intermediate_rate * 4` bytes). Defaults to 2 GiB; `0` disables caching (the full-rate cascade then runs every block). |

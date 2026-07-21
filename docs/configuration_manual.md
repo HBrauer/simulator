@@ -111,6 +111,7 @@ bytes per complex sample; WAV: the header's frame count).
 | `scenario_file` | string (path) | Required. Default scenario when `--scenario` is omitted. |
 | `log_path` | string | Optional. |
 | `stream_block_samples` | integer, `1`–`4096` | CI16 samples per VITA 49.2 packet. Default `1024` (use `1536` for the MTU-9000 profile). |
+| `stream_max_batch_latency_us` | integer (µs) | Max wall-clock span of samples the UDP thread coalesces into one paced `sendmmsg` burst. Bounds send-side latency so low-rate channels update smoothly instead of scrolling in jerks; high-rate channels are unaffected (they hit the fixed 16-packet count cap first). Default `25000` (25 ms); `0` uses the default. Raise it to favour syscall batching, lower it for smoother low-rate updates. |
 | `stream_cpu` | integer | CPU index for stream threads; `-1` disables pinning. Default `-1`. |
 | `asset_cache_max_bytes` | integer (bytes) | In-memory asset budget. Default 16 GiB; `0` = unlimited. |
 | `ddc_cache_max_bytes` | integer (bytes) | DDC intermediate sub-band budget. Default 2 GiB; `0` disables caching. |
@@ -446,6 +447,7 @@ schema_version: 1
 instance_id: "receiver_scanner"
 scenario_file: "simulator/scenarios/scanner_fsk.yaml"
 stream_block_samples: 1024        # CI16 samples per VITA 49.2 packet (1..4096)
+stream_max_batch_latency_us: 25000 # cap on a paced UDP send batch's time span (default 25 ms)
 receivers:
   - receiver_id: 0
     rest_bind_host: "127.0.0.1"

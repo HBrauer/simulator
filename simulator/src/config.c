@@ -183,6 +183,8 @@ static bool apply_scalar(simulator_config_t *config, parse_state_t *state, const
         sim_strlcpy(config->log_path, value, sizeof(config->log_path));
     } else if (strcmp(key, "stream_block_samples") == 0) {
         config->stream_block_samples = (size_t)parse_u64(value);
+    } else if (strcmp(key, "stream_max_batch_latency_us") == 0) {
+        config->stream_max_batch_latency_us = parse_u64(value);
     } else if (strcmp(key, "stream_cpu") == 0) {
         config->stream_cpu = parse_int_value(value);
     } else if (strcmp(key, "stream_cpus") == 0) {
@@ -382,6 +384,9 @@ bool config_validate(simulator_config_t *config, char *error, size_t error_size)
     if (config->stream_block_samples > SIM_MAX_STREAM_BLOCK_SAMPLES) {
         snprintf(error, error_size, "invalid_stream_block_samples");
         return false;
+    }
+    if (config->stream_max_batch_latency_us == 0U) {
+        config->stream_max_batch_latency_us = SIM_DEFAULT_STREAM_MAX_BATCH_LATENCY_US;
     }
     if (config->stream_cpu < -1) {
         snprintf(error, error_size, "invalid_stream_cpu");

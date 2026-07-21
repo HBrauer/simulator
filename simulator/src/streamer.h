@@ -20,6 +20,7 @@ typedef struct {
     pthread_mutex_t *receiver_lock;
     receiver_metrics_t *metrics;
     size_t block_samples;
+    uint64_t max_batch_latency_ns; /* time cap on a paced UDP send batch; 0 = count cap only */
     const int *stream_cpus;   /* CPUs to spread stream threads across; NULL/empty = no pinning */
     size_t stream_cpu_count;
 } streamer_config_t;
@@ -31,6 +32,13 @@ uint64_t streamer_block_duration_ns(size_t block_samples, uint32_t sample_rate_h
  * block size (largest power of two keeping >= ~4 blocks/s, floor 64) so a 2 kS/s DDC channel
  * doesn't emit multi-second packets or starve the ~1 s context heartbeat. */
 size_t streamer_block_samples_for_rate(size_t configured_block_samples, uint32_t sample_rate_hz);
+
+/* How many blocks the UDP thread may lump into one paced sendmmsg burst before the batch spans
+ * more than max_batch_latency_ns of wall-clock time. Always >= 1. A budget of 0 (or a degenerate
+ * block duration) means "no time limit" and returns SIZE_MAX, leaving the fixed count cap as the
+ * only bound. Low rates return a small count (fine, evenly paced updates); high rates return far
+ * more than the count cap, so their batching -- essential for 80 MHz throughput -- is untouched. */
+size_t streamer_batch_blocks_for_latency(size_t block_samples, uint32_t sample_rate_hz, uint64_t max_batch_latency_ns);
 
 /* Deterministic block grid. Block boundaries are anchored to the start of the current
  * UTC day so any two instances with the same sample rate agree on which samples belong

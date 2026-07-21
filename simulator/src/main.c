@@ -221,6 +221,7 @@ int main(int argc, char **argv)
         .receiver_lock = &receiver_lock,
         .metrics = metrics,
         .block_samples = block_samples,
+        .max_batch_latency_ns = config.stream_max_batch_latency_us * 1000ULL,
         .stream_cpus = config.stream_cpus,
         .stream_cpu_count = config.stream_cpu_count,
     };

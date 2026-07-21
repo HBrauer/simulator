@@ -2,6 +2,7 @@
 #include "test_suites.h"
 
 #include <check.h>
+#include <stdint.h>
 
 START_TEST(calculates_80mhz_packet_pacing_duration)
 {
@@ -110,6 +111,25 @@ START_TEST(block_grid_works_at_ddc_low_rates)
 }
 END_TEST
 
+START_TEST(batch_latency_cap_bounds_low_rate_bursts)
+{
+    const uint64_t budget_ns = 25000000ULL; /* 25 ms */
+    /* High rate: 16 blocks of 1536 samples at 98.304 MS/s span ~250 us, far under 25 ms, so the
+     * time cap is effectively unbounded and the fixed count cap alone binds. */
+    ck_assert_uint_gt(streamer_batch_blocks_for_latency(1536, 98304000U, budget_ns), 16U);
+    /* Low rate: at 100 kS/s a 1536-sample block is ~15.36 ms, so only one fits in 25 ms. */
+    ck_assert_uint_eq(streamer_batch_blocks_for_latency(1536, 100000U, budget_ns), 1U);
+    /* A rate where a couple of blocks fit: 400 kS/s -> 3.84 ms/block -> floor(25/3.84) = 6. */
+    ck_assert_uint_eq(streamer_batch_blocks_for_latency(1536, 400000U, budget_ns), 6U);
+    /* Never returns zero even when one block already exceeds the budget. */
+    ck_assert_uint_eq(streamer_batch_blocks_for_latency(1536, 10000U, budget_ns), 1U);
+    /* A zero budget (or degenerate block duration) means "no time limit". */
+    ck_assert_uint_eq(streamer_batch_blocks_for_latency(1536, 100000U, 0U), SIZE_MAX);
+    ck_assert_uint_eq(streamer_batch_blocks_for_latency(0, 100000U, budget_ns), SIZE_MAX);
+    ck_assert_uint_eq(streamer_batch_blocks_for_latency(1536, 0U, budget_ns), SIZE_MAX);
+}
+END_TEST
+
 Suite *streamer_suite(void)
 {
     Suite *suite = suite_create("streamer");
@@ -121,6 +141,7 @@ Suite *streamer_suite(void)
     tcase_add_test(tc, block_grid_start_matches_exact_sample_math);
     tcase_add_test(tc, block_grid_is_independent_of_query_phase);
     tcase_add_test(tc, low_rate_channels_shrink_block_size);
+    tcase_add_test(tc, batch_latency_cap_bounds_low_rate_bursts);
     tcase_add_test(tc, block_grid_works_at_ddc_low_rates);
     suite_add_tcase(suite, tc);
     return suite;

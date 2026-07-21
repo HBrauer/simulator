@@ -22,6 +22,11 @@
 #define SIM_MAX_RF_HZ 100000000000ULL
 #define SIM_DEFAULT_STREAM_BLOCK_SAMPLES 1024U
 #define SIM_MAX_STREAM_BLOCK_SAMPLES 4096U
+/* Upper bound on the wall-clock span of samples the UDP thread lumps into a single paced
+ * sendmmsg burst. Batching amortises the syscall at high rates (80 MHz), but pacing a full
+ * batch as one unit turns into visible chop at low rates where 16 blocks span hundreds of ms;
+ * this caps the batch by time so low-rate streams update smoothly. See streamer.c. */
+#define SIM_DEFAULT_STREAM_MAX_BATCH_LATENCY_US 25000ULL
 
 /* A signal with neither power_dbm nor snr_db configured is placed this many dB above the
  * in-band noise floor. Because the margin is relative to the noise, one fixed value keeps a
@@ -121,6 +126,7 @@ typedef struct {
     char scenario_file[SIM_MAX_PATH];
     char log_path[SIM_MAX_PATH];
     size_t stream_block_samples;
+    uint64_t stream_max_batch_latency_us; /* time cap on a paced UDP send batch; 0 -> default */
     int stream_cpu;                          /* legacy single-CPU alias; -1 = unset */
     int stream_cpus[SIM_MAX_STREAM_CPUS];    /* CPUs the stream threads are spread across */
     size_t stream_cpu_count;                 /* 0 = no pinning */
