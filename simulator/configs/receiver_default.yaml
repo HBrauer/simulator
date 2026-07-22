@@ -55,6 +55,7 @@ receivers:
       # among them (a rate with no matching capture renders silence -- passthrough never resamples).
       - channel_id: 1
         center_frequency_hz: 100000000
+        output_format: ci16
         rates:
           - { bandwidth_hz: 21000000, sample_rate_hz: 24576000 }
           - { bandwidth_hz: 10000000, sample_rate_hz: 12288000 }
@@ -64,6 +65,7 @@ receivers:
         udp_output_port: 51101
       - channel_id: 2
         center_frequency_hz: 100000000
+        output_format: ci24
         rates:
           - { bandwidth_hz: 500000, sample_rate_hz: 768000 }
           - { bandwidth_hz: 300000, sample_rate_hz: 384000 }

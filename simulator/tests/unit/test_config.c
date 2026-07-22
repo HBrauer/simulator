@@ -359,6 +359,39 @@ START_TEST(rejects_invalid_render_threads)
 }
 END_TEST
 
+START_TEST(parses_output_format_and_defaults_to_ci16)
+{
+    const char *path = write_temp_config_body(
+        "",
+        "    channels:\n"
+        "      - { channel_id: 0, track_tuner: true, rates: [ { bandwidth_hz: 80000000, sample_rate_hz: 98304000 } ], output_format: cf32, udp_output_port: 50000 }\n"
+        "      - { channel_id: 1, center_frequency_hz: 10000000000, rates: [ { bandwidth_hz: 5000000, sample_rate_hz: 6144000 } ], output_format: ci24, udp_output_port: 50001 }\n"
+        "      - { channel_id: 2, center_frequency_hz: 10000000000, rates: [ { bandwidth_hz: 5000000, sample_rate_hz: 6144000 } ], udp_output_port: 50002 }\n");
+    ck_assert_ptr_nonnull(path);
+    simulator_config_t config;
+    char error[128];
+    ck_assert_msg(config_load_yaml(path, &config, error, sizeof(error)), "%s", error);
+    ck_assert_int_eq(config.receivers[0].channels[0].output_format, SIM_OUTPUT_FORMAT_CF32);
+    ck_assert_int_eq(config.receivers[0].channels[1].output_format, SIM_OUTPUT_FORMAT_CI24);
+    /* Unspecified defaults to CI16. */
+    ck_assert_int_eq(config.receivers[0].channels[2].output_format, SIM_OUTPUT_FORMAT_CI16);
+}
+END_TEST
+
+START_TEST(rejects_invalid_output_format)
+{
+    const char *path = write_temp_config_body(
+        "",
+        "    channels:\n"
+        "      - { channel_id: 0, track_tuner: true, rates: [ { bandwidth_hz: 80000000, sample_rate_hz: 98304000 } ], output_format: ci12, udp_output_port: 50000 }\n");
+    ck_assert_ptr_nonnull(path);
+    simulator_config_t config;
+    char error[128];
+    ck_assert(!config_load_yaml(path, &config, error, sizeof(error)));
+    ck_assert_str_eq(error, "invalid_output_format");
+}
+END_TEST
+
 START_TEST(parses_stream_cpus_range)
 {
     const char *path = write_temp_config("stream_cpus: \"2-5\"\n");
@@ -589,6 +622,8 @@ Suite *config_suite(void)
     tcase_add_test(tc, accepts_channel_sample_rate_key);
     tcase_add_test(tc, parses_render_threads_and_defaults_to_one);
     tcase_add_test(tc, rejects_invalid_render_threads);
+    tcase_add_test(tc, parses_output_format_and_defaults_to_ci16);
+    tcase_add_test(tc, rejects_invalid_output_format);
     tcase_add_test(tc, parses_stream_cpus_range);
     tcase_add_test(tc, parses_stream_cpus_list);
     tcase_add_test(tc, legacy_stream_cpu_maps_to_single_element_set);

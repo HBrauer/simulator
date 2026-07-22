@@ -92,8 +92,13 @@ START_TEST(parses_simulator_vita49_context_packet)
     ck_assert(context.has_reference_level);
     ck_assert_double_eq_tol(context.reference_level_dbm, -55.0, 0.01);
 
-    /* Unknown CIF0 bits shift the field layout, so parsing must refuse. */
+    /* The Data Packet Payload Format field (CIF0 bit 15) is known and tolerated: it sorts below
+     * sample rate, so the parser reads the fields it recognises and ignores the trailing field. */
     write_be32(packet + 20, cif0 | (1U << 15U));
+    ck_assert(vita49_rx_parse_context(packet, sizeof(packet), &context));
+
+    /* Genuinely unknown CIF0 bits shift the field layout, so parsing must refuse. */
+    write_be32(packet + 20, cif0 | (1U << 30U));
     ck_assert(!vita49_rx_parse_context(packet, sizeof(packet), &context));
 }
 END_TEST

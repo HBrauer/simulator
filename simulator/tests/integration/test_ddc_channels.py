@@ -103,8 +103,8 @@ def _dft_mag(payload, freq_hz, rate_hz):
     re = 0.0
     im = 0.0
     for k in range(count):
-        i = int.from_bytes(payload[4 * k:4 * k + 2], "little", signed=True)
-        q = int.from_bytes(payload[4 * k + 2:4 * k + 4], "little", signed=True)
+        i = int.from_bytes(payload[4 * k:4 * k + 2], "big", signed=True)
+        q = int.from_bytes(payload[4 * k + 2:4 * k + 4], "big", signed=True)
         theta = 2.0 * math.pi * freq_hz * k / rate_hz
         c = math.cos(theta)
         s = math.sin(theta)

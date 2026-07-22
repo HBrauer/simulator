@@ -31,8 +31,11 @@ typedef struct {
     uint64_t timestamp_ns;
     bool class_id_present;
     vita49_class_id_t class_id;
-    const iq_ci16_t *payload;
+    /* Native samples in `format`'s internal type (iq_ci16_t / iq_ci24_t / iq_cf32_t); the
+     * writer serialises them big-endian per VITA 49.2 without changing their values. */
+    const void *payload;
     size_t payload_samples;
+    sim_output_format_t format;
 } vita49_if_data_packet_t;
 
 /* IF Context packet (VITA 49.2 packet type 4) announcing the stream's RF reference
@@ -52,9 +55,14 @@ typedef struct {
      * (CIF0 bit 24). A consumer adds this to its full-scale-normalized dBFS spectrum to read
      * absolute dBm. */
     double reference_level_dbm;
+    /* Advertised in the CIF0 Data Packet Payload Format field so consumers can self-describe
+     * the paired IF-data stream's sample layout. */
+    sim_output_format_t format;
 } vita49_context_packet_t;
 
-size_t vita49_if_data_packet_size(size_t payload_samples, bool class_id_present);
+/* On-wire bytes per complex sample for an output format (CI16 = 4; CI24, CF32 = 8). */
+size_t vita49_bytes_per_sample(sim_output_format_t format);
+size_t vita49_if_data_packet_size(size_t payload_samples, bool class_id_present, sim_output_format_t format);
 size_t vita49_context_packet_size(bool class_id_present);
 bool vita49_write_if_data_packet(const vita49_if_data_packet_t *packet, uint8_t *out, size_t out_size, size_t *written);
 bool vita49_write_context_packet(const vita49_context_packet_t *packet, uint8_t *out, size_t out_size, size_t *written);

@@ -31,10 +31,132 @@ static void write_class_id(uint8_t *out, const vita49_class_id_t *class_id)
     write_be32(out + 4, ((uint32_t)class_id->information_class_code << 16U) | (uint32_t)class_id->packet_class_code);
 }
 
-size_t vita49_if_data_packet_size(size_t payload_samples, bool class_id_present)
+size_t vita49_bytes_per_sample(sim_output_format_t format)
+{
+    switch (format) {
+        case SIM_OUTPUT_FORMAT_CI24:
+        case SIM_OUTPUT_FORMAT_CF32:
+            return 8U; /* two 32-bit item packing fields (I, Q) */
+        case SIM_OUTPUT_FORMAT_CI16:
+        default:
+            return 4U; /* one 32-bit word packs both 16-bit I and Q */
+    }
+}
+
+/* Internal storage and on-wire payload use the same bytes per complex sample. */
+size_t sim_internal_bytes_per_sample(sim_output_format_t format)
+{
+    return vita49_bytes_per_sample(format);
+}
+
+bool sim_output_format_from_name(const char *name, sim_output_format_t *out)
+{
+    if (name == NULL || out == NULL) {
+        return false;
+    }
+    if (strcmp(name, "ci16") == 0) {
+        *out = SIM_OUTPUT_FORMAT_CI16;
+    } else if (strcmp(name, "ci24") == 0) {
+        *out = SIM_OUTPUT_FORMAT_CI24;
+    } else if (strcmp(name, "cf32") == 0) {
+        *out = SIM_OUTPUT_FORMAT_CF32;
+    } else {
+        return false;
+    }
+    return true;
+}
+
+size_t vita49_if_data_packet_size(size_t payload_samples, bool class_id_present, sim_output_format_t format)
 {
     const size_t class_id_bytes = class_id_present ? VITA49_CLASS_ID_BYTES : 0U;
-    return VITA49_IF_DATA_HEADER_BYTES + class_id_bytes + payload_samples * sizeof(iq_ci16_t);
+    return VITA49_IF_DATA_HEADER_BYTES + class_id_bytes + payload_samples * vita49_bytes_per_sample(format);
+}
+
+/* Write one IEEE-754 single as a big-endian 32-bit word. */
+static void write_be_f32(uint8_t *out, float value)
+{
+    uint32_t bits;
+    memcpy(&bits, &value, sizeof(bits));
+    write_be32(out, bits);
+}
+
+/* Serialise the channel's native payload buffer into `out` in its on-wire format, big-endian,
+ * processing-efficient, Complex Cartesian (VITA 49.2 6.1.1); values are unchanged. Returns the
+ * number of bytes written. */
+static size_t write_if_data_payload(const void *payload, size_t samples, sim_output_format_t format, uint8_t *out)
+{
+    size_t offset = 0;
+    switch (format) {
+        case SIM_OUTPUT_FORMAT_CF32: {
+            const iq_cf32_t *p = (const iq_cf32_t *)payload;
+            for (size_t s = 0; s < samples; s++) {
+                write_be_f32(out + offset, p[s].i);
+                write_be_f32(out + offset + 4U, p[s].q);
+                offset += 8U;
+            }
+            break;
+        }
+        case SIM_OUTPUT_FORMAT_CI24: {
+            /* 24-bit signed data item left-justified in a 32-bit item packing field (VITA 49.2
+             * rule 6.1.1.1-2): the value occupies bits 31..8, low 8 bits unused (zero). The
+             * internal value is right-justified in [-2^23, 2^23-1], so left-justify with <<8. */
+            const iq_ci24_t *p = (const iq_ci24_t *)payload;
+            for (size_t s = 0; s < samples; s++) {
+                write_be32(out + offset, ((uint32_t)p[s].i) << 8U);
+                write_be32(out + offset + 4U, ((uint32_t)p[s].q) << 8U);
+                offset += 8U;
+            }
+            break;
+        }
+        case SIM_OUTPUT_FORMAT_CI16:
+        default: {
+            /* Two 16-bit signed items in one 32-bit word: I in bits 31..16, Q in bits 15..0. */
+            const iq_ci16_t *p = (const iq_ci16_t *)payload;
+            for (size_t s = 0; s < samples; s++) {
+                const uint32_t word = ((uint32_t)(uint16_t)p[s].i << 16) | (uint32_t)(uint16_t)p[s].q;
+                write_be32(out + offset, word);
+                offset += 4U;
+            }
+            break;
+        }
+    }
+    return offset;
+}
+
+/* Two-word Data Packet Payload Format field (VITA 49.2 9.13.3): processing-efficient (packing
+ * method 0), Complex Cartesian. */
+static void write_payload_format(uint8_t *out, sim_output_format_t format)
+{
+    uint32_t data_item_format;  /* 5-bit code, Table 9.13.3-4 */
+    uint32_t item_packing_bits; /* actual item packing field size */
+    uint32_t data_item_bits;    /* actual data item size */
+    switch (format) {
+        case SIM_OUTPUT_FORMAT_CF32:
+            data_item_format = 0x0EU; /* IEEE-754 single-precision */
+            item_packing_bits = 32U;
+            data_item_bits = 32U;
+            break;
+        case SIM_OUTPUT_FORMAT_CI24:
+            data_item_format = 0x00U; /* signed fixed-point */
+            item_packing_bits = 32U;
+            data_item_bits = 24U;
+            break;
+        case SIM_OUTPUT_FORMAT_CI16:
+        default:
+            data_item_format = 0x00U; /* signed fixed-point */
+            item_packing_bits = 16U;
+            data_item_bits = 16U;
+            break;
+    }
+    /* Real/Complex = 01 (Complex, Cartesian). Item Packing Field Size and Data Item Size fields
+     * carry one less than the actual size (rules 9.13.3-12/13). */
+    const uint32_t word1 =
+        (1U << 29U) |
+        (data_item_format << 24U) |
+        (((item_packing_bits - 1U) & 0x3fU) << 6U) |
+        ((data_item_bits - 1U) & 0x3fU);
+    write_be32(out, word1);
+    write_be32(out + 4U, 0U); /* Repeat Count / Vector Size: 0 => actual 1 */
 }
 
 /* CIF0 indicator bits (VITA 49.2 section 9.1). */
@@ -43,10 +165,11 @@ size_t vita49_if_data_packet_size(size_t payload_samples, bool class_id_present)
 #define VITA49_CIF0_RF_REFERENCE_FREQUENCY (1U << 27U)
 #define VITA49_CIF0_REFERENCE_LEVEL (1U << 24U)
 #define VITA49_CIF0_SAMPLE_RATE (1U << 21U)
+#define VITA49_CIF0_DATA_PAYLOAD_FORMAT (1U << 15U)
 
-/* Header, stream id, integer seconds, fractional ps (2), CIF0, three 64-bit fields, and a
- * single 32-bit reference-level word. */
-#define VITA49_CONTEXT_BASE_WORDS (6U + 3U * 2U + 1U)
+/* Header, stream id, integer seconds, fractional ps (2), CIF0, three 64-bit fields, a single
+ * 32-bit reference-level word, and the two-word Data Packet Payload Format field. */
+#define VITA49_CONTEXT_BASE_WORDS (6U + 3U * 2U + 1U + 2U)
 #define VITA49_CLASS_ID_WORDS 2U
 
 /* Frequency/rate context fields are 64-bit two's complement Hz with the radix point after
@@ -98,7 +221,8 @@ bool vita49_write_context_packet(const vita49_context_packet_t *packet, uint8_t 
         header |= VITA49_HDR_CLASS_ID_PRESENT;
     }
     uint32_t cif0 = VITA49_CIF0_BANDWIDTH | VITA49_CIF0_RF_REFERENCE_FREQUENCY |
-                    VITA49_CIF0_REFERENCE_LEVEL | VITA49_CIF0_SAMPLE_RATE;
+                    VITA49_CIF0_REFERENCE_LEVEL | VITA49_CIF0_SAMPLE_RATE |
+                    VITA49_CIF0_DATA_PAYLOAD_FORMAT;
     if (packet->changed) {
         cif0 |= VITA49_CIF0_CHANGE_INDICATOR;
     }
@@ -127,6 +251,9 @@ bool vita49_write_context_packet(const vita49_context_packet_t *packet, uint8_t 
     offset += 4;
     write_be64(out + offset, vita49_fixed_hz(packet->sample_rate_hz));
     offset += 8;
+    /* Data Packet Payload Format (CIF0 bit 15) sorts below sample rate (bit 21). */
+    write_payload_format(out + offset, packet->format);
+    offset += 8;
     if (written != NULL) {
         *written = total_bytes;
     }
@@ -141,8 +268,8 @@ bool vita49_write_if_data_packet(const vita49_if_data_packet_t *packet, uint8_t 
     if (packet == NULL) {
         return false;
     }
-    const size_t header_bytes = vita49_if_data_packet_size(0, packet->class_id_present);
-    const size_t payload_bytes = packet->payload_samples * sizeof(iq_ci16_t);
+    const size_t header_bytes = vita49_if_data_packet_size(0, packet->class_id_present, packet->format);
+    const size_t payload_bytes = packet->payload_samples * vita49_bytes_per_sample(packet->format);
     const size_t total_bytes = header_bytes + payload_bytes;
     if (out == NULL || packet->payload == NULL || out_size < total_bytes || total_bytes % 4U != 0U ||
         total_bytes / 4U > UINT16_MAX) {
@@ -175,7 +302,7 @@ bool vita49_write_if_data_packet(const vita49_if_data_packet_t *packet, uint8_t 
     offset += 4;
     write_be64(out + offset, fractional_ps);
     offset += 8;
-    memcpy(out + offset, packet->payload, payload_bytes);
+    write_if_data_payload(packet->payload, packet->payload_samples, packet->format, out + offset);
     if (written != NULL) {
         *written = total_bytes;
     }

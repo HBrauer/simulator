@@ -393,11 +393,17 @@ bool scenario_validate(scenario_t *scenario, const char *base_dir, char *error, 
          * top-level file, and require the sample rates to be distinct (they key the runtime
          * variant selection). */
         if (source->source_kind == SCENARIO_SOURCE_IQ_FILE && source->passthrough_variant_count > 0) {
-            if (strcmp(source->format, "ci16") != 0 || strcmp(source->byte_order, "little_endian") != 0 ||
+            /* A passthrough source's `format` (ci16/ci24/cf32) is the on-wire format it can be
+             * replayed verbatim into; the renderer matches it against the channel's output_format.
+             * Each variant file is interleaved native samples of that format. */
+            sim_output_format_t variant_format;
+            if (!sim_output_format_from_name(source->format, &variant_format) ||
+                strcmp(source->byte_order, "little_endian") != 0 ||
                 strcmp(source->iq_layout, "interleaved_iq") != 0) {
                 snprintf(error, error_size, "source_unsupported");
                 return false;
             }
+            const size_t variant_bytes = sim_internal_bytes_per_sample(variant_format);
             for (size_t k = 0; k < source->passthrough_variant_count; k++) {
                 scenario_passthrough_variant_t *v = &source->passthrough_variants[k];
                 if (v->sample_rate_hz == 0) {
@@ -411,12 +417,21 @@ bool scenario_validate(scenario_t *scenario, const char *base_dir, char *error, 
                     }
                 }
                 resolve_asset_path(v->file, sizeof(v->file), base_dir);
-                iq_file_reader_t reader;
-                if (!iq_file_reader_open(&reader, v->file, error, error_size)) {
+                FILE *vf = fopen(v->file, "rb");
+                if (vf == NULL || fseeko(vf, 0, SEEK_END) != 0) {
+                    if (vf != NULL) {
+                        fclose(vf);
+                    }
+                    snprintf(error, error_size, "asset_not_found");
                     return false;
                 }
-                v->sample_count = reader.sample_count;
-                iq_file_reader_close(&reader);
+                const off_t vsize = ftello(vf);
+                fclose(vf);
+                if (vsize < 0 || (uint64_t)vsize % variant_bytes != 0) {
+                    snprintf(error, error_size, "asset_invalid_size");
+                    return false;
+                }
+                v->sample_count = (uint64_t)vsize / variant_bytes;
             }
             continue;
         }

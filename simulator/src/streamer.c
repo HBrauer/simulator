@@ -32,7 +32,10 @@
  * switch while records are still in flight to the UDP thread). */
 typedef struct {
     uint64_t sample_count;
-    iq_ci16_t samples[];
+    /* Rendered samples in the channel's native format (iq_ci16_t / iq_ci24_t / iq_cf32_t); the
+     * slot is sized by sim_internal_bytes_per_sample() at worker start. The leading uint64_t
+     * keeps this region 8-byte aligned for the int32/float element types. */
+    unsigned char samples[];
 } stream_block_record_t;
 
 typedef struct {
@@ -514,8 +517,9 @@ static void maybe_send_context_packet(stream_worker_t *worker, udp_output_t *udp
         .bandwidth_hz = channel->bandwidth_hz,
         .sample_rate_hz = channel->sample_rate_hz,
         .reference_level_dbm = channel->rf_reference_power_dbm,
+        .format = channel->output_format,
     };
-    uint8_t packet[64];
+    uint8_t packet[80];
     size_t packet_bytes = 0;
     if (!vita49_write_context_packet(&context, packet, sizeof(packet), &packet_bytes)) {
         return;
@@ -548,6 +552,8 @@ static void *stream_udp_thread_main(void *arg)
 
     const char *host = receiver_snapshot.udp_output_host;
     const uint16_t port = channel_snapshot.udp_output.port;
+    /* The on-wire sample format is fixed per channel (not a REST retune), so capture it once. */
+    const sim_output_format_t output_format = channel_snapshot.output_format;
 
     udp_output_t udp = {.fd = -1};
     if (!udp_output_open(&udp, host, port, receiver_snapshot.udp_multicast_interface)) {
@@ -555,7 +561,7 @@ static void *stream_udp_thread_main(void *arg)
         return NULL;
     }
 
-    const size_t send_capacity = vita49_if_data_packet_size(worker->block_samples, worker->class_id_present);
+    const size_t send_capacity = vita49_if_data_packet_size(worker->block_samples, worker->class_id_present, output_format);
     uint8_t *packets = calloc(STREAM_SEND_BATCH_SIZE, send_capacity);
     if (packets == NULL) {
         record_worker_error(worker, "packet buffer allocation failed");
@@ -635,6 +641,7 @@ static void *stream_udp_thread_main(void *arg)
                 .class_id = worker->class_id,
                 .payload = record->samples,
                 .payload_samples = (size_t)record->sample_count,
+                .format = output_format,
             };
             size_t send_bytes = 0;
             if (!vita49_write_if_data_packet(&vita_packet, packet, send_capacity, &send_bytes)) {
@@ -680,7 +687,8 @@ static void *stream_udp_thread_main(void *arg)
 
 static bool stream_worker_start(stream_worker_t *worker)
 {
-    worker->packet_bytes = worker->block_samples * sizeof(iq_ci16_t);
+    const sim_output_format_t format = worker->receiver->channels[worker->channel_index].output_format;
+    worker->packet_bytes = worker->block_samples * sim_internal_bytes_per_sample(format);
     /* A parallel-render channel produces up to render_threads blocks per fork-join round; give
      * the ring enough slots to hold a few rounds so the renderers run ahead of the paced UDP
      * drain instead of stalling on a full ring. */

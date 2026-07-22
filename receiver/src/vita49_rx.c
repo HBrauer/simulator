@@ -30,6 +30,7 @@ uint8_t vita49_rx_packet_type(const uint8_t *data, size_t bytes)
 #define VITA49_RX_CIF0_RF_REFERENCE (1U << 27U)
 #define VITA49_RX_CIF0_REFERENCE_LEVEL (1U << 24U)
 #define VITA49_RX_CIF0_SAMPLE_RATE (1U << 21U)
+#define VITA49_RX_CIF0_DATA_PAYLOAD_FORMAT (1U << 15U)
 
 /* Header "Class ID present" indicator (bit 27). When set, two Class ID words sit between
  * the stream id and the integer-seconds timestamp, shifting everything after by 8 bytes. */
@@ -56,7 +57,7 @@ bool vita49_rx_parse_context(const uint8_t *data, size_t bytes, vita49_rx_contex
     const uint32_t cif0 = read_be32(data + cif0_offset);
     const uint32_t known = VITA49_RX_CIF0_CHANGE | VITA49_RX_CIF0_BANDWIDTH |
                            VITA49_RX_CIF0_RF_REFERENCE | VITA49_RX_CIF0_REFERENCE_LEVEL |
-                           VITA49_RX_CIF0_SAMPLE_RATE;
+                           VITA49_RX_CIF0_SAMPLE_RATE | VITA49_RX_CIF0_DATA_PAYLOAD_FORMAT;
     if ((cif0 & ~known) != 0U) {
         return false; /* unknown fields shift the layout; refuse rather than misread */
     }

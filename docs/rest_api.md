@@ -34,8 +34,6 @@ changes are additionally announced in-band via VITA 49.2 context packets
 | POST | `/api/v1/frequency-range` | Set the tuner: `frequency_min_hz`, `frequency_max_hz`, optional `scan_rate_hz_per_s`. |
 | POST | `/api/v1/output-scale` | Set `output_scale` on the receiver and all channels. |
 
-The pre-channel endpoints (`/api/v1/ddc/*`, `/api/v1/streams/80mhz`) were removed; use
-`/api/v1/channels/{id}` and `/api/v1/channels/{id}/stream`.
 
 ## Channel object
 
@@ -58,7 +56,8 @@ Returned by `/channels`, `/channels/{id}`, and channel PUTs:
   "active": true,
   "udp_port": 50001,
   "output_scale": 1.0,
-  "rf_reference_power_dbm": -55.0
+  "rf_reference_power_dbm": -55.0,
+  "output_format": "ci16"
 }
 ```
 
@@ -66,7 +65,10 @@ Returned by `/channels`, `/channels/{id}`, and channel PUTs:
 sample_rate_hz}` option this channel can be tuned to. `center_frequency_hz` is the effective
 center (for a tuner-tracking channel: the instantaneous tuner center);
 `configured_center_frequency_hz` is the stored value. `in_frontend_window` reports whether the
-channel currently carries signal; an out-of-window channel streams zeros.
+channel currently carries signal; an out-of-window channel streams zeros. `output_format` is the
+channel's on-wire VITA 49.2 sample format (`ci16` | `ci24` | `cf32`); it is set in configuration
+and reported here read-only — it is fixed for the channel's lifetime and cannot be changed via
+PUT. See [vita49_udp.md](vita49_udp.md) for the wire layout of each format.
 
 ## PUT /api/v1/channels/{id}
 

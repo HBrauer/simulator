@@ -229,6 +229,49 @@ static int16_t clip_i16_f(float value)
     return (int16_t)lrintf(value);
 }
 
+/* Saturating round of an int16-scale bus value to a 24-bit signed sample. The bus is in int16
+ * units, so scale by 2^8 to fill the 24-bit range before rounding: the low 8 bits then carry
+ * the float bus's sub-int16 precision instead of being zero. */
+static int32_t clip_i24_f(float value)
+{
+    const float scaled = value * 256.0f;
+    if (scaled > 8388607.0f) {
+        return 8388607;
+    }
+    if (scaled < -8388608.0f) {
+        return -8388608;
+    }
+    return (int32_t)lrintf(scaled);
+}
+
+/* Store one float-bus complex sample (int16-scale units) into the channel's native output
+ * element at index i. CI16/CI24 saturate; CF32 divides to +-1.0 full scale and is NOT clamped
+ * (IEEE-754 samples carry overrange, per VITA 49.2 6.1.1.4). */
+static void store_output_sample(void *out, size_t i, sim_output_format_t format, float bus_i, float bus_q)
+{
+    switch (format) {
+        case SIM_OUTPUT_FORMAT_CF32: {
+            iq_cf32_t *o = (iq_cf32_t *)out;
+            o[i].i = bus_i / 32768.0f;
+            o[i].q = bus_q / 32768.0f;
+            break;
+        }
+        case SIM_OUTPUT_FORMAT_CI24: {
+            iq_ci24_t *o = (iq_ci24_t *)out;
+            o[i].i = clip_i24_f(bus_i);
+            o[i].q = clip_i24_f(bus_q);
+            break;
+        }
+        case SIM_OUTPUT_FORMAT_CI16:
+        default: {
+            iq_ci16_t *o = (iq_ci16_t *)out;
+            o[i].i = clip_i16_f(bus_i);
+            o[i].q = clip_i16_f(bus_q);
+            break;
+        }
+    }
+}
+
 #if !SIM_USE_LIQUID_RESAMPLER
 static void resample_sinc_ci16(const iq_ci16_t *samples, size_t sample_count, double source_position, double cutoff, double *out_i, double *out_q)
 {
@@ -1014,11 +1057,12 @@ static bool renderer_render_window_block(
     double output_scale,
     double rf_reference_power_dbm,
     uint64_t scenario_time_ns,
-    iq_ci16_t *out,
+    void *out,
+    sim_output_format_t format,
     size_t count,
     render_stats_t *stats)
 {
-    memset(out, 0, count * sizeof(*out));
+    memset(out, 0, count * sim_internal_bytes_per_sample(format));
     if (stats != NULL) {
         memset(stats, 0, sizeof(*stats));
     }
@@ -1198,10 +1242,9 @@ static bool renderer_render_window_block(
         }
     }
 
-    /* Single saturating conversion of the whole block. */
+    /* Single conversion of the whole block into the channel's native output format. */
     for (size_t i = 0; i < count; i++) {
-        out[i].i = clip_i16_f(bus[2U * i]);
-        out[i].q = clip_i16_f(bus[2U * i + 1U]);
+        store_output_sample(out, i, format, bus[2U * i], bus[2U * i + 1U]);
     }
     free(bus_heap);
 
@@ -1211,36 +1254,67 @@ static bool renderer_render_window_block(
     return true;
 }
 
-static void passthrough_copy_segment(const iq_ci16_t *src, iq_ci16_t *out, size_t count, double gain)
+/* Read a native passthrough-variant sample (whose format matches the channel) into int16-scale
+ * float I/Q, so the gain/rotation math and store_output_sample below are shared across formats.
+ * CI24 divides by 2^8 and CF32 multiplies by 2^15 to reach int16 units; store_output_sample
+ * applies the inverse, so a unit-gain no-shift copy is loss-free (and skipped via memcpy). */
+static void read_variant_int16scale(const void *src, size_t i, sim_output_format_t format, float *fi, float *fq)
 {
-    if (fabs(gain - 1.0) < 1e-9) {
-        /* Exact unit gain: literal file bytes, byte-for-byte -- the "just wrap VITA49 around
-         * the IQ data" case. */
-        memcpy(out, src, count * sizeof(*out));
-        return;
-    }
-    for (size_t i = 0; i < count; i++) {
-        out[i].i = clip_i16_f((float)(gain * (double)src[i].i));
-        out[i].q = clip_i16_f((float)(gain * (double)src[i].q));
+    switch (format) {
+        case SIM_OUTPUT_FORMAT_CF32: {
+            const iq_cf32_t *p = (const iq_cf32_t *)src;
+            *fi = p[i].i * 32768.0f;
+            *fq = p[i].q * 32768.0f;
+            break;
+        }
+        case SIM_OUTPUT_FORMAT_CI24: {
+            const iq_ci24_t *p = (const iq_ci24_t *)src;
+            *fi = (float)p[i].i / 256.0f;
+            *fq = (float)p[i].q / 256.0f;
+            break;
+        }
+        case SIM_OUTPUT_FORMAT_CI16:
+        default: {
+            const iq_ci16_t *p = (const iq_ci16_t *)src;
+            *fi = (float)p[i].i;
+            *fq = (float)p[i].q;
+            break;
+        }
     }
 }
 
-static void passthrough_rotate_segment(const iq_ci16_t *src, iq_ci16_t *out, size_t count, double gain, double init_c, double init_s, double step_c, double step_s)
+static void passthrough_copy_segment(const void *src, void *out, size_t count, double gain, sim_output_format_t format)
+{
+    if (fabs(gain - 1.0) < 1e-9) {
+        /* Exact unit gain: literal file samples, byte-for-byte -- the "just wrap VITA49 around
+         * the IQ data" case. src and out are the same native format. */
+        memcpy(out, src, count * sim_internal_bytes_per_sample(format));
+        return;
+    }
+    for (size_t i = 0; i < count; i++) {
+        float fi, fq;
+        read_variant_int16scale(src, i, format, &fi, &fq);
+        store_output_sample(out, i, format, (float)(gain * (double)fi), (float)(gain * (double)fq));
+    }
+}
+
+static void passthrough_rotate_segment(const void *src, void *out, size_t count, double gain, double init_c, double init_s, double step_c, double step_s, sim_output_format_t format)
 {
 #if SIM_HAVE_VOLK
     if (count >= 16 && count <= SIM_MAX_STREAM_BLOCK_SAMPLES) {
         _Alignas(64) lv_32fc_t input[SIM_MAX_STREAM_BLOCK_SAMPLES];
         _Alignas(64) lv_32fc_t rotated[SIM_MAX_STREAM_BLOCK_SAMPLES];
         for (size_t i = 0; i < count; i++) {
-            input[i] = (float)src[i].i + (float)src[i].q * I;
+            float fi, fq;
+            read_variant_int16scale(src, i, format, &fi, &fq);
+            input[i] = fi + fq * I;
         }
         lv_32fc_t phase = (float)init_c + (float)init_s * I;
         const lv_32fc_t phase_inc = (float)step_c + (float)step_s * I;
         volk_32fc_s32fc_x2_rotator2_32fc(rotated, input, &phase_inc, &phase, (unsigned int)count);
         const float gain_f = (float)gain;
         for (size_t i = 0; i < count; i++) {
-            out[i].i = clip_i16_f(gain_f * crealf(rotated[i]));
-            out[i].q = clip_i16_f(gain_f * cimagf(rotated[i]));
+            store_output_sample(out, i, format, gain_f * crealf(rotated[i]), gain_f * cimagf(rotated[i]));
         }
         return;
     }
@@ -1248,10 +1322,11 @@ static void passthrough_rotate_segment(const iq_ci16_t *src, iq_ci16_t *out, siz
     double osc_c = init_c;
     double osc_s = init_s;
     for (size_t i = 0; i < count; i++) {
-        const double ii = gain * (double)src[i].i;
-        const double qq = gain * (double)src[i].q;
-        out[i].i = clip_i16_f((float)(ii * osc_c - qq * osc_s));
-        out[i].q = clip_i16_f((float)(ii * osc_s + qq * osc_c));
+        float fi, fq;
+        read_variant_int16scale(src, i, format, &fi, &fq);
+        const double ii = gain * (double)fi;
+        const double qq = gain * (double)fq;
+        store_output_sample(out, i, format, (float)(ii * osc_c - qq * osc_s), (float)(ii * osc_s + qq * osc_c));
         const double next_c = osc_c * step_c - osc_s * step_s;
         const double next_s = osc_s * step_c + osc_c * step_s;
         osc_c = next_c;
@@ -1281,8 +1356,10 @@ static void passthrough_rotate_segment(const iq_ci16_t *src, iq_ci16_t *out, siz
  *  - true with silence: an active passthrough signal has NO variant for this channel rate. Rather
  *    than resample (which passthrough must never do), the channel goes silent -- the intended
  *    behaviour for a bandwidth the capture set does not cover. */
-static bool renderer_try_passthrough(const scenario_t *scenario, const asset_cache_t *cache, uint64_t window_center_hz, uint32_t output_sample_rate_hz, double output_scale, double rf_reference_power_dbm, uint64_t scenario_time_ns, iq_ci16_t *out, size_t count, render_stats_t *stats)
+static bool renderer_try_passthrough(const scenario_t *scenario, const asset_cache_t *cache, uint64_t window_center_hz, uint32_t output_sample_rate_hz, double output_scale, double rf_reference_power_dbm, uint64_t scenario_time_ns, void *out, sim_output_format_t format, size_t count, render_stats_t *stats)
 {
+    const size_t bps = sim_internal_bytes_per_sample(format);
+    uint8_t *out_bytes = (uint8_t *)out;
     for (size_t s = 0; s < scenario->signal_count; s++) {
         const scenario_signal_t *signal = &scenario->signals[s];
         if (!signal->passthrough) {
@@ -1297,7 +1374,10 @@ static bool renderer_try_passthrough(const scenario_t *scenario, const asset_cac
         const cached_iq_buffer_t *variant = NULL;
         if (asset != NULL) {
             for (size_t k = 0; k < asset->variant_count; k++) {
-                if (asset->variants[k].sample_rate_hz == output_sample_rate_hz) {
+                /* Verbatim replay requires a variant at this rate AND in the channel's format;
+                 * a format mismatch is treated like a rate mismatch -> silence, never convert. */
+                if (asset->variants[k].sample_rate_hz == output_sample_rate_hz &&
+                    asset->variants[k].format == format) {
                     variant = &asset->variants[k];
                     break;
                 }
@@ -1305,7 +1385,7 @@ static bool renderer_try_passthrough(const scenario_t *scenario, const asset_cac
         }
         if (variant == NULL || variant->samples == NULL || variant->sample_count == 0) {
             /* No capture at this bandwidth: silence, never resample. */
-            memset(out, 0, count * sizeof(*out));
+            memset(out, 0, count * bps);
             if (stats != NULL) {
                 memset(stats, 0, sizeof(*stats));
                 stats->samples_rendered = count;
@@ -1333,21 +1413,21 @@ static bool renderer_try_passthrough(const scenario_t *scenario, const asset_cac
             double seg_fraction = 0.0;
             uint64_t until_wrap = 0;
             if (!iq_signal_loop_position(signal, &variant_source, start_sample + out_done, output_sample_rate_hz, &seg_offset, &seg_fraction, &until_wrap)) {
-                memset(out + out_done, 0, (count - out_done) * sizeof(*out));
+                memset(out_bytes + out_done * bps, 0, (count - out_done) * bps);
                 break;
             }
             /* Equal rates guarantee seg_fraction is always exactly 0 (iq_signal_loop_position's
              * contract), so the copy/rotate below never needs sub-sample interpolation. */
             const size_t remaining = count - out_done;
             const size_t seg_count = until_wrap < (uint64_t)remaining ? (size_t)until_wrap : remaining;
-            const iq_ci16_t *src = &variant->samples[seg_offset];
+            const void *src = (const uint8_t *)variant->samples + seg_offset * bps;
             if (offset_hz == 0.0) {
-                passthrough_copy_segment(src, out + out_done, seg_count, gain);
+                passthrough_copy_segment(src, out_bytes + out_done * bps, seg_count, gain, format);
             } else {
                 const double phase_step = 2.0 * M_PI * offset_hz / (double)output_sample_rate_hz;
                 const uint64_t phase_step_q64 = nco_phase_step_q64(offset_hz, (double)output_sample_rate_hz);
                 const double phase0 = nco_phase_rad_at(phase_step_q64, start_sample + out_done);
-                passthrough_rotate_segment(src, out + out_done, seg_count, gain, cos(phase0), sin(phase0), cos(phase_step), sin(phase_step));
+                passthrough_rotate_segment(src, out_bytes + out_done * bps, seg_count, gain, cos(phase0), sin(phase0), cos(phase_step), sin(phase_step), format);
             }
             out_done += seg_count;
         }
@@ -1361,12 +1441,13 @@ static bool renderer_try_passthrough(const scenario_t *scenario, const asset_cac
     return false;
 }
 
-bool renderer_render_channel_block(const scenario_t *scenario, const asset_cache_t *cache, const receiver_config_t *receiver, const channel_config_t *channel, uint64_t scenario_time_ns, iq_ci16_t *out, size_t count, render_stats_t *stats)
+bool renderer_render_channel_block(const scenario_t *scenario, const asset_cache_t *cache, const receiver_config_t *receiver, const channel_config_t *channel, uint64_t scenario_time_ns, void *out, size_t count, render_stats_t *stats)
 {
+    const sim_output_format_t format = channel->output_format;
     /* A channel whose span leaves the front-end (ADC) window carries no signal, matching a
      * hardware DDC tuned outside the digitised band: the stream keeps flowing, but empty. */
     if (!receiver_channel_in_window(receiver, channel, scenario_time_ns)) {
-        memset(out, 0, count * sizeof(*out));
+        memset(out, 0, count * sim_internal_bytes_per_sample(format));
         if (stats != NULL) {
             memset(stats, 0, sizeof(*stats));
             stats->samples_rendered = count;
@@ -1374,8 +1455,8 @@ bool renderer_render_channel_block(const scenario_t *scenario, const asset_cache
         return true;
     }
     const uint64_t center_hz = receiver_channel_center_hz(receiver, channel, scenario_time_ns);
-    if (renderer_try_passthrough(scenario, cache, center_hz, channel->sample_rate_hz, channel->output_scale, channel->rf_reference_power_dbm, scenario_time_ns, out, count, stats)) {
+    if (renderer_try_passthrough(scenario, cache, center_hz, channel->sample_rate_hz, channel->output_scale, channel->rf_reference_power_dbm, scenario_time_ns, out, format, count, stats)) {
         return true;
     }
-    return renderer_render_window_block(scenario, cache, center_hz, channel->bandwidth_hz, channel->sample_rate_hz, channel->output_scale, channel->rf_reference_power_dbm, scenario_time_ns, out, count, stats);
+    return renderer_render_window_block(scenario, cache, center_hz, channel->bandwidth_hz, channel->sample_rate_hz, channel->output_scale, channel->rf_reference_power_dbm, scenario_time_ns, out, format, count, stats);
 }

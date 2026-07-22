@@ -479,6 +479,13 @@ static void frame_sampler_reset(frame_sampler_t *sampler)
     sampler->samples_until_frame = 0U;
 }
 
+/* VITA 49.2 payloads are big-endian (rule 5.1-1). The receiver decodes the default CI16 format:
+ * two 16-bit signed items per 32-bit word, I in the high half, Q in the low half. */
+static int16_t rx_read_be16(const uint8_t *p)
+{
+    return (int16_t)(((uint16_t)p[0] << 8) | (uint16_t)p[1]);
+}
+
 static size_t maybe_push_frames(
     waterfall_t *wf,
     const vita49_rx_packet_t *packet,
@@ -486,7 +493,7 @@ static size_t maybe_push_frames(
     size_t frame_stride_samples)
 {
     const size_t payload_samples = packet->payload_bytes / 4U;
-    const int16_t *iq = (const int16_t *)(const void *)packet->payload;
+    const uint8_t *iq = packet->payload;
     size_t pushed = 0U;
     size_t pos = 0U;
 
@@ -495,7 +502,12 @@ static size_t maybe_push_frames(
             const size_t need = wf->fft_size - sampler->collected_samples;
             const size_t available = payload_samples - pos;
             const size_t take = need < available ? need : available;
-            memcpy(sampler->iq + 2U * sampler->collected_samples, iq + 2U * pos, take * 2U * sizeof(*sampler->iq));
+            int16_t *dst = sampler->iq + 2U * sampler->collected_samples;
+            const uint8_t *src = iq + 4U * pos;
+            for (size_t s = 0; s < take; s++) {
+                dst[2U * s] = rx_read_be16(src + 4U * s);          /* I */
+                dst[2U * s + 1U] = rx_read_be16(src + 4U * s + 2U); /* Q */
+            }
             sampler->collected_samples += take;
             pos += take;
 
@@ -825,18 +837,19 @@ static void maybe_log_iq_stats(const app_config_t *config, const rx_stats_t *sta
     }
 
     const size_t component_count = packet->payload_bytes / 2U;
-    const int16_t *components = (const int16_t *)(const void *)packet->payload;
-    int16_t min_value = components[0];
-    int16_t max_value = components[0];
+    const uint8_t *payload = packet->payload;
+    int16_t min_value = rx_read_be16(payload);
+    int16_t max_value = min_value;
     size_t nonzero = 0;
     for (size_t i = 0; i < component_count; i++) {
-        if (components[i] < min_value) {
-            min_value = components[i];
+        const int16_t value = rx_read_be16(payload + 2U * i);
+        if (value < min_value) {
+            min_value = value;
         }
-        if (components[i] > max_value) {
-            max_value = components[i];
+        if (value > max_value) {
+            max_value = value;
         }
-        if (components[i] != 0) {
+        if (value != 0) {
             nonzero++;
         }
     }

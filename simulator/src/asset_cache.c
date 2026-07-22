@@ -4,6 +4,7 @@
 #include "util.h"
 #include "wav_reader.h"
 
+#include <errno.h>
 #include <fcntl.h>
 #include <stdint.h>
 #include <math.h>
@@ -400,15 +401,19 @@ bool asset_cache_load(asset_cache_t *cache, const scenario_t *scenario, char *er
  * not fit the remaining budget, memory-mapped read-only. Writes directly into `out` and zeroes it
  * on failure so asset_cache_free can safely skip it. Shared by single-file sources and each
  * passthrough rate variant. */
-static bool load_iq_buffer(const char *path, uint64_t sample_count, size_t max_bytes, size_t *total_bytes, size_t batch_samples, cached_iq_buffer_t *out, char *error, size_t error_size)
+static bool load_iq_buffer(const char *path, uint64_t sample_count, sim_output_format_t format, size_t max_bytes, size_t *total_bytes, size_t batch_samples, cached_iq_buffer_t *out, char *error, size_t error_size)
 {
     memset(out, 0, sizeof(*out));
     out->sample_count = sample_count;
-    if (sample_count > SIZE_MAX / sizeof(iq_ci16_t)) {
+    out->format = format;
+    /* On-disk interleaved samples in the format's native type, host byte order (little-endian
+     * on the supported platforms): iq_ci16_t (4 B), iq_ci24_t (8 B), or iq_cf32_t (8 B). */
+    const size_t sample_bytes = sim_internal_bytes_per_sample(format);
+    if (sample_count > SIZE_MAX / sample_bytes) {
         snprintf(error, error_size, "asset_cache_too_large");
         return false;
     }
-    const size_t bytes = (size_t)sample_count * sizeof(iq_ci16_t);
+    const size_t bytes = (size_t)sample_count * sample_bytes;
     const bool over_budget = max_bytes > 0 && (bytes > max_bytes || *total_bytes > max_bytes - bytes);
     if (over_budget) {
         if (bytes == 0) {
@@ -440,30 +445,32 @@ static bool load_iq_buffer(const char *path, uint64_t sample_count, size_t max_b
         return true;
     }
     *total_bytes += bytes;
-    out->samples = calloc((size_t)sample_count, sizeof(iq_ci16_t));
+    out->samples = calloc((size_t)sample_count, sample_bytes);
     if (out->samples == NULL) {
         snprintf(error, error_size, "asset_cache_alloc_failed");
         return false;
     }
-    iq_file_reader_t reader;
-    if (!iq_file_reader_open(&reader, path, error, error_size)) {
+    FILE *file = fopen(path, "rb");
+    if (file == NULL) {
         free(out->samples);
         out->samples = NULL;
+        snprintf(error, error_size, "asset_not_found:%s", strerror(errno));
         return false;
     }
+    uint8_t *dst = out->samples;
     size_t read_count = 0;
     bool ok = true;
     while (read_count < sample_count) {
         const size_t remaining = (size_t)sample_count - read_count;
         const size_t wanted = remaining < batch_samples ? remaining : batch_samples;
-        size_t batch_read = 0;
-        if (!iq_file_reader_read(&reader, read_count, out->samples + read_count, wanted, &batch_read) || batch_read != wanted) {
+        const size_t batch_read = fread(dst + read_count * sample_bytes, sample_bytes, wanted, file);
+        if (batch_read != wanted) {
             ok = false;
             break;
         }
         read_count += batch_read;
     }
-    iq_file_reader_close(&reader);
+    fclose(file);
     if (!ok || read_count != sample_count) {
         free(out->samples);
         out->samples = NULL;
@@ -492,12 +499,20 @@ bool asset_cache_load_limited(asset_cache_t *cache, const scenario_t *scenario, 
         asset->source_kind = source->source_kind;
         asset->sample_count = source->sample_count;
 
-        /* Passthrough source: load one buffer per rate variant; the top-level `file` is unused. */
+        /* Passthrough source: load one buffer per rate variant in the source's on-wire format
+         * (so the renderer streams it verbatim for a channel of the same format); the top-level
+         * `file` is unused. */
         if (source->source_kind == SCENARIO_SOURCE_IQ_FILE && source->passthrough_variant_count > 0) {
+            sim_output_format_t variant_format = SIM_OUTPUT_FORMAT_CI16;
+            if (!sim_output_format_from_name(source->format, &variant_format)) {
+                snprintf(error, error_size, "source_unsupported");
+                asset_cache_free(cache);
+                return false;
+            }
             asset->variant_count = source->passthrough_variant_count;
             for (size_t k = 0; k < source->passthrough_variant_count; k++) {
                 const scenario_passthrough_variant_t *v = &source->passthrough_variants[k];
-                if (!load_iq_buffer(v->file, v->sample_count, max_bytes, &total_bytes, batch_samples, &asset->variants[k], error, error_size)) {
+                if (!load_iq_buffer(v->file, v->sample_count, variant_format, max_bytes, &total_bytes, batch_samples, &asset->variants[k], error, error_size)) {
                     asset_cache_free(cache);
                     return false;
                 }
@@ -545,8 +560,9 @@ bool asset_cache_load_limited(asset_cache_t *cache, const scenario_t *scenario, 
                 return false;
             }
         } else {
+            /* General mixer source: always CI16; the float mix bus consumes it as int16. */
             cached_iq_buffer_t buf;
-            if (!load_iq_buffer(source->file, source->sample_count, max_bytes, &total_bytes, batch_samples, &buf, error, error_size)) {
+            if (!load_iq_buffer(source->file, source->sample_count, SIM_OUTPUT_FORMAT_CI16, max_bytes, &total_bytes, batch_samples, &buf, error, error_size)) {
                 asset_cache_free(cache);
                 return false;
             }

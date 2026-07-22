@@ -123,10 +123,23 @@ static json_t *channel_rates_json(const channel_config_t *channel)
     return rates;
 }
 
+static const char *output_format_name(sim_output_format_t format)
+{
+    switch (format) {
+        case SIM_OUTPUT_FORMAT_CI24:
+            return "ci24";
+        case SIM_OUTPUT_FORMAT_CF32:
+            return "cf32";
+        case SIM_OUTPUT_FORMAT_CI16:
+        default:
+            return "ci16";
+    }
+}
+
 static json_t *channel_json(const receiver_config_t *r, const channel_config_t *channel, const receiver_metrics_t *metrics, uint64_t scenario_time_ns)
 {
     json_t *root = json_pack(
-        "{s:i,s:b,s:I,s:I,s:I,s:I,s:b,s:b,s:b,s:i,s:f,s:f}",
+        "{s:i,s:b,s:I,s:I,s:I,s:I,s:b,s:b,s:b,s:i,s:f,s:f,s:s}",
         "channel_id", (int)channel->id,
         "track_tuner", channel->track_tuner,
         "center_frequency_hz", (json_int_t)receiver_channel_center_hz(r, channel, scenario_time_ns),
@@ -138,7 +151,8 @@ static json_t *channel_json(const receiver_config_t *r, const channel_config_t *
         "active", metrics != NULL ? atomic_load(&metrics->streams[channel->id].active) : false,
         "udp_port", (int)channel->udp_output.port,
         "output_scale", channel->output_scale,
-        "rf_reference_power_dbm", channel->rf_reference_power_dbm
+        "rf_reference_power_dbm", channel->rf_reference_power_dbm,
+        "output_format", output_format_name(channel->output_format)
     );
     json_object_set_new(root, "rates", channel_rates_json(channel));
     return root;

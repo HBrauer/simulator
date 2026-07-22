@@ -5,9 +5,12 @@
 
 #include <stdbool.h>
 
-/* A loaded IQ buffer: either heap-allocated (mmapped=false) or a read-only file mapping. */
+/* A loaded IQ buffer: either heap-allocated (mmapped=false) or a read-only file mapping.
+ * `samples` holds `sample_count` complex samples in `format`'s native type (iq_ci16_t for the
+ * general mixer source; iq_ci16_t/iq_ci24_t/iq_cf32_t for a passthrough variant). */
 typedef struct {
-    iq_ci16_t *samples;
+    void *samples;
+    sim_output_format_t format;
     uint64_t sample_count;
     uint32_t sample_rate_hz;
     bool mmapped;

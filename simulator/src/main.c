@@ -259,14 +259,17 @@ int main(int argc, char **argv)
             asset_cache_free(&asset_cache);
             return 5;
         }
-        iq_ci16_t *buffer = calloc(samples, sizeof(*buffer));
+        /* Dump the channel's native internal samples (int16 / int32 / float per output_format,
+         * host byte order) so the one-shot render mirrors what the ring buffer carries. */
+        const size_t sample_bytes = sim_internal_bytes_per_sample(config.receivers[0].channels[channel_index].output_format);
+        void *buffer = calloc(samples, sample_bytes);
         if (buffer == NULL) {
             asset_cache_free(&asset_cache);
             return 4;
         }
         render_stats_t stats;
         renderer_render_channel_block(&scenario, &asset_cache, &config.receivers[0], &config.receivers[0].channels[channel_index], timebase_now_ns(&timebase), buffer, samples, &stats);
-        fwrite(buffer, sizeof(*buffer), samples, stdout);
+        fwrite(buffer, sample_bytes, samples, stdout);
         free(buffer);
         asset_cache_free(&asset_cache);
         return 0;

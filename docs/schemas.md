@@ -12,7 +12,7 @@ Top-level fields:
 | `instance_id` | string | yes | Instance identifier for operators/logs. |
 | `scenario_file` | string | yes | Default scenario path used when `--scenario` is omitted. |
 | `log_path` | string | no | Reserved for runtime logging. |
-| `stream_block_samples` | integer | no | CI16 IQ samples per VITA 49.2 IF-data packet. Defaults to `1024`; valid range is `1..4096`. Use `1536` for the MTU 9000 high-rate profile. |
+| `stream_block_samples` | integer | no | IQ samples per VITA 49.2 IF-data packet. Defaults to `1024`; valid range is `1..4096`. Use `1536` for the MTU 9000 high-rate profile with `ci16`; halve it for the 8-byte `ci24`/`cf32` formats. |
 | `stream_max_batch_latency_us` | integer | no | Max wall-clock span (µs) of samples the UDP thread coalesces into one paced `sendmmsg` burst. Bounds send-side latency so low-rate channels update smoothly; high-rate channels are unaffected. Defaults to `25000` (25 ms); `0` uses the default. |
 | `stream_cpu` | integer | no | Linux CPU index used for stream render/UDP threads. `-1` disables pinning. Defaults to `-1`. |
 | `asset_cache_max_bytes` | integer | no | Maximum total in-memory asset bytes. Defaults to 16 GiB. IQ files over the remaining budget are memory-mapped read-only (the OS pages them in lazily) instead of copied to RAM; audio sources must fit the budget. `0` means unlimited RAM loading (legacy). |
@@ -48,6 +48,8 @@ channel with `track_tuner: true` and the widest bandwidth):
 | `output_scale` | number | no | Channel output multiplier. Defaults to receiver `output_scale`. |
 | `rf_reference_power_dbm` | number | no | Defaults to the receiver value. |
 | `stream_enabled` | boolean | no | Enables this channel's UDP stream. Defaults to `true`. |
+| `output_format` | string | no | On-wire VITA 49.2 sample format: `ci16` (16-bit signed, 4 bytes/sample), `ci24` (24-bit signed, left-justified in a 32-bit field, 8 bytes/sample), or `cf32` (IEEE-754 single-precision float, 8 bytes/sample). All big-endian; the context packet advertises the layout. Defaults to `ci16`. See [vita49_udp.md](vita49_udp.md). |
+| `render_threads` | integer | no | Cooperative render threads for this channel, `1..SIM_MAX_RENDER_THREADS`. Defaults to `1`. Raise for a wideband synthesis channel that exceeds one core. |
 | `udp_output_port` | integer | yes | Unique across all channel UDP outputs of the instance. |
 
 Rate fields (each entry of a channel's `rates` list):
@@ -84,6 +86,8 @@ Validation error codes include:
 - `bandwidth_exceeds_frontend`
 - `legacy_key_ddc_use_channels` (and the other `legacy_key_...` codes)
 - `invalid_output_scale`
+- `invalid_render_threads`
+- `invalid_output_format`
 
 ## Scenario YAML
 
@@ -104,7 +108,7 @@ Source fields:
 | `id` | string | yes | Unique source ID. |
 | `source_type` | string | yes | `iq_file` or `audio_file`. |
 | `file` | string | yes¹ | Path to the IQ or audio asset. |
-| `format` | string | yes | `ci16` for IQ files, `wav` for audio files. |
+| `format` | string | yes | For a mixer IQ source: `ci16`. For a `passthrough_variants` source: `ci16`, `ci24`, or `cf32` — the on-wire format the capture is replayed verbatim into; the renderer only replays it on a channel whose `output_format` matches (else that channel goes silent). `ci24` files are interleaved little-endian `int32` holding a 24-bit value; `cf32` files are interleaved little-endian `float32`. For audio files: `wav`. |
 | `byte_order` | string | IQ only | Currently `little_endian`. |
 | `iq_layout` | string | IQ only | Currently `interleaved_iq`. |
 | `sample_rate_hz` | integer | yes¹ | Source sample rate. |

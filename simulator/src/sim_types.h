@@ -44,6 +44,38 @@ typedef struct {
     int16_t q;
 } iq_ci16_t;
 
+/* Wide internal sample types carried end to end (renderer -> ringbuffer -> wire) for the
+ * non-CI16 output formats, so ci24/cf32 keep the render pipeline's sub-16-bit precision
+ * instead of being quantised to int16 first. */
+typedef struct {
+    int32_t i; /* 24-bit signed value, range [-2^23, 2^23-1]; left-justified only on the wire */
+    int32_t q;
+} iq_ci24_t;
+
+typedef struct {
+    float i; /* full scale +-1.0 (0 dBFS); IEEE-754 range, not clamped, per VITA 49.2 6.1.1.4 */
+    float q;
+} iq_cf32_t;
+
+/* On-wire sample format of a channel's VITA 49.2 IF-data payload, which also selects the
+ * channel's internal sample type. All formats are big-endian, processing-efficient, Complex
+ * Cartesian per VITA 49.2 (see docs/vita49_udp.md).
+ *   CI16 - 16-bit signed fixed-point, 16-bit item packing field (4 bytes/sample).
+ *   CI24 - 24-bit signed fixed-point, left-justified in a 32-bit item packing field (8 bytes/sample).
+ *   CF32 - IEEE-754 single-precision float, full scale +-1.0 (8 bytes/sample). */
+typedef enum {
+    SIM_OUTPUT_FORMAT_CI16,
+    SIM_OUTPUT_FORMAT_CI24,
+    SIM_OUTPUT_FORMAT_CF32
+} sim_output_format_t;
+
+/* Bytes per complex sample of a format's internal storage and its on-wire payload (they are
+ * equal: 4 for CI16, 8 for CI24 and CF32). Defined in vita49_packet.c. */
+size_t sim_internal_bytes_per_sample(sim_output_format_t format);
+
+/* Map a format name ("ci16"/"ci24"/"cf32") to its enum. Returns false for any other string. */
+bool sim_output_format_from_name(const char *name, sim_output_format_t *out);
+
 typedef enum {
     SCENARIO_SOURCE_IQ_FILE,
     SCENARIO_SOURCE_AUDIO_FILE
@@ -105,6 +137,8 @@ typedef struct {
      * mixing several signals) exceeds one core; raising this renders several consecutive blocks
      * in parallel so the stream sustains real time. Clamped to [1, SIM_MAX_RENDER_THREADS]. */
     uint32_t render_threads;
+    /* On-wire VITA 49.2 payload sample format for this channel. Defaults to CI16. */
+    sim_output_format_t output_format;
     udp_output_config_t udp_output;
 } channel_config_t;
 

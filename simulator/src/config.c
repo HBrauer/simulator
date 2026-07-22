@@ -141,6 +141,10 @@ static bool apply_scalar(simulator_config_t *config, parse_state_t *state, const
                 return set_error(error, error_size, "invalid_render_threads");
             }
             state->current_channel->render_threads = (uint32_t)threads;
+        } else if (strcmp(key, "output_format") == 0) {
+            if (!sim_output_format_from_name(value, &state->current_channel->output_format)) {
+                return set_error(error, error_size, "invalid_output_format");
+            }
         } else if (strcmp(key, "ddc_id") == 0) {
             return set_error(error, error_size, "legacy_key_ddc_use_channels");
         }
