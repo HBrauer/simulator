@@ -116,6 +116,14 @@ profile uses `1536` for `ci16` but should be halved for the 8-byte formats).
 > left-justified per §6.1.1.1); older `vita49io` reads `ci24` from the low bits and misreads
 > it.
 
+## Receiver Note
+
+The in-repo waterfall receiver auto-detects the payload format from the context packet's Data
+Packet Payload Format field and decodes `ci16`, `ci24`, and `cf32` accordingly. Because it
+learns the format from the ~1 Hz context heartbeat, a receiver that starts after a stream is
+already running decodes the first sub-second of an 8-byte-format stream as `ci16` until the
+next context packet arrives, then self-corrects.
+
 ## GNU Radio Note
 
 A plain GNU Radio UDP Source can receive the datagrams as bytes, but downstream flowgraphs

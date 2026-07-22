@@ -103,6 +103,28 @@ bool vita49_rx_parse_context(const uint8_t *data, size_t bytes, vita49_rx_contex
         context->sample_rate_hz = read_be64(data + offset) >> 20U;
         offset += 8U;
     }
+    if ((cif0 & VITA49_RX_CIF0_DATA_PAYLOAD_FORMAT) != 0U) {
+        if (offset + 8U > bytes) {
+            return false;
+        }
+        /* First word (VITA 49.2 9.13.3): Real/Complex [30..29], Data Item Format [28..24],
+         * Item Packing Field Size-1 [11..6], Data Item Size-1 [5..0]. Map the packing/size/format
+         * combinations this receiver understands; anything else stays UNKNOWN. */
+        const uint32_t word0 = read_be32(data + offset);
+        const uint32_t item_format = (word0 >> 24U) & 0x1fU;
+        const uint32_t packing_bits = ((word0 >> 6U) & 0x3fU) + 1U;
+        const uint32_t item_bits = (word0 & 0x3fU) + 1U;
+        context->format = VITA49_RX_FORMAT_UNKNOWN;
+        if (item_format == 0x00U && packing_bits == 16U && item_bits == 16U) {
+            context->format = VITA49_RX_FORMAT_CI16;
+        } else if (item_format == 0x00U && packing_bits == 32U && item_bits == 24U) {
+            context->format = VITA49_RX_FORMAT_CI24;
+        } else if (item_format == 0x0eU && packing_bits == 32U && item_bits == 32U) {
+            context->format = VITA49_RX_FORMAT_CF32;
+        }
+        context->has_format = true;
+        offset += 8U;
+    }
     return true;
 }
 

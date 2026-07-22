@@ -64,20 +64,24 @@ END_TEST
 START_TEST(parses_simulator_vita49_context_packet)
 {
     /* Mirror of the simulator's vita49_write_context_packet layout: bandwidth (bit 29), RF
-     * reference frequency (27), reference level (24, a single 32-bit word), sample rate (21). */
-    uint8_t packet[52];
+     * reference frequency (27), reference level (24, a single 32-bit word), sample rate (21),
+     * and the two-word Data Packet Payload Format field (15) -- 15 words total. */
+    uint8_t packet[60];
     memset(packet, 0, sizeof(packet));
-    const uint32_t header = (4U << 28U) | (1U << 22U) | (2U << 20U) | (5U << 16U) | 13U;
+    const uint32_t header = (4U << 28U) | (1U << 22U) | (2U << 20U) | (5U << 16U) | 15U;
     write_be32(packet, header);
     write_be32(packet + 4, 0x53440001U);
     write_be32(packet + 8, 1U);
     write_be64(packet + 12, 234567890000ULL);
-    const uint32_t cif0 = (1U << 31U) | (1U << 29U) | (1U << 27U) | (1U << 24U) | (1U << 21U);
+    const uint32_t cif0 =
+        (1U << 31U) | (1U << 29U) | (1U << 27U) | (1U << 24U) | (1U << 21U) | (1U << 15U);
     write_be32(packet + 20, cif0);
     write_be64(packet + 24, 20000000ULL << 20U);
     write_be64(packet + 32, 10005000000ULL << 20U);
     write_be32(packet + 40, (uint32_t)((uint16_t)(int16_t)(-55 * 128))); /* -55 dBm, dBm*2^7 */
     write_be64(packet + 44, 24576000ULL << 20U);
+    write_be32(packet + 52, 0x2E0007DFU); /* CF32: IEEE-754 single, item packing 32, data item 32 */
+    write_be32(packet + 56, 0U);
 
     ck_assert_uint_eq(vita49_rx_packet_type(packet, sizeof(packet)), VITA49_RX_PACKET_TYPE_CONTEXT);
     vita49_rx_context_t context;
@@ -91,11 +95,16 @@ START_TEST(parses_simulator_vita49_context_packet)
     ck_assert_uint_eq(context.sample_rate_hz, 24576000ULL);
     ck_assert(context.has_reference_level);
     ck_assert_double_eq_tol(context.reference_level_dbm, -55.0, 0.01);
+    ck_assert(context.has_format);
+    ck_assert_int_eq(context.format, VITA49_RX_FORMAT_CF32);
 
-    /* The Data Packet Payload Format field (CIF0 bit 15) is known and tolerated: it sorts below
-     * sample rate, so the parser reads the fields it recognises and ignores the trailing field. */
-    write_be32(packet + 20, cif0 | (1U << 15U));
+    /* The CI24 and CI16 payload-format words decode to their formats too. */
+    write_be32(packet + 52, 0x200007D7U);
     ck_assert(vita49_rx_parse_context(packet, sizeof(packet), &context));
+    ck_assert_int_eq(context.format, VITA49_RX_FORMAT_CI24);
+    write_be32(packet + 52, 0x200003CFU);
+    ck_assert(vita49_rx_parse_context(packet, sizeof(packet), &context));
+    ck_assert_int_eq(context.format, VITA49_RX_FORMAT_CI16);
 
     /* Genuinely unknown CIF0 bits shift the field layout, so parsing must refuse. */
     write_be32(packet + 20, cif0 | (1U << 30U));

@@ -9,6 +9,16 @@
 #define VITA49_RX_PACKET_TYPE_IF_DATA 1U
 #define VITA49_RX_PACKET_TYPE_CONTEXT 4U
 
+/* On-wire sample format decoded from the context packet's Data Packet Payload Format field.
+ * CI16 = 4 bytes/sample; CI24 and CF32 = 8. UNKNOWN means the field described a layout this
+ * receiver cannot decode (the caller should keep its previous format). */
+typedef enum {
+    VITA49_RX_FORMAT_CI16,
+    VITA49_RX_FORMAT_CI24,
+    VITA49_RX_FORMAT_CF32,
+    VITA49_RX_FORMAT_UNKNOWN
+} vita49_rx_format_t;
+
 typedef struct {
     uint8_t packet_type;
     bool vita49_2;
@@ -35,6 +45,8 @@ typedef struct {
     uint64_t sample_rate_hz;
     bool has_reference_level;      /* true when the packet carried the Reference Level field */
     double reference_level_dbm;    /* RF power (dBm) at 0 dBFS; valid only if has_reference_level */
+    bool has_format;               /* true when the packet carried a Data Packet Payload Format field */
+    vita49_rx_format_t format;     /* paired IF-data sample format; valid only if has_format */
 } vita49_rx_context_t;
 
 /* Packet type from the first header word, or 0xff if the buffer is too small. */

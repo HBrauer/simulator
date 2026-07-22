@@ -89,6 +89,9 @@ typedef struct {
     /* Last in-band stream configuration seen in a VITA context packet. */
     uint64_t stream_center_hz;
     uint64_t stream_bandwidth_hz;
+    /* Payload sample format from the context packet's Data Packet Payload Format field.
+     * Defaults to CI16 (enum value 0) until a context packet advertises otherwise. */
+    vita49_rx_format_t stream_format;
     /* Reference level (RF power at 0 dBFS) from the context packet, for an absolute dBm axis. */
     bool have_reference_level;
     double reference_level_dbm;
@@ -205,7 +208,7 @@ static void usage(const char *argv0)
             "  --min-db DB                 Manual waterfall floor, default -100\n"
             "  --max-db DB                 Manual waterfall ceiling, default 0\n"
             "  --no-auto-level             Disable dynamic waterfall levels\n"
-            "  --log-iq-stats              Log periodic received CI16 payload min/max/nonzero counts\n"
+            "  --log-iq-stats              Log periodic received payload min/max/nonzero counts (as int16)\n"
             "  --headless                  Receive/process without opening SDL window\n"
             "  --control-url URL           Simulator REST API, e.g. http://127.0.0.1:8100.\n"
             "                              Discovers port/sample rate and enables channel controls;\n"
@@ -479,20 +482,72 @@ static void frame_sampler_reset(frame_sampler_t *sampler)
     sampler->samples_until_frame = 0U;
 }
 
-/* VITA 49.2 payloads are big-endian (rule 5.1-1). The receiver decodes the default CI16 format:
- * two 16-bit signed items per 32-bit word, I in the high half, Q in the low half. */
+/* VITA 49.2 payloads are big-endian (rule 5.1-1). */
 static int16_t rx_read_be16(const uint8_t *p)
 {
     return (int16_t)(((uint16_t)p[0] << 8) | (uint16_t)p[1]);
+}
+
+static int32_t rx_read_be32(const uint8_t *p)
+{
+    return (int32_t)(((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | (uint32_t)p[3]);
+}
+
+static int16_t rx_clip_i16(float v)
+{
+    if (v > 32767.0f) {
+        return 32767;
+    }
+    if (v < -32768.0f) {
+        return -32768;
+    }
+    return (int16_t)lrintf(v);
+}
+
+static size_t rx_bytes_per_sample(vita49_rx_format_t format)
+{
+    return format == VITA49_RX_FORMAT_CI16 ? 4U : 8U;
+}
+
+/* Decode one on-wire complex sample into an int16 I/Q pair for the (int16-based) waterfall.
+ * CI24 keeps the top 16 bits of the 24-bit item; CF32 scales +-1.0 full scale back to int16.
+ * UNKNOWN falls back to CI16 so a stream this build cannot fully decode still shows something. */
+static void rx_decode_sample(const uint8_t *p, vita49_rx_format_t format, int16_t *i, int16_t *q)
+{
+    switch (format) {
+        case VITA49_RX_FORMAT_CI24:
+            /* Wire word = value << 8 (24-bit value left-justified); >> 16 yields value >> 8. */
+            *i = (int16_t)(rx_read_be32(p) >> 16);
+            *q = (int16_t)(rx_read_be32(p + 4) >> 16);
+            break;
+        case VITA49_RX_FORMAT_CF32: {
+            float fi, fq;
+            const int32_t bi = rx_read_be32(p);
+            const int32_t bq = rx_read_be32(p + 4);
+            memcpy(&fi, &bi, sizeof(fi));
+            memcpy(&fq, &bq, sizeof(fq));
+            *i = rx_clip_i16(fi * 32768.0f);
+            *q = rx_clip_i16(fq * 32768.0f);
+            break;
+        }
+        case VITA49_RX_FORMAT_CI16:
+        case VITA49_RX_FORMAT_UNKNOWN:
+        default:
+            *i = rx_read_be16(p);
+            *q = rx_read_be16(p + 2);
+            break;
+    }
 }
 
 static size_t maybe_push_frames(
     waterfall_t *wf,
     const vita49_rx_packet_t *packet,
     frame_sampler_t *sampler,
-    size_t frame_stride_samples)
+    size_t frame_stride_samples,
+    vita49_rx_format_t format)
 {
-    const size_t payload_samples = packet->payload_bytes / 4U;
+    const size_t bps = rx_bytes_per_sample(format);
+    const size_t payload_samples = packet->payload_bytes / bps;
     const uint8_t *iq = packet->payload;
     size_t pushed = 0U;
     size_t pos = 0U;
@@ -503,10 +558,9 @@ static size_t maybe_push_frames(
             const size_t available = payload_samples - pos;
             const size_t take = need < available ? need : available;
             int16_t *dst = sampler->iq + 2U * sampler->collected_samples;
-            const uint8_t *src = iq + 4U * pos;
+            const uint8_t *src = iq + bps * pos;
             for (size_t s = 0; s < take; s++) {
-                dst[2U * s] = rx_read_be16(src + 4U * s);          /* I */
-                dst[2U * s + 1U] = rx_read_be16(src + 4U * s + 2U); /* Q */
+                rx_decode_sample(src + bps * s, format, &dst[2U * s], &dst[2U * s + 1U]);
             }
             sampler->collected_samples += take;
             pos += take;
@@ -836,32 +890,41 @@ static void maybe_log_iq_stats(const app_config_t *config, const rx_stats_t *sta
         return;
     }
 
-    const size_t component_count = packet->payload_bytes / 2U;
+    /* Decode to the waterfall's int16 I/Q for a format-independent min/max/nonzero summary. */
+    const size_t bps = rx_bytes_per_sample(stats->stream_format);
+    const size_t sample_count = packet->payload_bytes / bps;
     const uint8_t *payload = packet->payload;
-    int16_t min_value = rx_read_be16(payload);
-    int16_t max_value = min_value;
+    int16_t min_value = 0;
+    int16_t max_value = 0;
     size_t nonzero = 0;
-    for (size_t i = 0; i < component_count; i++) {
-        const int16_t value = rx_read_be16(payload + 2U * i);
-        if (value < min_value) {
-            min_value = value;
-        }
-        if (value > max_value) {
-            max_value = value;
-        }
-        if (value != 0) {
-            nonzero++;
+    for (size_t s = 0; s < sample_count; s++) {
+        int16_t i16, q16;
+        rx_decode_sample(payload + s * bps, stats->stream_format, &i16, &q16);
+        const int16_t components[2] = {i16, q16};
+        for (size_t c = 0; c < 2U; c++) {
+            if (s == 0 && c == 0) {
+                min_value = max_value = components[c];
+            }
+            if (components[c] < min_value) {
+                min_value = components[c];
+            }
+            if (components[c] > max_value) {
+                max_value = components[c];
+            }
+            if (components[c] != 0) {
+                nonzero++;
+            }
         }
     }
     fprintf(stderr,
             "iq packet=%llu stream=0x%08x samples=%zu i16_min=%d i16_max=%d nonzero=%zu/%zu\n",
             (unsigned long long)stats->packets,
             packet->stream_id,
-            packet->payload_bytes / 4U,
+            sample_count,
             (int)min_value,
             (int)max_value,
             nonzero,
-            component_count);
+            sample_count * 2U);
 }
 
 static bool handle_received_packet(
@@ -885,6 +948,9 @@ static bool handle_received_packet(
         stats->bytes += (uint64_t)packet_bytes;
         stats->stream_center_hz = context.rf_reference_frequency_hz;
         stats->stream_bandwidth_hz = context.bandwidth_hz;
+        if (context.has_format && context.format != VITA49_RX_FORMAT_UNKNOWN) {
+            stats->stream_format = context.format;
+        }
         if (context.has_reference_level) {
             stats->reference_level_dbm = context.reference_level_dbm;
             stats->have_reference_level = true;
@@ -908,12 +974,13 @@ static bool handle_received_packet(
     update_sequence_stats(stats, &packet);
     stats->packets++;
     stats->bytes += (uint64_t)packet_bytes;
-    stats->payload_samples += (uint64_t)(packet.payload_bytes / 4U);
+    const size_t bytes_per_sample = rx_bytes_per_sample(stats->stream_format);
+    stats->payload_samples += (uint64_t)(packet.payload_bytes / bytes_per_sample);
     const uint64_t rate_now_ns = monotonic_ns();
     if (stats->rate_cur_start_ns == 0U) {
         stats->rate_cur_start_ns = rate_now_ns;
     }
-    stats->rate_cur_samples += (uint64_t)(packet.payload_bytes / 4U);
+    stats->rate_cur_samples += (uint64_t)(packet.payload_bytes / bytes_per_sample);
     if (rate_now_ns - stats->rate_cur_start_ns >= RATE_WINDOW_NS) {
         stats->rate_prev_samples = stats->rate_cur_samples;
         stats->rate_prev_ns = rate_now_ns - stats->rate_cur_start_ns;
@@ -922,7 +989,7 @@ static bool handle_received_packet(
     }
     maybe_log_iq_stats(config, stats, &packet);
 
-    const size_t frames = maybe_push_frames(waterfall, &packet, sampler, config->frame_stride_samples);
+    const size_t frames = maybe_push_frames(waterfall, &packet, sampler, config->frame_stride_samples, stats->stream_format);
     if (frames > 0U) {
         stats->frames += (uint64_t)frames;
         *frame_ready = true;
