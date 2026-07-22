@@ -27,7 +27,6 @@
 #define MAX_PACKET_BYTES 65536U
 #define RX_BATCH_SIZE 64U
 #define REQUESTED_RCVBUF_BYTES (128 * 1024 * 1024)
-#define MIN_RECOMMENDED_RCVBUF_BYTES (16 * 1024 * 1024)
 #define DEFAULT_SAMPLE_RATE_HZ 98304000U
 #define UI_TOOLBAR_HEIGHT 44
 #define UI_SPECTRUM_HEIGHT 128
@@ -98,6 +97,10 @@ typedef struct {
     /* Settle window after a rate change: in-flight packets rendered at the old rate keep
      * arriving briefly and must not be folded into the first waterfall rows. */
     uint64_t discard_until_ns;
+    /* Baseline of the kernel's UDP RcvbufErrors counter at startup, so the title can show
+     * drops accumulated during this run rather than the machine's lifetime total. */
+    bool rcvbuf_errors_available;
+    uint64_t rcvbuf_errors_baseline;
 } rx_stats_t;
 
 /* REST control state (--control-url). The channel selection, retunes, and bandwidth
@@ -347,15 +350,83 @@ static int socket_receive_buffer_bytes(int fd)
     return value;
 }
 
-static void print_receive_buffer_warning(int rcvbuf_bytes)
+static void check_receive_buffer(int rcvbuf_bytes)
 {
-    if (rcvbuf_bytes >= MIN_RECOMMENDED_RCVBUF_BYTES) {
+    /* The kernel reports SO_RCVBUF as roughly twice the memory it actually reserved, and it
+     * clamps the reservation to net.core.rmem_max. We request REQUESTED_RCVBUF_BYTES; if the
+     * value reported back is below that, rmem_max capped us (SO_RCVBUFFORCE only bypasses the
+     * cap with CAP_NET_ADMIN) and the socket will drop datagrams under bursty high-rate input,
+     * visible as a climbing RcvbufErrors count in /proc/net/snmp. */
+    if (rcvbuf_bytes >= REQUESTED_RCVBUF_BYTES) {
         return;
     }
     fprintf(stderr,
-            "warning: kernel receive buffer is only %d bytes; for 98 MS/s UDP use e.g. "
-            "`sudo sysctl -w net.core.rmem_max=134217728 net.core.rmem_default=134217728`\n",
-            rcvbuf_bytes);
+            "error: UDP receive buffer is only %d bytes (requested %d); the kernel capped it at "
+            "net.core.rmem_max, so datagrams will be dropped at high sample rates (e.g. 98 MS/s). "
+            "Raise the limit and restart the receiver:\n"
+            "  sudo sysctl -w net.core.rmem_max=%d net.core.rmem_default=%d\n",
+            rcvbuf_bytes, REQUESTED_RCVBUF_BYTES, REQUESTED_RCVBUF_BYTES, REQUESTED_RCVBUF_BYTES);
+}
+
+/* Read the system-wide UDP RcvbufErrors counter (datagrams the kernel dropped because a
+ * socket receive buffer was full) from /proc/net/snmp. The file holds two "Udp:" lines: a
+ * header naming the columns and a values line; we locate RcvbufErrors by name so we do not
+ * depend on its column position. Returns false if the file or field is unavailable (e.g. a
+ * non-Linux host). The count is machine-wide, not per-socket, so it only approximates this
+ * receiver's losses -- close enough on a box whose main UDP traffic is the receiver. */
+static bool read_udp_rcvbuf_errors(uint64_t *out)
+{
+    FILE *f = fopen("/proc/net/snmp", "re");
+    if (f == NULL) {
+        return false;
+    }
+    char header[512] = "";
+    char values[512] = "";
+    bool have_header = false;
+    bool have_values = false;
+    char line[512];
+    while (fgets(line, sizeof(line), f) != NULL) {
+        if (strncmp(line, "Udp: ", 5) != 0) {
+            continue;
+        }
+        if (!have_header) {
+            snprintf(header, sizeof(header), "%s", line);
+            have_header = true;
+        } else {
+            snprintf(values, sizeof(values), "%s", line);
+            have_values = true;
+            break;
+        }
+    }
+    fclose(f);
+    if (!have_values) {
+        return false;
+    }
+
+    int column = -1;
+    int index = 0;
+    char *save = NULL;
+    for (char *tok = strtok_r(header, " \t\n", &save); tok != NULL; tok = strtok_r(NULL, " \t\n", &save)) {
+        if (strcmp(tok, "RcvbufErrors") == 0) {
+            column = index;
+            break;
+        }
+        index++;
+    }
+    if (column < 0) {
+        return false;
+    }
+
+    index = 0;
+    save = NULL;
+    for (char *tok = strtok_r(values, " \t\n", &save); tok != NULL; tok = strtok_r(NULL, " \t\n", &save)) {
+        if (index == column) {
+            *out = strtoull(tok, NULL, 10);
+            return true;
+        }
+        index++;
+    }
+    return false;
 }
 
 static double elapsed_seconds(struct timespec start, struct timespec stop)
@@ -1666,10 +1737,23 @@ static void ui_update(ui_t *ui, const waterfall_t *wf, const app_config_t *confi
         const bool in_window = control_current(control)->in_frontend_window;
         snprintf(channel_info, sizeof(channel_info), "ch=%u | %s", control->channel, in_window ? "" : "OUT OF WINDOW | ");
     }
-    char title[420];
+    /* Kernel UDP receive-buffer drops accrued since startup (see read_udp_rcvbuf_errors): a
+     * nonzero, growing count means the receiver is losing datagrams and needs a larger
+     * net.core.rmem_max. Omitted entirely when the counter is unavailable. */
+    char rcvdrop_info[40] = "";
+    if (stats->rcvbuf_errors_available) {
+        uint64_t rcvbuf_now = stats->rcvbuf_errors_baseline;
+        if (read_udp_rcvbuf_errors(&rcvbuf_now)) {
+            const uint64_t dropped = rcvbuf_now > stats->rcvbuf_errors_baseline
+                ? rcvbuf_now - stats->rcvbuf_errors_baseline
+                : 0U;
+            snprintf(rcvdrop_info, sizeof(rcvdrop_info), " rcvdrop=%llu", (unsigned long long)dropped);
+        }
+    }
+    char title[480];
     snprintf(title,
              sizeof(title),
-             "SDR Waterfall | %s%s%.2f MS/s | hist=%.1fs stride=%zu | packets=%llu frames=%llu gaps=%llu bad=%llu stream=0x%08x levels=%.1f..%.1f dB row=%.1f..%.1f dB",
+             "SDR Waterfall | %s%s%.2f MS/s | hist=%.1fs stride=%zu | packets=%llu frames=%llu gaps=%llu bad=%llu%s stream=0x%08x levels=%.1f..%.1f dB row=%.1f..%.1f dB",
              channel_info,
              stream_info,
              msps,
@@ -1679,6 +1763,7 @@ static void ui_update(ui_t *ui, const waterfall_t *wf, const app_config_t *confi
              (unsigned long long)stats->frames,
              (unsigned long long)stats->sequence_gaps,
              (unsigned long long)stats->bad_packets,
+             rcvdrop_info,
              stats->last_stream_id,
              (double)min_db,
              (double)max_db,
@@ -1801,7 +1886,8 @@ int main(int argc, char **argv)
             config.history_seconds,
             config.frame_stride_samples,
             receive_buffer_bytes);
-    print_receive_buffer_warning(receive_buffer_bytes);
+    check_receive_buffer(receive_buffer_bytes);
+    stats.rcvbuf_errors_available = read_udp_rcvbuf_errors(&stats.rcvbuf_errors_baseline);
 
     while (keep_running) {
         bool frame_ready = false;
