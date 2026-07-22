@@ -296,6 +296,10 @@ bool control_client_init(control_client_t *client, const char *base_url, char *e
     if (json_is_string(udp_host)) {
         snprintf(client->udp_output_host, sizeof(client->udp_output_host), "%s", json_string_value(udp_host));
     }
+    json_t *udp_iface = json_object_get(capabilities, "udp_multicast_interface");
+    if (json_is_string(udp_iface)) {
+        snprintf(client->udp_multicast_interface, sizeof(client->udp_multicast_interface), "%s", json_string_value(udp_iface));
+    }
     json_decref(capabilities);
 
     return control_client_refresh(client, error, error_size);

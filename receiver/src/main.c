@@ -27,6 +27,8 @@
 #define MAX_PACKET_BYTES 65536U
 #define RX_BATCH_SIZE 64U
 #define REQUESTED_RCVBUF_BYTES (128 * 1024 * 1024)
+/* Span of the throughput measurement window used for the title's "MS/s" readout. */
+#define RATE_WINDOW_NS (2ULL * 1000000000ULL)
 #define DEFAULT_SAMPLE_RATE_HZ 98304000U
 #define UI_TOOLBAR_HEIGHT 44
 #define UI_SPECTRUM_HEIGHT 128
@@ -90,10 +92,15 @@ typedef struct {
     /* Reference level (RF power at 0 dBFS) from the context packet, for an absolute dBm axis. */
     bool have_reference_level;
     double reference_level_dbm;
-    /* Rate measurement window, restarted on channel/rate changes so the title shows the
-     * current stream rate instead of a lifetime average. */
-    uint64_t rate_window_samples;
-    uint64_t rate_window_start_ns;
+    /* Sliding-window throughput measurement so the title shows the *current* stream rate
+     * rather than a lifetime average that can only ever drift downward under loss. Samples
+     * accrue into an open bucket; once that bucket spans RATE_WINDOW_NS it is retired into
+     * the `prev` slot and a fresh one opened. The displayed rate combines both buckets so it
+     * always covers at least RATE_WINDOW_NS of recent history. Reset on channel/rate changes. */
+    uint64_t rate_cur_samples;
+    uint64_t rate_cur_start_ns;
+    uint64_t rate_prev_samples;
+    uint64_t rate_prev_ns; /* wall-clock span of the retired bucket */
     /* Settle window after a rate change: in-flight packets rendered at the old rate keep
      * arriving briefly and must not be folded into the first waterfall rows. */
     uint64_t discard_until_ns;
@@ -111,6 +118,7 @@ typedef struct {
     control_client_t client;
     uint32_t channel;
     char multicast_host[CONTROL_MAX_HOST];
+    char multicast_interface[CONTROL_MAX_HOST];
     uint64_t last_refresh_attempt_ns; /* throttles cache refreshes on in-band mismatches */
 } control_state_t;
 
@@ -444,8 +452,10 @@ static uint64_t monotonic_ns(void)
 static void rate_window_reset(rx_stats_t *stats)
 {
     if (stats != 0) {
-        stats->rate_window_samples = 0;
-        stats->rate_window_start_ns = 0;
+        stats->rate_cur_samples = 0;
+        stats->rate_cur_start_ns = 0;
+        stats->rate_prev_samples = 0;
+        stats->rate_prev_ns = 0;
     }
 }
 
@@ -886,10 +896,17 @@ static bool handle_received_packet(
     stats->packets++;
     stats->bytes += (uint64_t)packet_bytes;
     stats->payload_samples += (uint64_t)(packet.payload_bytes / 4U);
-    if (stats->rate_window_start_ns == 0U) {
-        stats->rate_window_start_ns = monotonic_ns();
+    const uint64_t rate_now_ns = monotonic_ns();
+    if (stats->rate_cur_start_ns == 0U) {
+        stats->rate_cur_start_ns = rate_now_ns;
     }
-    stats->rate_window_samples += (uint64_t)(packet.payload_bytes / 4U);
+    stats->rate_cur_samples += (uint64_t)(packet.payload_bytes / 4U);
+    if (rate_now_ns - stats->rate_cur_start_ns >= RATE_WINDOW_NS) {
+        stats->rate_prev_samples = stats->rate_cur_samples;
+        stats->rate_prev_ns = rate_now_ns - stats->rate_cur_start_ns;
+        stats->rate_cur_samples = 0;
+        stats->rate_cur_start_ns = rate_now_ns;
+    }
     maybe_log_iq_stats(config, stats, &packet);
 
     const size_t frames = maybe_push_frames(waterfall, &packet, sampler, config->frame_stride_samples);
@@ -1720,10 +1737,15 @@ static void ui_update(ui_t *ui, const waterfall_t *wf, const app_config_t *confi
     clock_gettime(CLOCK_MONOTONIC, &now);
     (void)start;
     const uint64_t now_ns = monotonic_ns();
-    const double window_s = stats->rate_window_start_ns > 0U && now_ns > stats->rate_window_start_ns
-        ? (double)(now_ns - stats->rate_window_start_ns) / 1000000000.0
-        : 0.0;
-    const double msps = window_s > 0.0 ? (double)stats->rate_window_samples / window_s / 1000000.0 : 0.0;
+    /* Combine the retired bucket with the open one so the readout always spans at least
+     * RATE_WINDOW_NS. The open bucket's live duration keeps growing between packets, so a
+     * stalled stream decays the rate toward zero instead of freezing at its last value. */
+    const uint64_t window_samples = stats->rate_prev_samples + stats->rate_cur_samples;
+    double window_ns = (double)stats->rate_prev_ns;
+    if (stats->rate_cur_start_ns > 0U && now_ns > stats->rate_cur_start_ns) {
+        window_ns += (double)(now_ns - stats->rate_cur_start_ns);
+    }
+    const double msps = window_ns > 0.0 ? (double)window_samples / (window_ns / 1000000000.0) / 1000000.0 : 0.0;
     char stream_info[96] = "";
     if (stats->stream_center_hz > 0U) {
         snprintf(stream_info,
@@ -1799,6 +1821,14 @@ int main(int argc, char **argv)
             ipv4_is_multicast(group_addr)) {
             snprintf(control.multicast_host, sizeof(control.multicast_host), "%s", control.client.udp_output_host);
             config.host = control.multicast_host;
+            /* Join on the same interface the simulator sends out of, so a loopback-pinned
+             * wideband stream is not routed over a physical NIC. Skip if the user set
+             * --interface explicitly (interface_host left at its 0.0.0.0 default otherwise). */
+            if (strcmp(config.interface_host, "0.0.0.0") == 0 &&
+                control.client.udp_multicast_interface[0] != '\0') {
+                snprintf(control.multicast_interface, sizeof(control.multicast_interface), "%s", control.client.udp_multicast_interface);
+                config.interface_host = control.multicast_interface;
+            }
         }
         if (!control_select_channel(&config, &control, 0, 0, 0, 0, config.channel_id)) {
             return 2;

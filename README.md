@@ -183,7 +183,7 @@ Multicast is not a separate receiver setup — it is just a different output add
     udp_multicast_interface: "127.0.0.1"
 ```
 
-The simulator then sends the same VITA 49.2 UDP packets to the multicast group, and receivers join the group explicitly. (`udp_output_host` has no command-line override, so this has to live in the config.) Without `udp_multicast_interface: "127.0.0.1"` the kernel may route multicast over the default physical NIC, which cannot carry a 98 MS/s CI16 stream; pass the matching `--interface 127.0.0.1` to the receiver.
+The simulator then sends the same VITA 49.2 UDP packets to the multicast group, and receivers join the group explicitly. (`udp_output_host` has no command-line override, so this has to live in the config.) Without `udp_multicast_interface: "127.0.0.1"` the kernel may route multicast over the default physical NIC, which cannot carry a 98 MS/s CI16 stream.
 
 Terminal 1, join channel 1 on multicast:
 
@@ -191,11 +191,10 @@ Terminal 1, join channel 1 on multicast:
 build/sdr-waterfall-receiver \
   --control-url http://127.0.0.1:8100 \
   --channel 1 \
-  --interface 127.0.0.1 \
   --fft-size 1024
 ```
 
-With `--control-url` the receiver reads `udp_output_host` from the API and joins the multicast group automatically. (Manual mode: `--host 239.10.10.10 --port 50001 --sample-rate-hz 24576000`.) Terminal 2, start the simulator with the config you edited above:
+With `--control-url` the receiver reads both `udp_output_host` and `udp_multicast_interface` from the API and joins the multicast group on the matching interface automatically — no `--interface` needed. Pass `--interface HOST` only to override the simulator's choice. (Manual mode, no control URL: `--host 239.10.10.10 --port 50001 --sample-rate-hz 24576000 --interface 127.0.0.1`.) Terminal 2, start the simulator with the config you edited above:
 
 ```sh
 build/sdr-simulator \

@@ -46,6 +46,10 @@ typedef struct {
     uint64_t tuner_stop_hz;
     double scan_rate_hz_per_s;
     char udp_output_host[CONTROL_MAX_HOST];
+    /* Interface the simulator sends multicast out of; the receiver joins the group on the same
+     * interface so a loopback-pinned wideband stream is not routed over a physical NIC. Empty
+     * when the simulator lets the kernel choose (unicast, or multicast with no interface set). */
+    char udp_multicast_interface[CONTROL_MAX_HOST];
     size_t channel_count;
     control_channel_t channels[CONTROL_MAX_CHANNELS];
 } control_client_t;

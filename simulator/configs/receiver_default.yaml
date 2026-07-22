@@ -14,7 +14,15 @@ receivers:
   - receiver_id: 0
     rest_bind_host: "127.0.0.1"
     rest_port: 8111
-    udp_output_host: "127.0.0.1"
+    # Multicast group (not unicast) so multiple receivers can view the stream at once. With a
+    # unicast host, a second sdr_waterfall_receiver joining the same port silently steals the flow
+    # via SO_REUSEPORT and the first goes dead; every receiver that joins a multicast group instead
+    # gets its own copy (IP_MULTICAST_LOOP is set, so same-host receivers are served too).
+    # udp_multicast_interface pins sends to loopback: without it the kernel may route the group over
+    # a physical NIC, which cannot carry this config's ~98 MS/s stream. Receivers must join on the
+    # same interface -- pass --interface 127.0.0.1 (see README "Multicast").
+    udp_output_host: "239.10.10.10"
+    udp_multicast_interface: "127.0.0.1"
     frequency_min_hz: 60000000
     frequency_max_hz: 140000000
     bandwidth_hz: 80000000
