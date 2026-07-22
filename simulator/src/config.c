@@ -135,6 +135,12 @@ static bool apply_scalar(simulator_config_t *config, parse_state_t *state, const
             state->current_channel->stream_id_set = true;
         } else if (strcmp(key, "udp_output_port") == 0) {
             state->current_channel->udp_output.port = (uint16_t)parse_u64(value);
+        } else if (strcmp(key, "render_threads") == 0) {
+            const uint64_t threads = parse_u64(value);
+            if (threads < 1U || threads > SIM_MAX_RENDER_THREADS) {
+                return set_error(error, error_size, "invalid_render_threads");
+            }
+            state->current_channel->render_threads = (uint32_t)threads;
         } else if (strcmp(key, "ddc_id") == 0) {
             return set_error(error, error_size, "legacy_key_ddc_use_channels");
         }
@@ -441,6 +447,9 @@ bool config_validate(simulator_config_t *config, char *error, size_t error_size)
             }
             if (channel->rf_reference_power_dbm == 0.0) {
                 channel->rf_reference_power_dbm = receiver->rf_reference_power_dbm;
+            }
+            if (channel->render_threads == 0U) {
+                channel->render_threads = 1U;
             }
             /* The first listed rate is active at load. */
             if (channel->rate_count > 0) {

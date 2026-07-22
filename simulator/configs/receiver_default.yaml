@@ -33,6 +33,13 @@ receivers:
         track_tuner: true
         rates:
           - { bandwidth_hz: 80000000, sample_rate_hz: 98304000 }
+        # Wideband synthesis (noise floor + several signals across 80 MHz) exceeds one core, so a
+        # single render thread streams below real time. Render several consecutive blocks in
+        # parallel to sustain 98.304 MS/s (4 threads clears it in an optimized build, ~5 in the
+        # debug build; excess threads simply idle on back-pressure once the stream is paced).
+        # Only matters when this channel synthesises (tuned off the passthrough band); a
+        # passthrough tune is a cheap memcpy and needs just one thread.
+        render_threads: 6
         stream_enabled: false
         udp_output_port: 51100
       # Channel 1: dedicated passthrough replay at 100 MHz -- the channel this demo streams. It

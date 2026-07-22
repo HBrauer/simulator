@@ -10,6 +10,8 @@
  * fixed DDC channels extracting from the same recording. */
 #define SIM_MAX_CHANNELS 24
 #define SIM_MAX_CHANNEL_RATES 128
+/* Upper bound on per-channel cooperative render threads (channel_config_t.render_threads). */
+#define SIM_MAX_RENDER_THREADS 16U
 #define SIM_MAX_SOURCES 64
 #define SIM_MAX_SIGNALS 256
 #define SIM_MAX_PASSTHROUGH_VARIANTS 8
@@ -98,6 +100,11 @@ typedef struct {
      * channels (0, 1, 2, ...) in receiver/channel order. */
     bool stream_id_set;
     uint32_t stream_id;
+    /* Number of CPU threads that cooperatively render this channel's blocks. 1 (default) keeps
+     * the single-thread render path. A wideband synthesis channel (e.g. 80 MHz / 98.304 MS/s
+     * mixing several signals) exceeds one core; raising this renders several consecutive blocks
+     * in parallel so the stream sustains real time. Clamped to [1, SIM_MAX_RENDER_THREADS]. */
+    uint32_t render_threads;
     udp_output_config_t udp_output;
 } channel_config_t;
 

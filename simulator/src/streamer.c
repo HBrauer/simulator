@@ -10,6 +10,7 @@
 #endif
 #include <errno.h>
 #include <pthread.h>
+#include <semaphore.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -46,6 +47,7 @@ typedef struct {
     pthread_mutex_t *receiver_lock;
     size_t block_samples;
     uint64_t max_batch_latency_ns;
+    uint32_t render_threads;
     size_t packet_bytes;
     ringbuffer_t ringbuffer;
     pthread_t render_thread;
@@ -287,15 +289,97 @@ static void snapshot_worker_config(stream_worker_t *worker, receiver_config_t *r
     *channel = receiver->channels[worker->channel_index];
 }
 
+/* One cooperative renderer in a channel's render pool. The orchestrator (the channel's render
+ * thread) renders one block of a fork-join round itself and hands the round's other blocks to
+ * these helpers. Each helper renders a whole block independently -- a block is a pure function of
+ * its index, so the renderer DSP is untouched and needs no per-thread state beyond its own output
+ * buffer. The task pointers reference the orchestrator's per-round stack locals and are stable for
+ * the duration of the go/done handshake (the orchestrator does not touch them until every helper
+ * has posted done). */
+typedef struct {
+    stream_worker_t *worker;
+    sem_t go;
+    sem_t done;
+    atomic_bool running;
+    pthread_t thread;
+    const receiver_config_t *receiver;
+    const channel_config_t *channel;
+    uint64_t render_time_ns;
+    size_t block_samples;
+    stream_block_record_t *record;
+} render_pool_worker_t;
+
+static void *render_pool_worker_main(void *arg)
+{
+    render_pool_worker_t *helper = arg;
+    /* Do not pin: helpers float onto idle cores rather than share the orchestrator's core. */
+    apply_stream_affinity(-1);
+    render_stats_t stats;
+    while (true) {
+        sem_wait(&helper->go);
+        if (!atomic_load(&helper->running)) {
+            break;
+        }
+        renderer_render_channel_block(helper->worker->scenario, helper->worker->asset_cache,
+                                      helper->receiver, helper->channel, helper->render_time_ns,
+                                      helper->record->samples, helper->block_samples, &stats);
+        helper->record->sample_count = helper->block_samples;
+        sem_post(&helper->done);
+    }
+    return NULL;
+}
+
 static void *stream_render_thread_main(void *arg)
 {
     stream_worker_t *worker = arg;
     apply_stream_affinity(worker->render_cpu);
-    stream_block_record_t *record = calloc(1, sizeof(*record) + worker->packet_bytes);
-    if (record == NULL) {
-        record_worker_error(worker, "render buffer allocation failed");
-        return NULL;
+
+    uint32_t threads = worker->render_threads;
+    if (threads < 1U) {
+        threads = 1U;
     }
+    if (threads > SIM_MAX_RENDER_THREADS) {
+        threads = SIM_MAX_RENDER_THREADS;
+    }
+
+    /* One output buffer per cooperative renderer: records[0] for this thread, records[j] for
+     * helper j-1. The ring copies each record on push, so the buffers are reused every round. */
+    stream_block_record_t *records[SIM_MAX_RENDER_THREADS] = {0};
+    for (uint32_t i = 0; i < threads; i++) {
+        records[i] = calloc(1, sizeof(**records) + worker->packet_bytes);
+        if (records[i] == NULL) {
+            record_worker_error(worker, "render buffer allocation failed");
+            for (uint32_t k = 0; k < i; k++) {
+                free(records[k]);
+            }
+            return NULL;
+        }
+    }
+
+    /* Spawn the helper pool (threads - 1 of them). A partial failure simply narrows the round
+     * width to however many started; the channel still streams, just with less parallelism. */
+    render_pool_worker_t *helpers = NULL;
+    uint32_t started_helpers = 0;
+    if (threads > 1U) {
+        helpers = calloc(threads - 1U, sizeof(*helpers));
+        if (helpers != NULL) {
+            for (uint32_t j = 0; j < threads - 1U; j++) {
+                helpers[j].worker = worker;
+                helpers[j].record = records[j + 1U];
+                atomic_init(&helpers[j].running, true);
+                sem_init(&helpers[j].go, 0, 0);
+                sem_init(&helpers[j].done, 0, 0);
+                if (pthread_create(&helpers[j].thread, NULL, render_pool_worker_main, &helpers[j]) != 0) {
+                    sem_destroy(&helpers[j].go);
+                    sem_destroy(&helpers[j].done);
+                    record_worker_error(worker, "render pool thread create failed");
+                    break;
+                }
+                started_helpers++;
+            }
+        }
+    }
+    const size_t render_width = (size_t)started_helpers + 1U;
 
     uint32_t last_rate_hz = 0;
     uint64_t block_index = 0;
@@ -328,25 +412,63 @@ static void *stream_render_thread_main(void *arg)
             grid_initialized = true;
         }
 
-        if (ringbuffer_available(&worker->ringbuffer) == 0) {
+        const size_t available = ringbuffer_available(&worker->ringbuffer);
+        if (available == 0) {
             struct timespec ts = {.tv_sec = 0, .tv_nsec = RENDER_BACKPRESSURE_NS};
             nanosleep(&ts, NULL);
             continue;
         }
+        size_t round = render_width < available ? render_width : available;
 
-        const uint64_t render_time_ns = streamer_block_start_ns(block_index, block_samples, sample_rate_hz);
-        render_stats_t stats;
-        renderer_render_channel_block(worker->scenario, worker->asset_cache, &receiver_snapshot, &channel_snapshot, render_time_ns, record->samples, block_samples, &stats);
-        record->sample_count = block_samples;
-
-        if (!ringbuffer_try_push(&worker->ringbuffer, render_time_ns, record)) {
-            record_overrun(worker, block_samples);
+        /* Block indices for this round, walked through streamer_next_block_index so the UTC-day
+         * wrap is handled exactly (never via block_index + j, which would not wrap). */
+        uint64_t idxs[SIM_MAX_RENDER_THREADS];
+        idxs[0] = block_index;
+        for (size_t j = 1; j < round; j++) {
+            idxs[j] = streamer_next_block_index(idxs[j - 1], block_samples, sample_rate_hz);
         }
 
-        block_index = streamer_next_block_index(block_index, block_samples, sample_rate_hz);
+        /* Dispatch blocks 1..round-1 to helpers, render block 0 on this thread, then join. */
+        for (size_t j = 1; j < round; j++) {
+            render_pool_worker_t *helper = &helpers[j - 1];
+            helper->receiver = &receiver_snapshot;
+            helper->channel = &channel_snapshot;
+            helper->render_time_ns = streamer_block_start_ns(idxs[j], block_samples, sample_rate_hz);
+            helper->block_samples = block_samples;
+            sem_post(&helper->go);
+        }
+        {
+            render_stats_t stats;
+            const uint64_t render_time_ns = streamer_block_start_ns(idxs[0], block_samples, sample_rate_hz);
+            renderer_render_channel_block(worker->scenario, worker->asset_cache, &receiver_snapshot, &channel_snapshot, render_time_ns, records[0]->samples, block_samples, &stats);
+            records[0]->sample_count = block_samples;
+        }
+        for (size_t j = 1; j < round; j++) {
+            sem_wait(&helpers[j - 1].done);
+        }
+
+        /* Push the round's blocks in index order; the ring had >= round free slots. */
+        for (size_t j = 0; j < round; j++) {
+            const uint64_t render_time_ns = streamer_block_start_ns(idxs[j], block_samples, sample_rate_hz);
+            if (!ringbuffer_try_push(&worker->ringbuffer, render_time_ns, records[j])) {
+                record_overrun(worker, block_samples);
+            }
+        }
+
+        block_index = streamer_next_block_index(idxs[round - 1], block_samples, sample_rate_hz);
     }
 
-    free(record);
+    for (uint32_t j = 0; j < started_helpers; j++) {
+        atomic_store(&helpers[j].running, false);
+        sem_post(&helpers[j].go);
+        pthread_join(helpers[j].thread, NULL);
+        sem_destroy(&helpers[j].go);
+        sem_destroy(&helpers[j].done);
+    }
+    free(helpers);
+    for (uint32_t i = 0; i < threads; i++) {
+        free(records[i]);
+    }
     return NULL;
 }
 
@@ -559,7 +681,15 @@ static void *stream_udp_thread_main(void *arg)
 static bool stream_worker_start(stream_worker_t *worker)
 {
     worker->packet_bytes = worker->block_samples * sizeof(iq_ci16_t);
-    if (!ringbuffer_init(&worker->ringbuffer, sizeof(stream_block_record_t) + worker->packet_bytes, RINGBUFFER_PACKET_CAPACITY)) {
+    /* A parallel-render channel produces up to render_threads blocks per fork-join round; give
+     * the ring enough slots to hold a few rounds so the renderers run ahead of the paced UDP
+     * drain instead of stalling on a full ring. */
+    size_t ring_capacity = RINGBUFFER_PACKET_CAPACITY;
+    const size_t parallel_capacity = 4U * (size_t)worker->render_threads;
+    if (parallel_capacity > ring_capacity) {
+        ring_capacity = parallel_capacity;
+    }
+    if (!ringbuffer_init(&worker->ringbuffer, sizeof(stream_block_record_t) + worker->packet_bytes, ring_capacity)) {
         return false;
     }
     worker->ringbuffer_initialized = true;
@@ -623,6 +753,7 @@ bool streamer_manager_start(streamer_manager_t **manager, const streamer_config_
                 .receiver_lock = config->receiver_lock,
                 .block_samples = config->block_samples,
                 .max_batch_latency_ns = config->max_batch_latency_ns,
+                .render_threads = receiver->channels[c].render_threads > 0U ? receiver->channels[c].render_threads : 1U,
                 .render_cpu = render_cpu,
                 .udp_cpu = udp_cpu,
                 .class_id_present = config->config->class_id_present,

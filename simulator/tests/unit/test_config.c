@@ -328,6 +328,37 @@ START_TEST(accepts_channel_sample_rate_key)
 }
 END_TEST
 
+START_TEST(parses_render_threads_and_defaults_to_one)
+{
+    const char *path = write_temp_config_body(
+        "",
+        "    channels:\n"
+        "      - { channel_id: 0, track_tuner: true, rates: [ { bandwidth_hz: 80000000, sample_rate_hz: 98304000 } ], render_threads: 4, udp_output_port: 50000 }\n"
+        "      - { channel_id: 1, center_frequency_hz: 10000000000, rates: [ { bandwidth_hz: 5000000, sample_rate_hz: 6144000 } ], udp_output_port: 50001 }\n");
+    ck_assert_ptr_nonnull(path);
+    simulator_config_t config;
+    char error[128];
+    ck_assert_msg(config_load_yaml(path, &config, error, sizeof(error)), "%s", error);
+    ck_assert_uint_eq(config.receivers[0].channels[0].render_threads, 4U);
+    /* Unspecified defaults to a single render thread. */
+    ck_assert_uint_eq(config.receivers[0].channels[1].render_threads, 1U);
+}
+END_TEST
+
+START_TEST(rejects_invalid_render_threads)
+{
+    const char *path = write_temp_config_body(
+        "",
+        "    channels:\n"
+        "      - { channel_id: 0, track_tuner: true, rates: [ { bandwidth_hz: 80000000, sample_rate_hz: 98304000 } ], render_threads: 0, udp_output_port: 50000 }\n");
+    ck_assert_ptr_nonnull(path);
+    simulator_config_t config;
+    char error[128];
+    ck_assert(!config_load_yaml(path, &config, error, sizeof(error)));
+    ck_assert_str_eq(error, "invalid_render_threads");
+}
+END_TEST
+
 START_TEST(parses_stream_cpus_range)
 {
     const char *path = write_temp_config("stream_cpus: \"2-5\"\n");
@@ -556,6 +587,8 @@ Suite *config_suite(void)
     tcase_add_test(tc, rejects_out_of_range_stream_id);
     tcase_add_test(tc, rejects_legacy_config_keys);
     tcase_add_test(tc, accepts_channel_sample_rate_key);
+    tcase_add_test(tc, parses_render_threads_and_defaults_to_one);
+    tcase_add_test(tc, rejects_invalid_render_threads);
     tcase_add_test(tc, parses_stream_cpus_range);
     tcase_add_test(tc, parses_stream_cpus_list);
     tcase_add_test(tc, legacy_stream_cpu_maps_to_single_element_set);
