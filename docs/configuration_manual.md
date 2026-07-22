@@ -77,7 +77,7 @@ At-a-glance tables for every parameter. The sections that follow explain the beh
 | `sample_rate_hz` | integer (Hz) | Required. Source sample rate. |
 | `bandwidth_hz` | integer (Hz) | Required. Intrinsic bandwidth of the content. |
 | `center_frequency_hz` | integer (Hz) | Source-relative center; `0` in current scenarios. |
-| `nominal_level_dbfs` | number (dBFS) | Required. Source nominal digital level. |
+| `nominal_level_dbfs` | number (dBFS) | Required. Declarative metadata only — **not applied** to IQ replay; the file's real sample amplitude sets the level. See [§3.3 Power](#33-signals) for the clipping implications. |
 | `passthrough_variants` | array | Optional. One capture per channel rate (see Passthrough). |
 
 The sample count is **not** a parameter — it is derived from the file at load (CI16: file size / 4
@@ -231,10 +231,46 @@ A signal binds a source to a place on the air:
 (for `audio_file` sources — the audio is modulated onto the carrier). WBFM honours
 `fm_deviation_hz` (default 75 kHz); AM honours `am_depth` (0.0–1.0, default 0.8).
 
-**Power**: the digital level written to the channel is
-`nominal_level_dbfs + (power_dbm − rf_reference_power_dbm)`, then scaled by the channel's
-`output_scale`. `rf_reference_power_dbm` comes from the instance config (default −55 dBm) and is
-the RF power at which a source plays back at its nominal digital level.
+**Power**: the mixer multiplies the source's samples by
+`output_scale · 10^((power_dbm − rf_reference_power_dbm) / 20)` and sums them onto the channel's
+mix bus. `rf_reference_power_dbm` (instance config, default −55 dBm) is the RF power at which a
+**0 dBFS** source fills the ci16 output exactly; `output_scale` (default 1.0) is a channel digital
+gain applied on top.
+
+For **IQ sources the level is set by the file's actual sample amplitude** — the samples are replayed
+verbatim, only scaled by that gain. `nominal_level_dbfs` is *declarative metadata and is not
+applied*: if you tag a file `nominal_level_dbfs: −10` but it was mastered at full scale, the mixer
+still sees full scale. (Audio sources differ: they are RMS-normalised at load, so `power_dbm` means
+the same thing regardless of how hot the WAV was mastered.)
+
+> ⚠️ **Overdrive / clipping.** The float mix bus is saturated to ci16 (±32767) once per block. A
+> signal whose peak lands above full scale is **hard-clipped**, and clipping a strong carrier —
+> or two overlapping ones — sprays **intermodulation products across the whole channel** as a comb
+> of evenly spaced ghost carriers on the waterfall. Because the output is quantised to a real ADC's
+> word width, this is exactly how a real receiver behaves when you overdrive its front end.
+>
+> A single IQ signal clips when
+>
+> ```
+> power_dbm  >  rf_reference_power_dbm − source_peak_dBFS − 20·log10(output_scale)
+> ```
+>
+> where `source_peak_dBFS ≤ 0` is the file's true peak. For a **full-scale** IQ file
+> (`source_peak_dBFS = 0`) at `output_scale = 1.0`, that reduces to **`power_dbm > rf_reference_power_dbm`**
+> — i.e. *any* signal hotter than the reference clips. Signals that overlap in the same channel
+> **sum**, so each needs a further ≈ 6 dB of headroom per doubling of overlapping signals.
+>
+> Note that `snr_db` resolves to an absolute `power_dbm` against the noise floor, so a high SNR over
+> a low noise floor can quietly land above the reference. Example from the default scene: a 30 dB-SNR
+> POCSAG signal over a −120 dBm/Hz floor in 15 kHz resolves to −48.2 dBm — 6.8 dB above the −55 dBm
+> reference — so at `output_scale 1.0` it rails ~68 % of samples.
+>
+> **Fixes**, in order of preference: lower the **channel `output_scale`** (attenuates signal *and*
+> noise together, so SNR is unchanged — just buys headroom); or reduce the signal `power_dbm` /
+> `snr_db`; or raise `rf_reference_power_dbm` (affects every signal on the receiver, and de-tunes the
+> passthrough memcpy fast path). The simulator prints a per-signal **`warning: signal '…' overdrives
+> receiver R channel C …`** at startup whenever this condition is met (see [§10 Validation](#10-validation)),
+> with the specific `output_scale` ceiling to use.
 
 ### 3.4 Signal bandwidth
 
@@ -519,3 +555,18 @@ start. The full list of codes is in [`schemas.md`](schemas.md). The timing-relat
 | `replay_mode_no_repeat` | A `range`/`shift` replay signal carries a `repeat_interval_s`. |
 
 See [`schemas.md`](schemas.md) for the complete error-code list.
+
+### Load-time warnings (non-fatal)
+
+Beyond the hard errors above, the simulator prints `warning:` lines to stderr at startup for
+configurations that load fine but will not behave as intended. These do **not** stop the run.
+
+| Warning | Cause | Fix |
+| --- | --- | --- |
+| `signal '…' overdrives receiver R channel C … by N dB` | A signal's configured power, after the source's real peak level and the channel's `output_scale`, exceeds the ci16 full scale — the output clips and intermodulates into ghost carriers (see [§3.3 Power](#33-signals)). Reported per signal for the worst-overdriven channel; the check is tune-independent (worst case: the channel centred on the signal), because the tuner is retunable at runtime. | Set the channel `output_scale` to the ceiling printed in the message, lower the signal `power_dbm`/`snr_db`, or raise `rf_reference_power_dbm`. |
+| `receiver … channel … rate … does not divide source … rate …` | A channel rate that is not an integer divisor of a looping IQ source falls back to the legacy resampler with reduced alias rejection. | Choose a channel `sample_rate_hz` that divides the source rate. |
+
+The overdrive warning is the load-time counterpart of a subtle failure mode: a strong signal
+(or a high `snr_db` over a low noise floor) can silently resolve to a power above the full-scale
+reference and rail the ADC, whose hard clipping shows up only as a comb of evenly spaced ghost
+carriers on the waterfall — not as an obvious error.
