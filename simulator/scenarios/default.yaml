@@ -62,13 +62,19 @@ signals:
   center_frequency_hz: 465970000
   bandwidth_hz: 15000
   snr_db: 30.0
+  start_time_s: 0.0
+  repeat_interval_s: 414.72
 - signal_id: sig_pocsag_466075_02
   source_reference: pocsag_15k_capture
   center_frequency_hz: 466075000
   bandwidth_hz: 15000
   snr_db: 30.0
+  start_time_s: 138.24
+  repeat_interval_s: 414.72
 - signal_id: sig_pocsag_466075_03
   source_reference: pocsag_15k_capture
   center_frequency_hz: 466023000
   bandwidth_hz: 15000
   snr_db: 30.0
+  start_time_s: 276.48
+  repeat_interval_s: 414.72
