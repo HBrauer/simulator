@@ -480,6 +480,63 @@ static bool load_iq_buffer(const char *path, uint64_t sample_count, sim_output_f
     return true;
 }
 
+/* Load an interleaved cf32 IQ file (IEEE-754 float, +-1.0 full scale) and convert it to the
+ * internal ci16 mixer format: scale by 2^15 and saturate, the exact inverse of the cf32 output
+ * path (store_output_sample divides the int16-scale bus by 32768). Unlike load_iq_buffer this
+ * always materialises the converted buffer -- a cf32 file cannot be mmapped as ci16 -- so it
+ * budgets the ci16 (4 B/sample) size and fails if loading it would exceed the cache limit. */
+static bool load_iq_buffer_cf32_to_ci16(const char *path, uint64_t sample_count, size_t max_bytes, size_t *total_bytes, cached_iq_buffer_t *out, char *error, size_t error_size)
+{
+    memset(out, 0, sizeof(*out));
+    out->sample_count = sample_count;
+    out->format = SIM_OUTPUT_FORMAT_CI16;
+    if (sample_count > SIZE_MAX / sizeof(iq_ci16_t)) {
+        snprintf(error, error_size, "asset_cache_too_large");
+        return false;
+    }
+    const size_t bytes = (size_t)sample_count * sizeof(iq_ci16_t);
+    if (max_bytes > 0 && (bytes > max_bytes || *total_bytes > max_bytes - bytes)) {
+        snprintf(error, error_size, "asset_cache_limit_exceeded");
+        return false;
+    }
+    iq_ci16_t *dst = calloc((size_t)sample_count, sizeof(iq_ci16_t));
+    if (dst == NULL) {
+        snprintf(error, error_size, "asset_cache_alloc_failed");
+        return false;
+    }
+    FILE *file = fopen(path, "rb");
+    if (file == NULL) {
+        free(dst);
+        snprintf(error, error_size, "asset_not_found:%s", strerror(errno));
+        return false;
+    }
+    iq_cf32_t scratch[4096];
+    uint64_t done = 0;
+    bool ok = true;
+    while (done < sample_count) {
+        const uint64_t remaining = sample_count - done;
+        const size_t wanted = remaining < 4096U ? (size_t)remaining : 4096U;
+        if (fread(scratch, sizeof(iq_cf32_t), wanted, file) != wanted) {
+            ok = false;
+            break;
+        }
+        for (size_t k = 0; k < wanted; k++) {
+            dst[done + k].i = prerender_clip_i16((double)scratch[k].i * 32768.0);
+            dst[done + k].q = prerender_clip_i16((double)scratch[k].q * 32768.0);
+        }
+        done += wanted;
+    }
+    fclose(file);
+    if (!ok) {
+        free(dst);
+        snprintf(error, error_size, "asset_cache_read_failed");
+        return false;
+    }
+    *total_bytes += bytes;
+    out->samples = dst;
+    return true;
+}
+
 bool asset_cache_load_limited(asset_cache_t *cache, const scenario_t *scenario, size_t max_bytes, size_t batch_samples, const prerender_params_t *prerender, char *error, size_t error_size)
 {
     memset(cache, 0, sizeof(*cache));
@@ -560,9 +617,14 @@ bool asset_cache_load_limited(asset_cache_t *cache, const scenario_t *scenario, 
                 return false;
             }
         } else {
-            /* General mixer source: always CI16; the float mix bus consumes it as int16. */
+            /* General mixer source: stored as CI16 (the float mix bus consumes it as int16). A
+             * ci16 file loads verbatim (and may mmap when over budget); a cf32 file is scaled and
+             * saturated to ci16 at load. */
             cached_iq_buffer_t buf;
-            if (!load_iq_buffer(source->file, source->sample_count, SIM_OUTPUT_FORMAT_CI16, max_bytes, &total_bytes, batch_samples, &buf, error, error_size)) {
+            const bool loaded = strcmp(source->format, "cf32") == 0
+                ? load_iq_buffer_cf32_to_ci16(source->file, source->sample_count, max_bytes, &total_bytes, &buf, error, error_size)
+                : load_iq_buffer(source->file, source->sample_count, SIM_OUTPUT_FORMAT_CI16, max_bytes, &total_bytes, batch_samples, &buf, error, error_size);
+            if (!loaded) {
                 asset_cache_free(cache);
                 return false;
             }

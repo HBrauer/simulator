@@ -71,7 +71,7 @@ At-a-glance tables for every parameter. The sections that follow explain the beh
 | `id` | string | Required, unique. |
 | `source_type` | `iq_file` \| `audio_file` | Required. |
 | `file` | string (path) | Required (unless `passthrough_variants` is given). |
-| `format` | `ci16` (IQ) \| `wav` (audio) | Required. |
+| `format` | `ci16` \| `cf32` (IQ) \| `wav` (audio) | Required. `cf32` is interleaved little-endian `float32` (±1.0 full scale), converted to ci16 at load. |
 | `byte_order` | `little_endian` | IQ only. |
 | `iq_layout` | `interleaved_iq` | IQ only. |
 | `sample_rate_hz` | integer (Hz) | Required. Source sample rate. |

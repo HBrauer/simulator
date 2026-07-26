@@ -108,7 +108,7 @@ Source fields:
 | `id` | string | yes | Unique source ID. |
 | `source_type` | string | yes | `iq_file` or `audio_file`. |
 | `file` | string | yes¹ | Path to the IQ or audio asset. |
-| `format` | string | yes | For a mixer IQ source: `ci16`. For a `passthrough_variants` source: `ci16`, `ci24`, or `cf32` — the on-wire format the capture is replayed verbatim into; the renderer only replays it on a channel whose `output_format` matches (else that channel goes silent). `ci24` files are interleaved little-endian `int32` holding a 24-bit value; `cf32` files are interleaved little-endian `float32`. For audio files: `wav`. |
+| `format` | string | yes | For a mixer IQ source: `ci16` (interleaved little-endian `int16`) or `cf32` (interleaved little-endian `float32`, ±1.0 full scale). Both feed the internal ci16 mixer — a `cf32` file is scaled by 2¹⁵ and saturated to ci16 at load, so it is quantised to 16 bits on ingest. For a `passthrough_variants` source: `ci16`, `ci24`, or `cf32` — the on-wire format the capture is replayed verbatim into; the renderer only replays it on a channel whose `output_format` matches (else that channel goes silent). `ci24` files are interleaved little-endian `int32` holding a 24-bit value; `cf32` files are interleaved little-endian `float32`. For audio files: `wav`. |
 | `byte_order` | string | IQ only | Currently `little_endian`. |
 | `iq_layout` | string | IQ only | Currently `interleaved_iq`. |
 | `sample_rate_hz` | integer | yes¹ | Source sample rate. |

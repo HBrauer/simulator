@@ -4,8 +4,10 @@
 
 #include <check.h>
 #include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 START_TEST(loads_scenario_assets_into_memory)
 {
@@ -300,10 +302,85 @@ START_TEST(rejects_prerender_memory_limit)
 }
 END_TEST
 
+/* A cf32 IQ source is accepted (in addition to ci16) and converted to the internal ci16 mixer
+ * format at load: floats are scaled by 2^15 and saturated, the inverse of the cf32 output path. */
+START_TEST(loads_cf32_iq_source_converted_to_ci16)
+{
+    char iq_path[] = "/tmp/sdr_cf32_iqXXXXXX";
+    char yaml_path[] = "/tmp/sdr_cf32_ymlXXXXXX";
+    const int iq_fd = mkstemp(iq_path);
+    const int yaml_fd = mkstemp(yaml_path);
+    ck_assert_int_ge(iq_fd, 0);
+    ck_assert_int_ge(yaml_fd, 0);
+
+    /* Interleaved I/Q floats, chosen to hit full-scale saturation, exact mid-scale, and zero. */
+    const float samples[] = {
+        1.0f,  -1.0f,   /* +1.0 -> 32767 (saturates), -1.0 -> -32768 */
+        0.5f,  -0.5f,   /* +/-16384 */
+        0.0f,   0.25f,  /* 0, 8192 */
+        -0.75f, 1.0f,   /* -24576, 32767 */
+    };
+    ck_assert_int_eq((int)write(iq_fd, samples, sizeof(samples)), (int)sizeof(samples));
+    close(iq_fd);
+
+    char yaml[1024];
+    const int n = snprintf(yaml, sizeof(yaml),
+        "schema_version: 1\n"
+        "scenario_id: cf32_test\n"
+        "sources:\n"
+        "- id: cf32_src\n"
+        "  source_type: iq_file\n"
+        "  file: %s\n"
+        "  format: cf32\n"
+        "  byte_order: little_endian\n"
+        "  iq_layout: interleaved_iq\n"
+        "  sample_rate_hz: 8000\n"
+        "  bandwidth_hz: 4000\n"
+        "  center_frequency_hz: 0\n"
+        "  nominal_level_dbfs: -10.0\n"
+        "signals:\n"
+        "- signal_id: sig_cf32\n"
+        "  source_reference: cf32_src\n"
+        "  center_frequency_hz: 100000000\n"
+        "  bandwidth_hz: 4000\n"
+        "  power_dbm: -50.0\n"
+        "  start_time_s: 0.0\n"
+        "  repeat_interval_s: 1.0\n",
+        iq_path);
+    ck_assert_int_eq((int)write(yaml_fd, yaml, (size_t)n), n);
+    close(yaml_fd);
+
+    scenario_t scenario;
+    asset_cache_t cache;
+    char error[128];
+    ck_assert_msg(scenario_load(yaml_path, &scenario, error, sizeof(error)), "%s", error);
+    ck_assert_msg(scenario_validate(&scenario, "/", error, sizeof(error)), "%s", error);
+    ck_assert_uint_eq(scenario.sources[0].sample_count, 4);
+    ck_assert_msg(asset_cache_load(&cache, &scenario, error, sizeof(error)), "%s", error);
+
+    const cached_asset_t *asset = asset_cache_find(&cache, "cf32_src");
+    ck_assert_ptr_nonnull(asset);
+    ck_assert_uint_eq(asset->sample_count, 4);
+    ck_assert_int_eq(asset->samples[0].i, 32767);
+    ck_assert_int_eq(asset->samples[0].q, -32768);
+    ck_assert_int_eq(asset->samples[1].i, 16384);
+    ck_assert_int_eq(asset->samples[1].q, -16384);
+    ck_assert_int_eq(asset->samples[2].i, 0);
+    ck_assert_int_eq(asset->samples[2].q, 8192);
+    ck_assert_int_eq(asset->samples[3].i, -24576);
+    ck_assert_int_eq(asset->samples[3].q, 32767);
+
+    asset_cache_free(&cache);
+    unlink(iq_path);
+    unlink(yaml_path);
+}
+END_TEST
+
 Suite *asset_cache_suite(void)
 {
     Suite *suite = suite_create("asset_cache");
     TCase *tc = tcase_create("core");
+    tcase_add_test(tc, loads_cf32_iq_source_converted_to_ci16);
     tcase_add_test(tc, loads_scenario_assets_into_memory);
     tcase_add_test(tc, loads_assets_in_small_batches);
     tcase_add_test(tc, mmaps_iq_asset_over_memory_limit);

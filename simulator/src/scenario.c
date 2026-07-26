@@ -441,17 +441,42 @@ bool scenario_validate(scenario_t *scenario, const char *base_dir, char *error, 
         }
         resolve_asset_path(source->file, sizeof(source->file), base_dir);
         if (source->source_kind == SCENARIO_SOURCE_IQ_FILE) {
-            if (strcmp(source->format, "ci16") != 0 || strcmp(source->byte_order, "little_endian") != 0 ||
+            /* Two on-disk IQ formats are accepted: ci16 (16-bit signed, 4 B/sample) and cf32
+             * (IEEE-754 float, +-1.0 full scale, 8 B/sample). Both feed the ci16 mixer -- cf32
+             * is converted at load (asset_cache.c) -- so wider formats need no DSP changes. */
+            const bool is_ci16 = strcmp(source->format, "ci16") == 0;
+            const bool is_cf32 = strcmp(source->format, "cf32") == 0;
+            if ((!is_ci16 && !is_cf32) || strcmp(source->byte_order, "little_endian") != 0 ||
                 strcmp(source->iq_layout, "interleaved_iq") != 0) {
                 snprintf(error, error_size, "source_unsupported");
                 return false;
             }
-            iq_file_reader_t reader;
-            if (!iq_file_reader_open(&reader, source->file, error, error_size)) {
-                return false;
+            if (is_ci16) {
+                iq_file_reader_t reader;
+                if (!iq_file_reader_open(&reader, source->file, error, error_size)) {
+                    return false;
+                }
+                source->sample_count = reader.sample_count;
+                iq_file_reader_close(&reader);
+            } else {
+                /* cf32: only the sample count is needed here (the file size over the 8-byte
+                 * element); the samples themselves are read and converted at load time. */
+                FILE *f = fopen(source->file, "rb");
+                if (f == NULL || fseeko(f, 0, SEEK_END) != 0) {
+                    if (f != NULL) {
+                        fclose(f);
+                    }
+                    snprintf(error, error_size, "asset_not_found");
+                    return false;
+                }
+                const off_t bytes = ftello(f);
+                fclose(f);
+                if (bytes < 0 || (uint64_t)bytes % sizeof(iq_cf32_t) != 0) {
+                    snprintf(error, error_size, "asset_invalid_size");
+                    return false;
+                }
+                source->sample_count = (uint64_t)bytes / sizeof(iq_cf32_t);
             }
-            source->sample_count = reader.sample_count;
-            iq_file_reader_close(&reader);
         } else if (source->source_kind == SCENARIO_SOURCE_AUDIO_FILE) {
             if (strcmp(source->format, "wav") != 0) {
                 snprintf(error, error_size, "source_unsupported");

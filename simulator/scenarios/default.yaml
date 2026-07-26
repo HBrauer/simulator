@@ -3,7 +3,7 @@ scenario_id: default
 description: 'Passthrough replay: a channel dedicated to streaming a recorded capture verbatim, one file per bandwidth (1 MHz / 20 MHz / 80 MHz). passthrough:true bypasses the mixer (no float bus, noise floor, or other signals) and streams the variant matching the channel''s current sample rate straight into VITA-49 packets. Retune the channel bandwidth via REST and it selects the matching file; at 80 MHz it streams the 98.304 MS/s capture with no resampling. A bandwidth with no matching variant renders silence -- passthrough never resamples. The tone sits at +20 MHz within the captured band so it is visible on a waterfall.'
 noise_floor:
   enabled: true
-  power_dbm_per_hz: -120.0
+  power_dbm_per_hz: -140.0
   seed: 49152
 sources:
 - id: capture_wideband
@@ -33,8 +33,8 @@ sources:
   nominal_level_dbfs: -10.0
 - id: pocsag_15k_capture
   source_type: iq_file
-  file: simulator/assets/pocsag_15000hz_32ksps.c16
-  format: ci16
+  file: simulator/assets/pocsag_466075_32ksps.cf32
+  format: cf32
   byte_order: little_endian
   iq_layout: interleaved_iq
   sample_rate_hz: 32000
@@ -57,24 +57,21 @@ signals:
   bandwidth_hz: 1000000
   start_time_s: 0.0
   repeat_interval_s: 5.0
-- signal_id: sig_pocsag_466075_01
-  source_reference: pocsag_15k_capture
-  center_frequency_hz: 465970000
-  bandwidth_hz: 15000
-  snr_db: 30.0
-  start_time_s: 0.0
-  repeat_interval_s: 414.72
+#- signal_id: sig_pocsag_466075_01
+#  source_reference: pocsag_15k_capture
+#  center_frequency_hz: 465970000
+#  snr_db: 20.0
+#  start_time_s: 0.0
+#  repeat_interval_s: 33
 - signal_id: sig_pocsag_466075_02
   source_reference: pocsag_15k_capture
   center_frequency_hz: 466075000
-  bandwidth_hz: 15000
-  snr_db: 30.0
-  start_time_s: 138.24
-  repeat_interval_s: 414.72
-- signal_id: sig_pocsag_466075_03
-  source_reference: pocsag_15k_capture
-  center_frequency_hz: 466023000
-  bandwidth_hz: 15000
-  snr_db: 30.0
-  start_time_s: 276.48
-  repeat_interval_s: 414.72
+  snr_db: 40
+  start_time_s: 0
+  repeat_interval_s: 33
+#- signal_id: sig_pocsag_466075_03
+#  source_reference: pocsag_15k_capture
+#  center_frequency_hz: 466023000
+#  snr_db: 20.0
+#  start_time_s: 60
+#  repeat_interval_s: 90
