@@ -258,23 +258,13 @@ static uint32_t prerender_rate_hz(const scenario_signal_t *signal, const scenari
     return (uint32_t)rate;
 }
 
-static int16_t prerender_clip_i16(double value)
-{
-    const double rounded = round(value);
-    if (rounded > 32767.0) {
-        return 32767;
-    }
-    if (rounded < -32768.0) {
-        return -32768;
-    }
-    return (int16_t)rounded;
-}
-
 /* Synthesise the complex baseband for one signal into `buffer` (pr_count samples) and return the
  * peak-normalisation gain to fold back into source_gain. FM is constant-modulus (peak exactly 1,
  * scale exactly 32767); AM/SSB scan for the data-dependent peak. A silent asset keeps gain 1.0 and
- * renders as zeros (no divide-by-zero). Shared by the load-time engine and the test entry point. */
-static double prerender_fill_buffer(const cached_asset_t *asset, const scenario_signal_t *signal, double audio_rate, uint32_t rate, uint64_t pr_count, iq_ci16_t *buffer)
+ * renders as zeros (no divide-by-zero). Shared by the load-time engine and the test entry point.
+ * The int16-scale samples are stored as float (iq_src_t) without rounding -- the pre-render keeps
+ * its full synthesised precision rather than being quantised. */
+static double prerender_fill_buffer(const cached_asset_t *asset, const scenario_signal_t *signal, double audio_rate, uint32_t rate, uint64_t pr_count, iq_src_t *buffer)
 {
     double peak = 0.0;
     if (signal->modulation == SCENARIO_MODULATION_WBFM) {
@@ -301,8 +291,8 @@ static double prerender_fill_buffer(const cached_asset_t *asset, const scenario_
         double bi = 0.0;
         double bq = 0.0;
         prerender_base_sample(asset, signal, audio_rate, position, &bi, &bq);
-        buffer[i].i = prerender_clip_i16(bi * scale);
-        buffer[i].q = prerender_clip_i16(bq * scale);
+        buffer[i].i = (float)(bi * scale);
+        buffer[i].q = (float)(bq * scale);
     }
     return peak > 1e-12 ? peak : 1.0;
 }
@@ -339,14 +329,14 @@ static bool prerender_signals(asset_cache_t *cache, const scenario_t *scenario, 
         const double audio_rate = (double)source->sample_rate_hz;
         const uint64_t pr_count = (uint64_t)llround((double)synth_asset->sample_count * (double)rate / audio_rate);
 
-        if (pr_count > SIZE_MAX / sizeof(iq_ci16_t)) {
+        if (pr_count > SIZE_MAX / sizeof(iq_src_t)) {
             if (synth_asset == &conditioned) {
                 free_conditioned_asset(&conditioned);
             }
             snprintf(error, error_size, "asset_cache_too_large");
             return false;
         }
-        const size_t pr_bytes = (size_t)pr_count * sizeof(iq_ci16_t);
+        const size_t pr_bytes = (size_t)pr_count * sizeof(iq_src_t);
         if (max_bytes > 0 && (pr_bytes > max_bytes || *total_bytes > max_bytes - pr_bytes)) {
             if (synth_asset == &conditioned) {
                 free_conditioned_asset(&conditioned);
@@ -356,7 +346,7 @@ static bool prerender_signals(asset_cache_t *cache, const scenario_t *scenario, 
         }
         *total_bytes += pr_bytes;
 
-        iq_ci16_t *buffer = NULL;
+        iq_src_t *buffer = NULL;
         if (pr_count > 0) {
             buffer = calloc((size_t)pr_count, sizeof(*buffer));
             if (buffer == NULL) {
@@ -480,27 +470,27 @@ static bool load_iq_buffer(const char *path, uint64_t sample_count, sim_output_f
     return true;
 }
 
-/* Load an interleaved cf32 IQ file (IEEE-754 float, +-1.0 full scale) and convert it to the
- * internal ci16 mixer format: scale by 2^15 and saturate, the exact inverse of the cf32 output
- * path (store_output_sample divides the int16-scale bus by 32768). Unlike load_iq_buffer this
- * always materialises the converted buffer -- a cf32 file cannot be mmapped as ci16 -- so it
- * budgets the ci16 (4 B/sample) size and fails if loading it would exceed the cache limit. */
-static bool load_iq_buffer_cf32_to_ci16(const char *path, uint64_t sample_count, size_t max_bytes, size_t *total_bytes, cached_iq_buffer_t *out, char *error, size_t error_size)
+/* Load an interleaved IQ file (ci16 or cf32 on disk) into the internal int16-scale float mixer
+ * format (iq_src_t). A ci16 file widens each component exactly ((float)n); a cf32 file scales by
+ * 2^15 (the inverse of the cf32 output path, which divides the int16-scale bus by 32768) with no
+ * rounding or saturation, so a float source keeps full precision -- overrange and sub-LSB content
+ * that the former ci16 storage clipped/zeroed now survive. Always materialises a heap buffer (the
+ * widened float cannot alias the on-disk layout, so no mmap), budgeting the iq_src_t (8 B/sample)
+ * size and failing if it would exceed the cache limit. */
+static bool load_iq_source_float(const char *path, uint64_t sample_count, bool is_cf32, size_t max_bytes, size_t *total_bytes, iq_src_t **out_samples, char *error, size_t error_size)
 {
-    memset(out, 0, sizeof(*out));
-    out->sample_count = sample_count;
-    out->format = SIM_OUTPUT_FORMAT_CI16;
-    if (sample_count > SIZE_MAX / sizeof(iq_ci16_t)) {
+    *out_samples = NULL;
+    if (sample_count > SIZE_MAX / sizeof(iq_src_t)) {
         snprintf(error, error_size, "asset_cache_too_large");
         return false;
     }
-    const size_t bytes = (size_t)sample_count * sizeof(iq_ci16_t);
+    const size_t bytes = (size_t)sample_count * sizeof(iq_src_t);
     if (max_bytes > 0 && (bytes > max_bytes || *total_bytes > max_bytes - bytes)) {
         snprintf(error, error_size, "asset_cache_limit_exceeded");
         return false;
     }
-    iq_ci16_t *dst = calloc((size_t)sample_count, sizeof(iq_ci16_t));
-    if (dst == NULL) {
+    iq_src_t *dst = calloc((size_t)sample_count, sizeof(iq_src_t));
+    if (dst == NULL && sample_count > 0) {
         snprintf(error, error_size, "asset_cache_alloc_failed");
         return false;
     }
@@ -510,21 +500,38 @@ static bool load_iq_buffer_cf32_to_ci16(const char *path, uint64_t sample_count,
         snprintf(error, error_size, "asset_not_found:%s", strerror(errno));
         return false;
     }
-    iq_cf32_t scratch[4096];
-    uint64_t done = 0;
     bool ok = true;
-    while (done < sample_count) {
-        const uint64_t remaining = sample_count - done;
-        const size_t wanted = remaining < 4096U ? (size_t)remaining : 4096U;
-        if (fread(scratch, sizeof(iq_cf32_t), wanted, file) != wanted) {
-            ok = false;
-            break;
+    uint64_t done = 0;
+    if (is_cf32) {
+        iq_cf32_t scratch[4096];
+        while (done < sample_count) {
+            const uint64_t remaining = sample_count - done;
+            const size_t wanted = remaining < 4096U ? (size_t)remaining : 4096U;
+            if (fread(scratch, sizeof(iq_cf32_t), wanted, file) != wanted) {
+                ok = false;
+                break;
+            }
+            for (size_t k = 0; k < wanted; k++) {
+                dst[done + k].i = scratch[k].i * 32768.0f;
+                dst[done + k].q = scratch[k].q * 32768.0f;
+            }
+            done += wanted;
         }
-        for (size_t k = 0; k < wanted; k++) {
-            dst[done + k].i = prerender_clip_i16((double)scratch[k].i * 32768.0);
-            dst[done + k].q = prerender_clip_i16((double)scratch[k].q * 32768.0);
+    } else {
+        iq_ci16_t scratch[4096];
+        while (done < sample_count) {
+            const uint64_t remaining = sample_count - done;
+            const size_t wanted = remaining < 4096U ? (size_t)remaining : 4096U;
+            if (fread(scratch, sizeof(iq_ci16_t), wanted, file) != wanted) {
+                ok = false;
+                break;
+            }
+            for (size_t k = 0; k < wanted; k++) {
+                dst[done + k].i = (float)scratch[k].i;
+                dst[done + k].q = (float)scratch[k].q;
+            }
+            done += wanted;
         }
-        done += wanted;
     }
     fclose(file);
     if (!ok) {
@@ -533,7 +540,7 @@ static bool load_iq_buffer_cf32_to_ci16(const char *path, uint64_t sample_count,
         return false;
     }
     *total_bytes += bytes;
-    out->samples = dst;
+    *out_samples = dst;
     return true;
 }
 
@@ -617,20 +624,16 @@ bool asset_cache_load_limited(asset_cache_t *cache, const scenario_t *scenario, 
                 return false;
             }
         } else {
-            /* General mixer source: stored as CI16 (the float mix bus consumes it as int16). A
-             * ci16 file loads verbatim (and may mmap when over budget); a cf32 file is scaled and
-             * saturated to ci16 at load. */
-            cached_iq_buffer_t buf;
-            const bool loaded = strcmp(source->format, "cf32") == 0
-                ? load_iq_buffer_cf32_to_ci16(source->file, source->sample_count, max_bytes, &total_bytes, &buf, error, error_size)
-                : load_iq_buffer(source->file, source->sample_count, SIM_OUTPUT_FORMAT_CI16, max_bytes, &total_bytes, batch_samples, &buf, error, error_size);
-            if (!loaded) {
+            /* General mixer source: widened at load into int16-scale float (iq_src_t), so a cf32
+             * file keeps full precision instead of being quantised to ci16. A ci16 file widens
+             * exactly. Always heap (no mmap for the widened buffer), 8 B/sample against the budget. */
+            const bool is_cf32 = strcmp(source->format, "cf32") == 0;
+            if (!load_iq_source_float(source->file, source->sample_count, is_cf32, max_bytes, &total_bytes, &asset->samples, error, error_size)) {
                 asset_cache_free(cache);
                 return false;
             }
-            asset->samples = buf.samples;
-            asset->mmapped = buf.mmapped;
-            asset->map_bytes = buf.map_bytes;
+            asset->mmapped = false;
+            asset->map_bytes = 0;
         }
     }
 
@@ -749,7 +752,7 @@ bool asset_cache_prerender_from_audio(cached_prerender_t *out, const float *audi
 
     const uint32_t rate = prerender_rate_hz(signal, &source, params);
     const uint64_t pr_count = asset.sample_count > 0 ? (uint64_t)llround((double)asset.sample_count * (double)rate / (double)audio_rate_hz) : 0;
-    iq_ci16_t *buffer = NULL;
+    iq_src_t *buffer = NULL;
     if (pr_count > 0) {
         buffer = calloc((size_t)pr_count, sizeof(*buffer));
         if (buffer == NULL) {

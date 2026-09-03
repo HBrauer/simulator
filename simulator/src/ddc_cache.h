@@ -25,9 +25,10 @@
  * Entry content is a pure function of (source samples, applied shift, intermediate rate,
  * front plan), so instances stay byte-identical no matter when entries get (re)built. */
 
-/* Entries store samples at half scale (a rotated ci16 component can reach sqrt(2) * 32767,
- * and the front filter adds ~dB of overshoot); consumers double their gain to compensate --
- * the same convention as the renderer's mix-first rotation scratch. */
+/* Entries store samples at half scale (a rotated component can reach sqrt(2) * full-scale, and
+ * the front filter adds ~dB of overshoot); consumers double their gain to compensate -- the same
+ * convention as the renderer's mix-first rotation scratch. Storage is int16-scale float
+ * (iq_src_t), so a float source's precision survives the intermediate. */
 #define DDC_CACHE_SAMPLE_SCALE 0.5
 
 typedef struct ddc_cache_entry {
@@ -36,7 +37,7 @@ typedef struct ddc_cache_entry {
     uint32_t intermediate_rate_hz;
     double applied_shift_hz;       /* == shift_cycles * source_rate / loop_samples */
     uint64_t sample_count;         /* one seamless loop at the intermediate rate */
-    iq_ci16_t *samples;
+    iq_src_t *samples;             /* int16-scale float at half scale (DDC_CACHE_SAMPLE_SCALE) */
     /* internal (guarded by the cache lock) */
     bool ready;
     uint32_t refcount;
@@ -69,7 +70,7 @@ void ddc_cache_set_build_threads(unsigned threads);
  * valid until the cache is destroyed (ddc_cache_destroy drains in-flight builds). */
 const ddc_cache_entry_t *ddc_cache_acquire(ddc_cache_t *cache,
                                            const char *source_id,
-                                           const iq_ci16_t *source_samples,
+                                           const iq_src_t *source_samples,
                                            uint64_t source_sample_count,
                                            uint32_t source_rate_hz,
                                            double shift_hz,

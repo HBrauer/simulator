@@ -21,8 +21,8 @@ typedef struct {
     char source_id[SIM_MAX_ID];
     scenario_source_kind_t source_kind;
     uint64_t sample_count;
-    iq_ci16_t *samples;
-    bool mmapped;     /* samples points into a read-only file mapping, not the heap */
+    iq_src_t *samples; /* int16-scale complex float; always heap (widened at load, never mmapped) */
+    bool mmapped;     /* vestigial for the general source (always false now); see cached_iq_buffer_t */
     size_t map_bytes; /* mapping length for munmap when mmapped */
     float *audio_samples;
     float *audio_hilbert;
@@ -35,14 +35,14 @@ typedef struct {
 } cached_asset_t;
 
 /* Complex-baseband IQ pre-rendered once at load for a signal that references an audio source.
- * Keyed per signal (modulation, deviation, depth are per-signal). Stored as ci16 with peak
- * normalisation; `gain` folds the recorded peak back into the renderer's source_gain so the
+ * Keyed per signal (modulation, deviation, depth are per-signal). Stored as int16-scale float
+ * (iq_src_t) with peak normalisation; `gain` folds the recorded peak back into source_gain so the
  * output amplitude is calibrated exactly as the direct full-rate synthesis would produce. */
 typedef struct {
     bool valid;
     uint32_t sample_rate_hz;
     uint64_t sample_count;
-    iq_ci16_t *samples;
+    iq_src_t *samples;
     double gain;
 } cached_prerender_t;
 

@@ -40,7 +40,7 @@ static double test_hann(double distance)
     return 0.5 + 0.5 * cos(M_PI * normalized);
 }
 
-static int16_t sinc_scaled_i16(const iq_ci16_t *samples, size_t sample_count, double source_position, bool q, double gain)
+static int16_t sinc_scaled_i16(const iq_src_t *samples, size_t sample_count, double source_position, bool q, double gain)
 {
     const int64_t center = (int64_t)floor(source_position);
     double acc = 0.0;
@@ -184,7 +184,7 @@ static void render_audio_once(scenario_modulation_t mod, uint32_t audio_rate, co
     free(pr.samples);
 }
 
-static void setup_two_signal_mix(scenario_t *scenario, asset_cache_t *cache, iq_ci16_t *asset_a, iq_ci16_t *asset_b, int16_t a_i, int16_t a_q, int16_t b_i, int16_t b_q)
+static void setup_two_signal_mix(scenario_t *scenario, asset_cache_t *cache, iq_src_t *asset_a, iq_src_t *asset_b, int16_t a_i, int16_t a_q, int16_t b_i, int16_t b_q)
 {
     memset(scenario, 0, sizeof(*scenario));
     memset(cache, 0, sizeof(*cache));
@@ -195,13 +195,13 @@ static void setup_two_signal_mix(scenario_t *scenario, asset_cache_t *cache, iq_
     cache->asset_count = 2;
 
     const char *ids[] = {"src_a", "src_b"};
-    iq_ci16_t *assets[] = {asset_a, asset_b};
+    iq_src_t *assets[] = {asset_a, asset_b};
     const int16_t i_values[] = {a_i, b_i};
     const int16_t q_values[] = {a_q, b_q};
 
     for (size_t index = 0; index < 2; index++) {
         for (size_t sample = 0; sample < 8; sample++) {
-            assets[index][sample] = (iq_ci16_t){.i = i_values[index], .q = q_values[index]};
+            assets[index][sample] = (iq_src_t){.i = i_values[index], .q = q_values[index]};
         }
 
         scenario_source_t *source = &scenario->sources[index];
@@ -236,7 +236,7 @@ static receiver_config_t fixed_center_receiver(void)
     return window_receiver(9960000000ULL, 10040000000ULL, SIM_RECEIVER_BANDWIDTH_HZ, SIM_RECEIVER_SAMPLE_RATE_HZ, 0.0, 1.0, -40.0);
 }
 
-static void setup_constant_signal(scenario_t *scenario, asset_cache_t *cache, iq_ci16_t *asset_samples, uint64_t signal_center_hz)
+static void setup_constant_signal(scenario_t *scenario, asset_cache_t *cache, iq_src_t *asset_samples, uint64_t signal_center_hz)
 {
     memset(scenario, 0, sizeof(*scenario));
     memset(cache, 0, sizeof(*cache));
@@ -245,7 +245,7 @@ static void setup_constant_signal(scenario_t *scenario, asset_cache_t *cache, iq
     scenario->source_count = 1;
     scenario->signal_count = 1;
     for (size_t sample = 0; sample < 8; sample++) {
-        asset_samples[sample] = (iq_ci16_t){.i = 1000, .q = 0};
+        asset_samples[sample] = (iq_src_t){.i = 1000, .q = 0};
     }
 
     scenario_source_t *source = &scenario->sources[0];
@@ -341,7 +341,7 @@ START_TEST(renderer_low_rate_upsample_uses_linear_path)
 {
     scenario_t scenario;
     asset_cache_t cache;
-    iq_ci16_t asset_samples[4] = {
+    iq_src_t asset_samples[4] = {
         {.i = 0, .q = 1600},
         {.i = 1600, .q = 0},
         {.i = 3200, .q = -1600},
@@ -384,8 +384,8 @@ START_TEST(renderer_low_rate_upsample_uses_linear_path)
     ck_assert_uint_eq(stats.active_signals, 1);
     for (size_t i = 0; i < 16; i++) {
         const double fraction = (double)i / 16.0;
-        ck_assert_int_eq(out[i].i, interpolate_scaled_i16(asset_samples[0].i, asset_samples[1].i, fraction, 1.0));
-        ck_assert_int_eq(out[i].q, interpolate_scaled_i16(asset_samples[0].q, asset_samples[1].q, fraction, 1.0));
+        ck_assert_int_eq(out[i].i, interpolate_scaled_i16((int16_t)asset_samples[0].i, (int16_t)asset_samples[1].i, fraction, 1.0));
+        ck_assert_int_eq(out[i].q, interpolate_scaled_i16((int16_t)asset_samples[0].q, (int16_t)asset_samples[1].q, fraction, 1.0));
     }
 }
 END_TEST
@@ -424,8 +424,8 @@ START_TEST(renderer_mixes_two_signals_without_clipping)
 {
     scenario_t scenario;
     asset_cache_t cache;
-    iq_ci16_t asset_a[8];
-    iq_ci16_t asset_b[8];
+    iq_src_t asset_a[8];
+    iq_src_t asset_b[8];
     setup_two_signal_mix(&scenario, &cache, asset_a, asset_b, 1000, 100, 2000, -400);
 
     const receiver_config_t receiver = fixed_center_receiver();
@@ -446,8 +446,8 @@ START_TEST(renderer_clips_after_mixing_two_signals)
 {
     scenario_t scenario;
     asset_cache_t cache;
-    iq_ci16_t asset_a[8];
-    iq_ci16_t asset_b[8];
+    iq_src_t asset_a[8];
+    iq_src_t asset_b[8];
     setup_two_signal_mix(&scenario, &cache, asset_a, asset_b, 30000, -30000, 30000, -30000);
 
     const receiver_config_t receiver = fixed_center_receiver();
@@ -479,12 +479,12 @@ START_TEST(renderer_mix_bus_clips_once_not_per_signal)
     scenario.source_count = 3;
     scenario.signal_count = 3;
     cache.asset_count = 3;
-    static iq_ci16_t assets[3][8];
+    static iq_src_t assets[3][8];
     const int16_t iv[3] = {25000, 25000, -20000};
     const int16_t qv[3] = {-25000, -25000, 20000};
     for (size_t n = 0; n < 3; n++) {
         for (size_t s = 0; s < 8; s++) {
-            assets[n][s] = (iq_ci16_t){.i = iv[n], .q = qv[n]};
+            assets[n][s] = (iq_src_t){.i = iv[n], .q = qv[n]};
         }
         scenario_source_t *src = &scenario.sources[n];
         snprintf(src->id, sizeof(src->id), "s%zu", n);
@@ -523,7 +523,7 @@ START_TEST(scanner_moves_fixed_rf_signal_through_baseband)
 {
     scenario_t scenario;
     asset_cache_t cache;
-    iq_ci16_t asset_samples[8];
+    iq_src_t asset_samples[8];
     setup_constant_signal(&scenario, &cache, asset_samples, 9980000000ULL);
 
     const receiver_config_t receiver = scanner_receiver();
@@ -555,7 +555,7 @@ START_TEST(scanner_same_time_is_deterministic_across_instances)
 {
     scenario_t scenario;
     asset_cache_t cache;
-    iq_ci16_t asset_samples[8];
+    iq_src_t asset_samples[8];
     setup_constant_signal(&scenario, &cache, asset_samples, 9980000000ULL);
 
     receiver_config_t receiver_a = scanner_receiver();
@@ -901,7 +901,7 @@ START_TEST(renderer_applies_window_passband_gain)
 {
     scenario_t scenario;
     asset_cache_t cache;
-    iq_ci16_t asset_samples[8];
+    iq_src_t asset_samples[8];
     setup_constant_signal(&scenario, &cache, asset_samples, 10000000000ULL);
     scenario.signals[0].bandwidth_hz = 2000000;
     scenario.sources[0].sample_rate_hz = SIM_RECEIVER_SAMPLE_RATE_HZ;
@@ -935,9 +935,9 @@ START_TEST(nco_phase_is_continuous_across_block_boundaries)
      * continue the phase of the first with no boundary jump: block1[j] == combined[64 + j]. */
     scenario_t scenario;
     asset_cache_t cache;
-    static iq_ci16_t asset_samples[256];
+    static iq_src_t asset_samples[256];
     for (size_t s = 0; s < 256; s++) {
-        asset_samples[s] = (iq_ci16_t){.i = 1000, .q = 0};
+        asset_samples[s] = (iq_src_t){.i = 1000, .q = 0};
     }
     setup_constant_signal(&scenario, &cache, asset_samples, 10000000000ULL);
     /* Longer constant source so the signal stays active across both blocks (same rate,
@@ -980,7 +980,7 @@ static double render_decimated_tone_power(double tone_cycles_per_source_sample)
      * and return the mean output power. A tone below the output Nyquist should pass; one above
      * it must be attenuated by the anti-alias kernel instead of folding back at full power. */
     enum { SRC = 2048, OUT = 256 };
-    static iq_ci16_t src[SRC];
+    static iq_src_t src[SRC];
     for (size_t n = 0; n < SRC; n++) {
         const double phase = 2.0 * M_PI * tone_cycles_per_source_sample * (double)n;
         src[n].i = (int16_t)lrint(10000.0 * cos(phase));
@@ -988,7 +988,7 @@ static double render_decimated_tone_power(double tone_cycles_per_source_sample)
     }
     scenario_t scenario;
     asset_cache_t cache;
-    iq_ci16_t dummy[8];
+    iq_src_t dummy[8];
     setup_constant_signal(&scenario, &cache, dummy, 10000000000ULL);
     scenario.sources[0].sample_rate_hz = 4000000;
     scenario.sources[0].sample_count = SRC;
@@ -1027,7 +1027,7 @@ START_TEST(renderer_skips_signal_beyond_output_nyquist)
      * Nyquist, so it must be skipped entirely rather than aliased into the band. */
     scenario_t scenario;
     asset_cache_t cache;
-    iq_ci16_t asset_samples[8];
+    iq_src_t asset_samples[8];
     setup_constant_signal(&scenario, &cache, asset_samples, 10010000000ULL);
     scenario.sources[0].sample_rate_hz = 2000000;
     scenario.signals[0].bandwidth_hz = 100000;
@@ -1306,7 +1306,7 @@ END_TEST
 
 /* One in-memory replay signal over a caller-filled asset. power_dbm == ref and scale 1, so the
  * end-to-end gain is exactly 1.0 and direct-path output reproduces the file samples verbatim. */
-static void setup_replay_signal(scenario_t *scenario, asset_cache_t *cache, iq_ci16_t *asset_samples, size_t n,
+static void setup_replay_signal(scenario_t *scenario, asset_cache_t *cache, iq_src_t *asset_samples, size_t n,
                                 uint32_t source_rate_hz, scenario_replay_mode_t mode, bool loop,
                                 uint64_t f0_hz, uint64_t range_start_hz, uint64_t range_stop_hz)
 {
@@ -1400,7 +1400,7 @@ static void setup_passthrough_signal(scenario_t *scenario, asset_cache_t *cache,
 
 /* Two loop-periodic tones around f0: one lands in the narrow channel, the other must fold
  * onto an in-band frequency and be rejected by the DDC cascade. */
-static void fill_two_tone_asset(iq_ci16_t *asset, size_t n, uint32_t rate_hz,
+static void fill_two_tone_asset(iq_src_t *asset, size_t n, uint32_t rate_hz,
                                 double tone_a_hz, double tone_b_hz, double amplitude)
 {
     for (size_t p = 0; p < n; p++) {
@@ -1418,7 +1418,7 @@ START_TEST(ddc_cascade_extracts_subband_from_wideband_loop)
      * the channel tuned +3 kHz off f0 must appear at exactly 2 kHz; a +200 kHz neighbor tone
      * (folding onto 5 kHz) must vanish. */
     enum { N = 8192, COUNT = 512 };
-    static iq_ci16_t asset[N];
+    static iq_src_t asset[N];
     fill_two_tone_asset(asset, N, 1024000U, 5000.0, 200000.0, 8000.0);
     scenario_t scenario;
     asset_cache_t cache;
@@ -1470,7 +1470,7 @@ START_TEST(ddc_direct_cascade_when_intermediate_not_available)
     /* Ratio 20 has no split with tail >= 16 and front >= 4, so the block runs the full
      * cascade from the source rate every time -- same extraction, no cache. */
     enum { N = 8192, COUNT = 512 };
-    static iq_ci16_t asset[N];
+    static iq_src_t asset[N];
     fill_two_tone_asset(asset, N, 320000U, 5000.0, 100000.0, 8000.0);
     scenario_t scenario;
     asset_cache_t cache;
@@ -1497,9 +1497,9 @@ START_TEST(replay_range_mode_follows_tune_and_loops)
      * path, so the output must reproduce the file bytes exactly -- including across the loop
      * seam inside one block. */
     enum { N = 1000, COUNT = 2048 };
-    static iq_ci16_t asset[N];
+    static iq_src_t asset[N];
     for (size_t i = 0; i < N; i++) {
-        asset[i] = (iq_ci16_t){.i = (int16_t)i, .q = (int16_t)(N - i)};
+        asset[i] = (iq_src_t){.i = (int16_t)i, .q = (int16_t)(N - i)};
     }
     scenario_t scenario;
     asset_cache_t cache;
@@ -1516,8 +1516,8 @@ START_TEST(replay_range_mode_follows_tune_and_loops)
     ck_assert_uint_eq(stats.active_signals, 1);
     for (size_t k = 0; k < COUNT; k++) {
         const size_t pos = (98304U + k) % N;
-        ck_assert_int_eq(low[k].i, asset[pos].i);
-        ck_assert_int_eq(low[k].q, asset[pos].q);
+        ck_assert_int_eq(low[k].i, (int)asset[pos].i);
+        ck_assert_int_eq(low[k].q, (int)asset[pos].q);
     }
 
     /* Anywhere else inside the range: bit-identical output. */
@@ -1538,9 +1538,9 @@ START_TEST(replay_shift_mode_pins_absolute_frequency)
     /* DC-only file nominally at 100 MHz. Tuned to 110 MHz the content must stay at 100 MHz
      * absolute, i.e. appear as a -10 MHz tone in the channel: s(t) * e^{j*2*pi*(f0-f_tune)*t}. */
     enum { N = 1000, COUNT = 4096 };
-    static iq_ci16_t asset[N];
+    static iq_src_t asset[N];
     for (size_t i = 0; i < N; i++) {
-        asset[i] = (iq_ci16_t){.i = 10000, .q = 0};
+        asset[i] = (iq_src_t){.i = 10000, .q = 0};
     }
     scenario_t scenario;
     asset_cache_t cache;
@@ -1575,9 +1575,9 @@ START_TEST(fixed_mode_with_loop_uses_epoch_position)
     /* loop=true on a fixed-placement signal: normal passband/offset machinery, but the
      * playback position comes from the continuous epoch grid instead of start/repeat. */
     enum { N = 500, COUNT = 1024 };
-    static iq_ci16_t asset[N];
+    static iq_src_t asset[N];
     for (size_t i = 0; i < N; i++) {
-        asset[i] = (iq_ci16_t){.i = (int16_t)(i + 1), .q = 0};
+        asset[i] = (iq_src_t){.i = (int16_t)(i + 1), .q = 0};
     }
     scenario_t scenario;
     asset_cache_t cache;
@@ -1594,7 +1594,7 @@ START_TEST(fixed_mode_with_loop_uses_epoch_position)
     ck_assert_uint_eq(stats.active_signals, 1);
     for (size_t k = 0; k < COUNT; k++) {
         const size_t pos = (98304U + k) % N;
-        ck_assert_int_eq(out[k].i, asset[pos].i);
+        ck_assert_int_eq(out[k].i, (int)asset[pos].i);
     }
 }
 END_TEST
@@ -1669,15 +1669,19 @@ START_TEST(passthrough_rotates_for_shift_without_mixer)
      * (same math, different code path), confirming passthrough doesn't silently change the
      * signal's placement. */
     enum { N = 2000, COUNT = 4096 };
-    static iq_ci16_t asset[N];
+    /* Same constant carried in two layouts: the passthrough variant streams the on-wire ci16
+     * buffer verbatim, while the general mixer replays the widened int16-scale float source. */
+    static iq_ci16_t asset_pt[N];
+    static iq_src_t asset_src[N];
     for (size_t i = 0; i < N; i++) {
-        asset[i] = (iq_ci16_t){.i = 10000, .q = 0};
+        asset_pt[i] = (iq_ci16_t){.i = 10000, .q = 0};
+        asset_src[i] = (iq_src_t){.i = 10000, .q = 0};
     }
     scenario_t scenario_fast, scenario_general;
     asset_cache_t cache_fast, cache_general;
     setup_passthrough_signal(&scenario_fast, &cache_fast, SCENARIO_REPLAY_SHIFT, 100000000ULL, 80000000ULL, 120000000ULL,
-                             asset, N, SIM_RECEIVER_SAMPLE_RATE_HZ, NULL, 0, 0);
-    setup_replay_signal(&scenario_general, &cache_general, asset, N, SIM_RECEIVER_SAMPLE_RATE_HZ,
+                             asset_pt, N, SIM_RECEIVER_SAMPLE_RATE_HZ, NULL, 0, 0);
+    setup_replay_signal(&scenario_general, &cache_general, asset_src, N, SIM_RECEIVER_SAMPLE_RATE_HZ,
                         SCENARIO_REPLAY_SHIFT, true, 100000000ULL, 80000000ULL, 120000000ULL);
 
     iq_ci16_t out_fast[COUNT];

@@ -17,7 +17,7 @@
 #define TEST_TONE_HZ 10000.0
 #define TEST_TONE_AMPLITUDE 16000.0
 
-static iq_ci16_t g_source[TEST_LOOP_SAMPLES];
+static iq_src_t g_source[TEST_LOOP_SAMPLES];
 static ddc_plan_t g_front_plan;
 
 static void fill_source_tone(void)
@@ -158,7 +158,7 @@ END_TEST
 START_TEST(lru_eviction_keeps_budget_and_rebuilds_on_demand)
 {
     fill_source_tone();
-    const size_t entry_bytes = (TEST_LOOP_SAMPLES / 8U) * sizeof(iq_ci16_t);
+    const size_t entry_bytes = (TEST_LOOP_SAMPLES / 8U) * sizeof(iq_src_t);
     ddc_cache_t *cache = ddc_cache_create(2U * entry_bytes);
 
     const ddc_cache_entry_t *entry_a = ddc_cache_acquire(
@@ -222,7 +222,7 @@ START_TEST(background_build_serves_later_acquires)
     ck_assert_ptr_nonnull(blocking_entry);
     ck_assert_uint_eq(entry->sample_count, blocking_entry->sample_count);
     ck_assert_int_eq(memcmp(entry->samples, blocking_entry->samples,
-                            (size_t)entry->sample_count * sizeof(iq_ci16_t)), 0);
+                            (size_t)entry->sample_count * sizeof(iq_src_t)), 0);
 
     ddc_cache_release(cache, entry);
     ddc_cache_release(blocking_cache, blocking_entry);
@@ -238,7 +238,7 @@ START_TEST(parallel_build_is_bit_identical_to_single_thread)
      * samples). Rotation anchors sit on an absolute chunk grid, so the slicing must not
      * change a single bit of the entry. */
     enum { LONG_LOOP = 524288 };
-    static iq_ci16_t source[LONG_LOOP];
+    static iq_src_t source[LONG_LOOP];
     for (size_t p = 0; p < LONG_LOOP; p++) {
         const double phase = 2.0 * M_PI * 10000.0 * (double)p / (double)TEST_SOURCE_RATE;
         source[p].i = (int16_t)lrint(TEST_TONE_AMPLITUDE * cos(phase));
@@ -262,7 +262,7 @@ START_TEST(parallel_build_is_bit_identical_to_single_thread)
 
     ck_assert_uint_eq(single_entry->sample_count, parallel_entry->sample_count);
     ck_assert_int_eq(memcmp(single_entry->samples, parallel_entry->samples,
-                            (size_t)single_entry->sample_count * sizeof(iq_ci16_t)), 0);
+                            (size_t)single_entry->sample_count * sizeof(iq_src_t)), 0);
 
     ddc_cache_release(single, single_entry);
     ddc_cache_release(parallel, parallel_entry);

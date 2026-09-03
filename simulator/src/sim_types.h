@@ -57,6 +57,18 @@ typedef struct {
     float q;
 } iq_cf32_t;
 
+/* Internal mixer source sample: complex float in *int16-scale* units (full-scale magnitude
+ * ~32768), the lossless widening of the former iq_ci16_t source storage. Cached IQ sources, the
+ * audio pre-renders, and the DDC intermediate are all carried in this type so a float (cf32)
+ * source keeps full precision -- the old ci16 storage quantised sub-LSB float content to zero and
+ * clipped overrange at load. A ci16 file widens exactly ((float)n); a cf32 file scales by 2^15
+ * with no rounding. Every downstream gain constant is unchanged because the scale is identical to
+ * the old int16 counts. Distinct from iq_cf32_t, which is the +-1.0 on-wire output format. */
+typedef struct {
+    float i;
+    float q;
+} iq_src_t;
+
 /* On-wire sample format of a channel's VITA 49.2 IF-data payload, which also selects the
  * channel's internal sample type. All formats are big-endian, processing-efficient, Complex
  * Cartesian per VITA 49.2 (see docs/vita49_udp.md).

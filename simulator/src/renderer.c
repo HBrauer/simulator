@@ -51,7 +51,7 @@
  * they smear across the channel as ghost carriers; those sources must take the polyphase path. */
 #define LINEAR_MIN_SOURCE_OVERSAMPLE 8U
 
-static void resample_ci16(const iq_ci16_t *samples, size_t sample_count, double source_position, double cutoff, double *out_i, double *out_q);
+static void resample_ci16(const iq_src_t *samples, size_t sample_count, double source_position, double cutoff, double *out_i, double *out_q);
 static void mix_accumulate_sample(float *bus, size_t index, double sample_i, double sample_q, double gain, double osc_c, double osc_s);
 
 /* Anti-alias cutoff (in cycles per source sample) for a given rate ratio. When decimating
@@ -172,7 +172,7 @@ static const resampler_table_t *resampler_table_for_cutoff(double cutoff)
  * of the buffer sum only the in-range taps and renormalise by their weight -- still transcendental
  * -free, which matters because a heavily-upsampled source (e.g. a 400 kHz pre-render into 98 MHz)
  * spends the first RADIUS/ratio output samples of every block in this edge region. */
-static void resample_table_ci16(const iq_ci16_t *samples, size_t sample_count, double source_position, const resampler_table_t *table, double *out_i, double *out_q)
+static void resample_table_ci16(const iq_src_t *samples, size_t sample_count, double source_position, const resampler_table_t *table, double *out_i, double *out_q)
 {
     const double center_f = floor(source_position);
     long phase = lrint((source_position - center_f) * (double)RESAMPLER_PHASES);
@@ -273,7 +273,7 @@ static void store_output_sample(void *out, size_t i, sim_output_format_t format,
 }
 
 #if !SIM_USE_LIQUID_RESAMPLER
-static void resample_sinc_ci16(const iq_ci16_t *samples, size_t sample_count, double source_position, double cutoff, double *out_i, double *out_q)
+static void resample_sinc_ci16(const iq_src_t *samples, size_t sample_count, double source_position, double cutoff, double *out_i, double *out_q)
 {
     const int64_t center = (int64_t)floor(source_position);
     const int radius = resampler_radius_for_cutoff(cutoff);
@@ -304,7 +304,7 @@ static void resample_sinc_ci16(const iq_ci16_t *samples, size_t sample_count, do
 #endif
 
 #if SIM_USE_LIQUID_RESAMPLER
-static void resample_liquid_ci16(const iq_ci16_t *samples, size_t sample_count, double source_position, double cutoff, double *out_i, double *out_q)
+static void resample_liquid_ci16(const iq_src_t *samples, size_t sample_count, double source_position, double cutoff, double *out_i, double *out_q)
 {
     const int64_t center = (int64_t)floor(source_position);
     const int radius = resampler_radius_for_cutoff(cutoff);
@@ -339,7 +339,7 @@ static void resample_liquid_ci16(const iq_ci16_t *samples, size_t sample_count, 
 }
 #endif
 
-static void resample_ci16(const iq_ci16_t *samples, size_t sample_count, double source_position, double cutoff, double *out_i, double *out_q)
+static void resample_ci16(const iq_src_t *samples, size_t sample_count, double source_position, double cutoff, double *out_i, double *out_q)
 {
 #if SIM_USE_LIQUID_RESAMPLER
     resample_liquid_ci16(samples, sample_count, source_position, cutoff, out_i, out_q);
@@ -348,7 +348,7 @@ static void resample_ci16(const iq_ci16_t *samples, size_t sample_count, double 
 #endif
 }
 
-static void resample_linear_ci16_f(const iq_ci16_t *samples, size_t sample_count, float source_position, float *out_i, float *out_q)
+static void resample_linear_ci16_f(const iq_src_t *samples, size_t sample_count, float source_position, float *out_i, float *out_q)
 {
     if (sample_count == 0) {
         *out_i = 0.0f;
@@ -393,8 +393,8 @@ static double signal_passband_gain(uint64_t signal_center, uint32_t signal_bw, u
 }
 
 /* Audio-modulated signals are no longer synthesised on the hot path: they are pre-rendered to
- * complex-baseband ci16 at load (asset_cache.c, T3) and rendered through the ordinary IQ dispatch
- * below. The full-rate reference synthesis lives in the test suite as the parity oracle (T5). */
+ * complex-baseband int16-scale float at load (asset_cache.c, T3) and rendered through the ordinary
+ * IQ dispatch below. The full-rate reference synthesis lives in the test suite as the parity oracle. */
 
 static uint64_t sample_index_from_time_ns(uint64_t scenario_time_ns, uint32_t sample_rate_hz)
 {
@@ -485,13 +485,13 @@ static void mix_accumulate_sample(float *bus, size_t index, double sample_i, dou
     bus[2U * index + 1U] += (float)(ii * osc_s + qq * osc_c);
 }
 
-static void accumulate_direct_baseband(float *bus, const iq_ci16_t *source_samples, size_t index, double source_gain)
+static void accumulate_direct_baseband(float *bus, const iq_src_t *source_samples, size_t index, double source_gain)
 {
     bus[2U * index] += (float)(source_gain * (double)source_samples[index].i);
     bus[2U * index + 1U] += (float)(source_gain * (double)source_samples[index].q);
 }
 
-static void render_direct_baseband(const iq_ci16_t *source_samples, size_t read_count, float *bus, size_t count, double source_gain)
+static void render_direct_baseband(const iq_src_t *source_samples, size_t read_count, float *bus, size_t count, double source_gain)
 {
     const size_t limit = read_count < count ? read_count : count;
     size_t i = 0;
@@ -506,7 +506,7 @@ static void render_direct_baseband(const iq_ci16_t *source_samples, size_t read_
     }
 }
 
-static void render_direct_nco(const iq_ci16_t *source_samples, size_t read_count, float *bus, size_t count, double source_gain, double init_c, double init_s, double step_c, double step_s)
+static void render_direct_nco(const iq_src_t *source_samples, size_t read_count, float *bus, size_t count, double source_gain, double init_c, double init_s, double step_c, double step_s)
 {
     const size_t limit = read_count < count ? read_count : count;
 #if SIM_HAVE_VOLK
@@ -547,7 +547,7 @@ static void render_direct_nco(const iq_ci16_t *source_samples, size_t read_count
 
 /* Resample one output sample at `source_position`, using the polyphase table when available and
  * falling back to the exact per-position kernel when the ratio's table could not be cached. */
-static void resample_position(const iq_ci16_t *source_samples, size_t read_count, double source_position, const resampler_table_t *table, double cutoff, double *out_i, double *out_q)
+static void resample_position(const iq_src_t *source_samples, size_t read_count, double source_position, const resampler_table_t *table, double cutoff, double *out_i, double *out_q)
 {
     if (table != NULL) {
         resample_table_ci16(source_samples, read_count, source_position, table, out_i, out_q);
@@ -563,7 +563,7 @@ static void resample_position(const iq_ci16_t *source_samples, size_t read_count
  * kernel, which is what makes a heavily-upsampled source (e.g. a 400 kHz pre-render into 98 MHz,
  * one resample per output sample) cheap; buffer-edge positions fall back to the exact per-position
  * path. */
-static size_t fill_scratch_polyphase(const iq_ci16_t *samples, size_t read_count, size_t count, double source_per_output, double offset_fraction, const resampler_table_t *table, double cutoff, lv_32fc_t *scratch)
+static size_t fill_scratch_polyphase(const iq_src_t *samples, size_t read_count, size_t count, double source_per_output, double offset_fraction, const resampler_table_t *table, double cutoff, lv_32fc_t *scratch)
 {
     /* Interior samples advance the source position with a Q32.32 fixed-point accumulator, so the
      * integer sample index and the RESAMPLER_PHASES-quantised phase come out as a shift and a mask
@@ -589,7 +589,7 @@ static size_t fill_scratch_polyphase(const iq_ci16_t *samples, size_t read_count
             const uint64_t radius = (uint64_t)table->radius;
             if (center >= radius - 1U && center + radius < read_count) {
                 const float *weights = table->w[phase];
-                const iq_ci16_t *window = &samples[center - radius + 1U];
+                const iq_src_t *window = &samples[center - radius + 1U];
                 const size_t taps = 2U * (size_t)radius;
                 float acc_i = 0.0f;
                 float acc_q = 0.0f;
@@ -611,7 +611,7 @@ static size_t fill_scratch_polyphase(const iq_ci16_t *samples, size_t read_count
 }
 #endif
 
-static void render_resampled_baseband(const iq_ci16_t *source_samples, size_t read_count, float *bus, size_t count, double source_gain, double source_per_output, double offset_fraction, bool allow_linear)
+static void render_resampled_baseband(const iq_src_t *source_samples, size_t read_count, float *bus, size_t count, double source_gain, double source_per_output, double offset_fraction, bool allow_linear)
 {
     /* Plain IQ files keep the cheap linear shortcut for very low ratios (AR3); pre-rendered audio
      * disables it because linear image rejection (~-24 dB) is too poor for a modulated carrier. */
@@ -648,7 +648,7 @@ static void render_resampled_baseband(const iq_ci16_t *source_samples, size_t re
     }
 }
 
-static void render_resampled_nco(const iq_ci16_t *source_samples, size_t read_count, float *bus, size_t count, double source_gain, double source_per_output, double offset_fraction, double init_c, double init_s, double step_c, double step_s, bool allow_linear)
+static void render_resampled_nco(const iq_src_t *source_samples, size_t read_count, float *bus, size_t count, double source_gain, double source_per_output, double offset_fraction, double init_c, double init_s, double step_c, double step_s, bool allow_linear)
 {
     const bool low_rate_linear = allow_linear && source_per_output > 0.0 && source_per_output <= LOW_RATE_LINEAR_MAX_SOURCE_PER_OUTPUT;
     if (low_rate_linear) {
@@ -741,11 +741,11 @@ static void render_resampled_nco(const iq_ci16_t *source_samples, size_t read_co
  * applies its output-Nyquist cutoff, which removes everything that cannot be represented --
  * the same order as a hardware DDC. The rotation phase is anchored so the block's first output
  * sample carries exactly phase0, keeping the output phase-continuous across blocks and
- * identical to the rotate-after path for in-band content. The rotated window is quantised to
- * ci16 at half scale for per-component headroom; the gain doubles to compensate. */
-static bool render_resampled_nco_mix_first(const iq_ci16_t *source_samples, size_t read_count, float *bus, size_t count, double source_gain, double source_per_output, double offset_fraction, double offset_hz, double source_rate_hz, double phase0, bool allow_linear)
+ * identical to the rotate-after path for in-band content. The rotated window is stored at half
+ * scale (int16-scale float) for per-component headroom; the gain doubles to compensate. */
+static bool render_resampled_nco_mix_first(const iq_src_t *source_samples, size_t read_count, float *bus, size_t count, double source_gain, double source_per_output, double offset_fraction, double offset_hz, double source_rate_hz, double phase0, bool allow_linear)
 {
-    static _Thread_local iq_ci16_t rotated[RESAMPLER_ROTATE_SCRATCH];
+    static _Thread_local iq_src_t rotated[RESAMPLER_ROTATE_SCRATCH];
     if (read_count > RESAMPLER_ROTATE_SCRATCH) {
         return false; /* oversized one-shot render: caller falls back to rotate-after */
     }
@@ -758,8 +758,8 @@ static bool render_resampled_nco_mix_first(const iq_ci16_t *source_samples, size
     for (size_t k = 0; k < read_count; k++) {
         const double sample_i = 0.5 * (double)source_samples[k].i;
         const double sample_q = 0.5 * (double)source_samples[k].q;
-        rotated[k].i = clip_i16_f((float)(sample_i * osc_c - sample_q * osc_s));
-        rotated[k].q = clip_i16_f((float)(sample_i * osc_s + sample_q * osc_c));
+        rotated[k].i = (float)(sample_i * osc_c - sample_q * osc_s);
+        rotated[k].q = (float)(sample_i * osc_s + sample_q * osc_c);
         const double next_c = osc_c * step_c - osc_s * step_s;
         const double next_s = osc_s * step_c + osc_c * step_s;
         osc_c = next_c;
@@ -826,7 +826,7 @@ static ddc_cache_t *renderer_ddc_cache(void)
  * anchored to the absolute input index via the Q0.64 phase step -- exact even for negative
  * indices, since the wrapping multiply is modulo one turn. `first_output` is the block's
  * first output index on the signal-relative output grid. */
-static void ddc_render_hop(const iq_ci16_t *samples,
+static void ddc_render_hop(const iq_src_t *samples,
                            uint64_t loop_samples,
                            uint32_t input_rate_hz,
                            const ddc_plan_t *plan,
@@ -906,7 +906,7 @@ static void ddc_render_hop(const iq_ci16_t *samples,
  * cascade: cached two-hop when possible, direct single hop otherwise. Returns false when no
  * plan can be designed for this rate/bandwidth combination (caller falls back to the legacy
  * resampler) or the block starts before the signal does. */
-static bool render_signal_ddc(const iq_ci16_t *samples_base,
+static bool render_signal_ddc(const iq_src_t *samples_base,
                               uint64_t total_samples,
                               uint32_t source_rate_hz,
                               const char *source_id,
@@ -982,7 +982,7 @@ static bool render_signal_ddc(const iq_ci16_t *samples_base,
  * where spectral wrap-around is that mode's specified semantics; large integer ratios take
  * the render_signal_ddc sub-band extraction path before ever reaching here. */
 static void render_signal_segment(
-    const iq_ci16_t *samples_base,
+    const iq_src_t *samples_base,
     uint64_t total_samples,
     uint32_t source_rate_hz,
     bool allow_linear,
@@ -1003,7 +1003,7 @@ static void render_signal_segment(
     const uint64_t needed_source_samples = (uint64_t)ceil((double)(count > 0 ? count - 1 : 0) * source_per_output) + kernel_radius + 2ULL;
     const uint64_t available = sample_offset < total_samples ? total_samples - sample_offset : 0;
     const size_t read_count = available < needed_source_samples ? (size_t)available : (size_t)needed_source_samples;
-    const iq_ci16_t *source_samples = &samples_base[sample_offset];
+    const iq_src_t *source_samples = &samples_base[sample_offset];
     /* The resampler additionally sees up to RESAMPLER_RADIUS samples of history before the
      * block's first source sample. Without it, the first output samples of every block were
      * filtered with the edge-truncated kernel while the rest used the interior one -- a tiny
@@ -1011,7 +1011,7 @@ static void render_signal_segment(
      * floor periodically (visible as row banding on every resampled channel). Only the true
      * start of an asset still uses the edge kernel, once per repeat cycle. */
     const uint64_t history_samples = sample_offset < kernel_radius ? sample_offset : kernel_radius;
-    const iq_ci16_t *resampler_samples = &samples_base[sample_offset - history_samples];
+    const iq_src_t *resampler_samples = &samples_base[sample_offset - history_samples];
     const double resampler_fraction = offset_fraction + (double)history_samples;
     const uint64_t resampler_needed = needed_source_samples + history_samples;
     const uint64_t resampler_available = available + history_samples;
@@ -1121,8 +1121,8 @@ static bool renderer_render_window_block(
             continue;
         }
 
-        /* Audio-modulated signals were pre-rendered to complex-baseband ci16 at load (T3); from
-         * here they are indistinguishable from an IQ source -- same dispatch, same phase/offset
+        /* Audio-modulated signals were pre-rendered to complex-baseband int16-scale float at load
+         * (T3); from here they are indistinguishable from an IQ source -- same dispatch, phase/offset
          * machinery. The pre-render buffer, its intermediate rate, and its recorded peak gain
          * stand in for the audio source's samples/rate/gain. */
         const bool is_audio = source->source_kind == SCENARIO_SOURCE_AUDIO_FILE;
@@ -1130,7 +1130,7 @@ static bool renderer_render_window_block(
         if (is_audio && prerender == NULL) {
             continue;
         }
-        const iq_ci16_t *samples_base = is_audio ? prerender->samples : asset->samples;
+        const iq_src_t *samples_base = is_audio ? prerender->samples : asset->samples;
         const uint64_t total_samples = is_audio ? prerender->sample_count : asset->sample_count;
         const uint32_t source_rate_hz = is_audio ? prerender->sample_rate_hz : source->sample_rate_hz;
         /* Pre-rendered assets always take the polyphase path: linear interpolation (~-24 dB image

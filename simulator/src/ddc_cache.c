@@ -141,7 +141,7 @@ static int64_t ddc_cache_floor_div(int64_t numerator, int64_t denominator)
  * floor(i / CHUNK) * CHUNK, so a given index rotates to bit-identical values regardless of
  * where a build slice begins (the idle replay to mid-chunk starts is at most one chunk). */
 static void ddc_cache_rotate_range(float complex *dst,
-                                   const iq_ci16_t *source_samples,
+                                   const iq_src_t *source_samples,
                                    int64_t loop_samples,
                                    uint64_t step_q64,
                                    double step_c,
@@ -200,7 +200,7 @@ static void ddc_cache_rotate_range(float complex *dst,
 
 typedef struct {
     ddc_cache_entry_t *entry;
-    const iq_ci16_t *source_samples;
+    const iq_src_t *source_samples;
     int64_t loop_samples;
     const ddc_plan_t *front_plan;
     uint64_t step_q64;
@@ -248,9 +248,9 @@ static void *ddc_cache_build_slice(void *arg)
             }
             for (size_t k = 0; k < produced; k++) {
                 slice->entry->samples[written + k].i =
-                    sim_clip_i16(DDC_CACHE_SAMPLE_SCALE * (double)crealf(out[k]));
+                    (float)(DDC_CACHE_SAMPLE_SCALE * (double)crealf(out[k]));
                 slice->entry->samples[written + k].q =
-                    sim_clip_i16(DDC_CACHE_SAMPLE_SCALE * (double)cimagf(out[k]));
+                    (float)(DDC_CACHE_SAMPLE_SCALE * (double)cimagf(out[k]));
             }
             written += produced;
         }
@@ -264,11 +264,11 @@ static void *ddc_cache_build_slice(void *arg)
     return NULL;
 }
 
-/* One pass over the loop: gather (modulo the seam), rotate, run the front cascade, quantize
- * to half-scale ci16. Runs without the cache lock held. Sliced across threads (history
+/* One pass over the loop: gather (modulo the seam), rotate, run the front cascade, store at
+ * half-scale (int16-scale float). Runs without the cache lock held. Sliced across threads (history
  * re-priming makes slices independent); content is bit-identical for any thread count. */
 static bool ddc_cache_build(ddc_cache_entry_t *entry,
-                            const iq_ci16_t *source_samples,
+                            const iq_src_t *source_samples,
                             uint64_t source_sample_count,
                             uint32_t source_rate_hz,
                             const ddc_plan_t *front_plan)
@@ -330,7 +330,7 @@ static bool ddc_cache_build(ddc_cache_entry_t *entry,
 typedef struct {
     ddc_cache_t *cache;
     ddc_cache_entry_t *entry;
-    const iq_ci16_t *source_samples;
+    const iq_src_t *source_samples;
     uint64_t source_sample_count;
     uint32_t source_rate_hz;
     const ddc_plan_t *front_plan;
@@ -373,7 +373,7 @@ static void *ddc_cache_background_build_main(void *arg)
 
 const ddc_cache_entry_t *ddc_cache_acquire(ddc_cache_t *cache,
                                            const char *source_id,
-                                           const iq_ci16_t *source_samples,
+                                           const iq_src_t *source_samples,
                                            uint64_t source_sample_count,
                                            uint32_t source_rate_hz,
                                            double shift_hz,
@@ -391,7 +391,7 @@ const ddc_cache_entry_t *ddc_cache_acquire(ddc_cache_t *cache,
     const double applied_shift_hz =
         (double)cycles * (double)source_rate_hz / (double)source_sample_count;
     const uint64_t intermediate_samples = source_sample_count / front_plan->ratio;
-    const size_t bytes = (size_t)intermediate_samples * sizeof(iq_ci16_t);
+    const size_t bytes = (size_t)intermediate_samples * sizeof(iq_src_t);
 
     pthread_mutex_lock(&cache->lock);
     for (;;) {

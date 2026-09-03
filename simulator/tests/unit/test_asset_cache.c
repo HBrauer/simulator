@@ -21,7 +21,7 @@ START_TEST(loads_scenario_assets_into_memory)
     const cached_asset_t *asset = asset_cache_find(&cache, "asset_fsk_001");
     ck_assert_ptr_nonnull(asset);
     ck_assert_uint_eq(asset->sample_count, 24576);
-    ck_assert_int_ne(asset->samples[0].i, 0);
+    ck_assert(asset->samples[0].i != 0.0f);
     asset_cache_free(&cache);
 }
 END_TEST
@@ -37,33 +37,23 @@ START_TEST(loads_assets_in_small_batches)
     const cached_asset_t *asset = asset_cache_find(&cache, "asset_fsk_001");
     ck_assert_ptr_nonnull(asset);
     ck_assert_uint_eq(asset->sample_count, 24576);
-    ck_assert_int_ne(asset->samples[0].i, 0);
+    ck_assert(asset->samples[0].i != 0.0f);
     asset_cache_free(&cache);
 }
 END_TEST
 
-START_TEST(mmaps_iq_asset_over_memory_limit)
+START_TEST(rejects_iq_asset_over_memory_limit)
 {
     scenario_t scenario;
     asset_cache_t cache;
-    asset_cache_t reference;
     char error[128];
     ck_assert_msg(scenario_load("simulator/scenarios/scanner_fsk.yaml", &scenario, error, sizeof(error)), "%s", error);
     ck_assert_msg(scenario_validate(&scenario, ".", error, sizeof(error)), "%s", error);
-    /* An IQ file over the budget is memory-mapped instead of rejected... */
-    ck_assert_msg(asset_cache_load_limited(&cache, &scenario, 16, 4096, NULL, error, sizeof(error)), "%s", error);
-    const cached_asset_t *asset = asset_cache_find(&cache, "asset_fsk_001");
-    ck_assert_ptr_nonnull(asset);
-    ck_assert(asset->mmapped);
-    ck_assert_uint_eq(asset->sample_count, 24576);
-    /* ...and the mapping is byte-identical to the RAM-loaded copy. */
-    ck_assert_msg(asset_cache_load(&reference, &scenario, error, sizeof(error)), "%s", error);
-    const cached_asset_t *ram = asset_cache_find(&reference, "asset_fsk_001");
-    ck_assert_ptr_nonnull(ram);
-    ck_assert(!ram->mmapped);
-    ck_assert_int_eq(memcmp(asset->samples, ram->samples, (size_t)asset->sample_count * sizeof(*asset->samples)), 0);
-    asset_cache_free(&reference);
-    asset_cache_free(&cache);
+    /* The general mixer source is widened to int16-scale float at load (never memory-mapped, since
+     * the widened layout cannot alias the on-disk samples), so an IQ file that does not fit the
+     * cache budget is rejected rather than mapped -- the same policy as an audio asset. */
+    ck_assert(!asset_cache_load_limited(&cache, &scenario, 16, 4096, NULL, error, sizeof(error)));
+    ck_assert_str_eq(error, "asset_cache_limit_exceeded");
 }
 END_TEST
 
@@ -167,7 +157,7 @@ START_TEST(prerender_gain_reconstructs_direct_am_amplitude)
         const double direct = (1.0 + depth * audio) / (1.0 + depth);
         const double reconstructed = (double)pr->samples[i].i * pr->gain / 32767.0;
         ck_assert(fabs(reconstructed - direct) < 2.0e-3);
-        ck_assert_int_eq(pr->samples[i].q, 0);
+        ck_assert(pr->samples[i].q == 0.0f);
     }
     asset_cache_free(&cache);
 }
@@ -283,7 +273,7 @@ START_TEST(loop_conditioned_am_envelope_is_seam_continuous)
      * interpolator clamps there, so the seam step spans up to ~1.5 audio samples vs the 0.5 of
      * interior steps: allow 3x. A genuine envelope discontinuity would be orders larger. */
     ck_assert_msg(seam <= 3.0 * interior + 4.0, "AM seam %.0f vs interior %.0f", seam, interior);
-    ck_assert_int_eq(pr.samples[0].q, 0);
+    ck_assert(pr.samples[0].q == 0.0f);
     free(pr.samples);
 }
 END_TEST
@@ -302,9 +292,11 @@ START_TEST(rejects_prerender_memory_limit)
 }
 END_TEST
 
-/* A cf32 IQ source is accepted (in addition to ci16) and converted to the internal ci16 mixer
- * format at load: floats are scaled by 2^15 and saturated, the inverse of the cf32 output path. */
-START_TEST(loads_cf32_iq_source_converted_to_ci16)
+/* A cf32 IQ source is accepted (in addition to ci16) and widened into the internal int16-scale
+ * float mixer format at load: each component is scaled by 2^15 with no rounding or saturation, so
+ * full-scale, overrange, and sub-LSB float content all survive. (The former ci16 storage clipped
+ * overrange to +-32767 and quantised sub-LSB content to zero -- the data loss this upgrade fixes.) */
+START_TEST(loads_cf32_iq_source_as_float)
 {
     char iq_path[] = "/tmp/sdr_cf32_iqXXXXXX";
     char yaml_path[] = "/tmp/sdr_cf32_ymlXXXXXX";
@@ -313,12 +305,13 @@ START_TEST(loads_cf32_iq_source_converted_to_ci16)
     ck_assert_int_ge(iq_fd, 0);
     ck_assert_int_ge(yaml_fd, 0);
 
-    /* Interleaved I/Q floats, chosen to hit full-scale saturation, exact mid-scale, and zero. */
+    /* Interleaved I/Q floats: full scale (not clipped), overrange (survives), mid-scale, and a
+     * sub-LSB value that the old ci16 conversion would have rounded to zero. */
     const float samples[] = {
-        1.0f,  -1.0f,   /* +1.0 -> 32767 (saturates), -1.0 -> -32768 */
-        0.5f,  -0.5f,   /* +/-16384 */
-        0.0f,   0.25f,  /* 0, 8192 */
-        -0.75f, 1.0f,   /* -24576, 32767 */
+        1.0f,    -1.0f,    /* +1.0 -> +32768 (NOT clipped to 32767), -1.0 -> -32768 */
+        1.5f,    -0.75f,   /* overrange +49152 survives; -24576 */
+        0.5f,     0.25f,   /* +16384, +8192 */
+        1.0e-5f,  0.0f,    /* sub-LSB +0.32768 survives (ci16 would zero it); 0 */
     };
     ck_assert_int_eq((int)write(iq_fd, samples, sizeof(samples)), (int)sizeof(samples));
     close(iq_fd);
@@ -361,14 +354,15 @@ START_TEST(loads_cf32_iq_source_converted_to_ci16)
     const cached_asset_t *asset = asset_cache_find(&cache, "cf32_src");
     ck_assert_ptr_nonnull(asset);
     ck_assert_uint_eq(asset->sample_count, 4);
-    ck_assert_int_eq(asset->samples[0].i, 32767);
-    ck_assert_int_eq(asset->samples[0].q, -32768);
-    ck_assert_int_eq(asset->samples[1].i, 16384);
-    ck_assert_int_eq(asset->samples[1].q, -16384);
-    ck_assert_int_eq(asset->samples[2].i, 0);
-    ck_assert_int_eq(asset->samples[2].q, 8192);
-    ck_assert_int_eq(asset->samples[3].i, -24576);
-    ck_assert_int_eq(asset->samples[3].q, 32767);
+    ck_assert_double_eq_tol((double)asset->samples[0].i, 32768.0, 1e-3);
+    ck_assert_double_eq_tol((double)asset->samples[0].q, -32768.0, 1e-3);
+    ck_assert_double_eq_tol((double)asset->samples[1].i, 49152.0, 1e-3);
+    ck_assert_double_eq_tol((double)asset->samples[1].q, -24576.0, 1e-3);
+    ck_assert_double_eq_tol((double)asset->samples[2].i, 16384.0, 1e-3);
+    ck_assert_double_eq_tol((double)asset->samples[2].q, 8192.0, 1e-3);
+    /* Sub-LSB float content survives instead of being quantised to zero. */
+    ck_assert(asset->samples[3].i > 0.0f && asset->samples[3].i < 1.0f);
+    ck_assert_double_eq_tol((double)asset->samples[3].q, 0.0, 1e-12);
 
     asset_cache_free(&cache);
     unlink(iq_path);
@@ -380,10 +374,10 @@ Suite *asset_cache_suite(void)
 {
     Suite *suite = suite_create("asset_cache");
     TCase *tc = tcase_create("core");
-    tcase_add_test(tc, loads_cf32_iq_source_converted_to_ci16);
+    tcase_add_test(tc, loads_cf32_iq_source_as_float);
     tcase_add_test(tc, loads_scenario_assets_into_memory);
     tcase_add_test(tc, loads_assets_in_small_batches);
-    tcase_add_test(tc, mmaps_iq_asset_over_memory_limit);
+    tcase_add_test(tc, rejects_iq_asset_over_memory_limit);
     tcase_add_test(tc, rejects_audio_asset_over_memory_limit);
     tcase_add_test(tc, normalizes_audio_asset_to_target_rms);
     tcase_add_test(tc, prerenders_audio_signals_at_content_bandwidth_rate);

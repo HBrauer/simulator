@@ -89,18 +89,18 @@ static void warn_ddc_rate_combinations(const simulator_config_t *config, const s
 /* Largest sample magnitude (in ci16 counts) in a buffer. After the mixer rotates a source to its
  * window offset, a single output I or Q component can reach the full sample magnitude, so this is
  * the amplitude that decides whether the signal clips -- not the per-component peak. */
-static double buffer_peak_magnitude(const iq_ci16_t *samples, uint64_t count)
+static double buffer_peak_magnitude(const iq_src_t *samples, uint64_t count)
 {
-    int64_t peak_sq = 0;
+    double peak_sq = 0.0;
     for (uint64_t k = 0; k < count; k++) {
-        const int64_t i = samples[k].i;
-        const int64_t q = samples[k].q;
-        const int64_t m = i * i + q * q;
+        const double i = (double)samples[k].i;
+        const double q = (double)samples[k].q;
+        const double m = i * i + q * q;
         if (m > peak_sq) {
             peak_sq = m;
         }
     }
-    return sqrt((double)peak_sq);
+    return sqrt(peak_sq);
 }
 
 /* Predict, per channel, whether a mixed signal would overdrive the ADC when the channel is tuned
