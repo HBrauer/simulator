@@ -4,7 +4,14 @@
 
 #include <check.h>
 #include <stdio.h>
+#include <string.h>
 #include <unistd.h>
+
+/* Validation errors are "<code>" or "<code>: <detail>"; assert on the code only. */
+#define ck_assert_error_code(error, code) \
+    ck_assert_msg(strncmp((error), (code), strlen(code)) == 0 && \
+                      ((error)[strlen(code)] == '\0' || (error)[strlen(code)] == ':'), \
+                  "expected error code '%s', got '%s'", (code), (error))
 
 static const char *write_temp_config_body(const char *top_body, const char *receiver_body)
 {
@@ -176,13 +183,13 @@ START_TEST(rejects_invalid_channel_rates)
 
     char error[128];
     ck_assert(!config_validate(&config, error, sizeof(error)));
-    ck_assert_str_eq(error, "channel_rates_required");
+    ck_assert_error_code(error, "channel_rates_required");
 
     config.receivers[0] = valid_receiver(0, 8100, 50000);
     /* A rate whose sample rate is below its bandwidth. */
     config.receivers[0].channels[1].rates[0].sample_rate_hz = config.receivers[0].channels[1].rates[0].bandwidth_hz - 1U;
     ck_assert(!config_validate(&config, error, sizeof(error)));
-    ck_assert_str_eq(error, "invalid_channel_rate");
+    ck_assert_error_code(error, "invalid_channel_rate");
 }
 END_TEST
 
@@ -193,7 +200,7 @@ START_TEST(rejects_active_rate_not_in_list)
     receiver.channels[1].bandwidth_hz = 12345U; /* not one of channel 1's rates */
     char error[128];
     ck_assert(!receiver_validate(&receiver, error, sizeof(error)));
-    ck_assert_str_eq(error, "unsupported_channel_rate");
+    ck_assert_error_code(error, "unsupported_channel_rate");
 }
 END_TEST
 
@@ -204,7 +211,7 @@ START_TEST(rejects_bandwidth_exceeding_frontend)
     /* channel 0 is 80 MHz wide, wider than the 20 MHz front end */
     char error[128];
     ck_assert(!receiver_validate(&receiver, error, sizeof(error)));
-    ck_assert_str_eq(error, "bandwidth_exceeds_frontend");
+    ck_assert_error_code(error, "bandwidth_exceeds_frontend");
 }
 END_TEST
 
@@ -258,7 +265,7 @@ START_TEST(rejects_out_of_range_class_id_oui)
     simulator_config_t config;
     char error[128];
     ck_assert(!config_load_yaml(path, &config, error, sizeof(error)));
-    ck_assert_str_eq(error, "invalid_class_id_oui");
+    ck_assert_error_code(error, "invalid_class_id_oui");
 }
 END_TEST
 
@@ -269,12 +276,12 @@ START_TEST(rejects_out_of_range_class_id_codes)
     simulator_config_t config;
     char error[128];
     ck_assert(!config_load_yaml(info_path, &config, error, sizeof(error)));
-    ck_assert_str_eq(error, "invalid_class_id_information_code");
+    ck_assert_error_code(error, "invalid_class_id_information_code");
 
     const char *packet_path = write_temp_config("class_id_packet_code: 65536\n");
     ck_assert_ptr_nonnull(packet_path);
     ck_assert(!config_load_yaml(packet_path, &config, error, sizeof(error)));
-    ck_assert_str_eq(error, "invalid_class_id_packet_code");
+    ck_assert_error_code(error, "invalid_class_id_packet_code");
 }
 END_TEST
 
@@ -288,7 +295,7 @@ START_TEST(rejects_out_of_range_stream_id)
     simulator_config_t config;
     char error[128];
     ck_assert(!config_load_yaml(path, &config, error, sizeof(error)));
-    ck_assert_str_eq(error, "invalid_stream_id");
+    ck_assert_error_code(error, "invalid_stream_id");
 }
 END_TEST
 
@@ -300,17 +307,17 @@ START_TEST(rejects_legacy_config_keys)
     const char *path = write_temp_config_body("", "    ddc:\n      - ddc_id: 0\n        udp_output_port: 50001\n");
     ck_assert_ptr_nonnull(path);
     ck_assert(!config_load_yaml(path, &config, error, sizeof(error)));
-    ck_assert_str_eq(error, "legacy_key_ddc_use_channels");
+    ck_assert_error_code(error, "legacy_key_ddc_use_channels");
 
     path = write_temp_config_body("", "    udp_80mhz_output_port: 50000\n");
     ck_assert_ptr_nonnull(path);
     ck_assert(!config_load_yaml(path, &config, error, sizeof(error)));
-    ck_assert_str_eq(error, "legacy_key_udp_80mhz_output_port_use_channels");
+    ck_assert_error_code(error, "legacy_key_udp_80mhz_output_port_use_channels");
 
     path = write_temp_config_body("", "    frontend_bandwidth_hz: 80000000\n");
     ck_assert_ptr_nonnull(path);
     ck_assert(!config_load_yaml(path, &config, error, sizeof(error)));
-    ck_assert_str_eq(error, "legacy_key_frontend_bandwidth_hz_use_bandwidth_hz");
+    ck_assert_error_code(error, "legacy_key_frontend_bandwidth_hz_use_bandwidth_hz");
 }
 END_TEST
 
@@ -355,7 +362,7 @@ START_TEST(rejects_invalid_render_threads)
     simulator_config_t config;
     char error[128];
     ck_assert(!config_load_yaml(path, &config, error, sizeof(error)));
-    ck_assert_str_eq(error, "invalid_render_threads");
+    ck_assert_error_code(error, "invalid_render_threads");
 }
 END_TEST
 
@@ -388,7 +395,7 @@ START_TEST(rejects_invalid_output_format)
     simulator_config_t config;
     char error[128];
     ck_assert(!config_load_yaml(path, &config, error, sizeof(error)));
-    ck_assert_str_eq(error, "invalid_output_format");
+    ck_assert_error_code(error, "invalid_output_format");
 }
 END_TEST
 
@@ -443,7 +450,7 @@ START_TEST(rejects_invalid_stream_block_samples)
 
     char error[128];
     ck_assert(!config_validate(&config, error, sizeof(error)));
-    ck_assert_str_eq(error, "invalid_stream_block_samples");
+    ck_assert_error_code(error, "invalid_stream_block_samples");
 }
 END_TEST
 
@@ -458,7 +465,7 @@ START_TEST(rejects_invalid_stream_cpu)
 
     char error[128];
     ck_assert(!config_validate(&config, error, sizeof(error)));
-    ck_assert_str_eq(error, "invalid_stream_cpu");
+    ck_assert_error_code(error, "invalid_stream_cpu");
 }
 END_TEST
 
@@ -471,7 +478,7 @@ START_TEST(rejects_zero_scan_rate_only_in_scan_mode)
     scan.scan_rate_hz_per_s = 0.0;
     char error[128];
     ck_assert(!receiver_validate(&scan, error, sizeof(error)));
-    ck_assert_str_eq(error, "invalid_scan_rate");
+    ck_assert_error_code(error, "invalid_scan_rate");
 
     /* Fixed mode (span <= front-end bandwidth) ignores the scan rate. */
     receiver_config_t fixed = valid_receiver(0, 8100, 50000);
@@ -493,7 +500,7 @@ START_TEST(rejects_duplicate_udp_port_within_receiver)
 
     char error[128];
     ck_assert(!config_validate(&config, error, sizeof(error)));
-    ck_assert_str_eq(error, "duplicate_udp_port");
+    ck_assert_error_code(error, "duplicate_udp_port");
 }
 END_TEST
 
@@ -508,11 +515,11 @@ START_TEST(rejects_duplicate_ports_across_receivers)
 
     char error[128];
     ck_assert(!config_validate(&config, error, sizeof(error)));
-    ck_assert_str_eq(error, "duplicate_udp_port");
+    ck_assert_error_code(error, "duplicate_udp_port");
 
     config.receivers[1] = valid_receiver(1, 8100, 50100);
     ck_assert(!config_validate(&config, error, sizeof(error)));
-    ck_assert_str_eq(error, "duplicate_rest_port");
+    ck_assert_error_code(error, "duplicate_rest_port");
 }
 END_TEST
 
@@ -527,12 +534,12 @@ START_TEST(rejects_invalid_output_scale)
 
     char error[128];
     ck_assert(!config_validate(&config, error, sizeof(error)));
-    ck_assert_str_eq(error, "invalid_output_scale");
+    ck_assert_error_code(error, "invalid_output_scale");
 
     config.receivers[0] = valid_receiver(0, 8100, 50000);
     config.receivers[0].channels[2].output_scale = -0.5;
     ck_assert(!config_validate(&config, error, sizeof(error)));
-    ck_assert_str_eq(error, "invalid_channel");
+    ck_assert_error_code(error, "invalid_channel");
 }
 END_TEST
 

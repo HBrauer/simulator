@@ -20,7 +20,7 @@ jobs:
       - name: Install packaging tools
         run: dnf install -y git rpm-build rpmdevtools 'dnf-command(builddep)'
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install build dependencies
         run: dnf builddep -y packaging/sdr-simulator.spec
