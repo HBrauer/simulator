@@ -32,3 +32,5 @@ logs/
 
 # Reference/scratch material, not part of the build
 temp/
+
+setups/

@@ -209,9 +209,10 @@ static bool json_flag(json_t *object, const char *key)
     return json_is_true(json_object_get(object, key));
 }
 
-static bool parse_channel(json_t *entry, control_channel_t *channel)
+static bool parse_channel(json_t *entry, control_channel_t *channel, char *error, size_t error_size)
 {
     if (!json_is_object(entry)) {
+        set_error(error, error_size, "unexpected channel entry");
         return false;
     }
     channel->channel_id = (uint32_t)json_u64(entry, "channel_id");
@@ -225,9 +226,11 @@ static bool parse_channel(json_t *entry, control_channel_t *channel)
     channel->rate_count = 0;
     json_t *rates = json_object_get(entry, "rates");
     if (json_is_array(rates)) {
-        size_t count = json_array_size(rates);
+        const size_t count = json_array_size(rates);
         if (count > CONTROL_MAX_CHANNEL_RATES) {
-            count = CONTROL_MAX_CHANNEL_RATES;
+            snprintf(error, error_size, "channel %u has %zu rates; this receiver supports at most %u",
+                     channel->channel_id, count, CONTROL_MAX_CHANNEL_RATES);
+            return false;
         }
         for (size_t i = 0; i < count; i++) {
             json_t *rate = json_array_get(rates, i);
@@ -236,20 +239,27 @@ static bool parse_channel(json_t *entry, control_channel_t *channel)
         }
         channel->rate_count = count;
     }
-    return channel->udp_port != 0 && channel->sample_rate_hz != 0;
+    if (channel->udp_port == 0 || channel->sample_rate_hz == 0) {
+        set_error(error, error_size, "unexpected channel entry");
+        return false;
+    }
+    return true;
 }
 
 static bool parse_channels_array(control_client_t *client, json_t *channels, char *error, size_t error_size)
 {
-    if (!json_is_array(channels) || json_array_size(channels) == 0 ||
-        json_array_size(channels) > CONTROL_MAX_CHANNELS) {
+    if (!json_is_array(channels) || json_array_size(channels) == 0) {
         set_error(error, error_size, "unexpected channels response");
+        return false;
+    }
+    if (json_array_size(channels) > CONTROL_MAX_CHANNELS) {
+        snprintf(error, error_size, "simulator reports %zu channels; this receiver supports at most %u",
+                 json_array_size(channels), CONTROL_MAX_CHANNELS);
         return false;
     }
     client->channel_count = json_array_size(channels);
     for (size_t i = 0; i < client->channel_count; i++) {
-        if (!parse_channel(json_array_get(channels, i), &client->channels[i])) {
-            set_error(error, error_size, "unexpected channel entry");
+        if (!parse_channel(json_array_get(channels, i), &client->channels[i], error, error_size)) {
             return false;
         }
     }
@@ -334,11 +344,8 @@ bool control_client_set_channel(control_client_t *client, uint32_t channel_id, c
     if (updated == NULL) {
         return false;
     }
-    const bool ok = parse_channel(updated, &client->channels[channel_id]);
+    const bool ok = parse_channel(updated, &client->channels[channel_id], error, error_size);
     json_decref(updated);
-    if (!ok) {
-        set_error(error, error_size, "unexpected channel response");
-    }
     return ok;
 }
 

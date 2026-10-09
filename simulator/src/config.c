@@ -252,19 +252,27 @@ static bool enter_mapping(simulator_config_t *config, parse_state_t *state, char
     if (state->in_rates_seq && state->current_rate == NULL) {
         channel_config_t *ch = state->current_channel;
         if (ch->rate_count >= SIM_MAX_CHANNEL_RATES) {
-            return set_error(error, error_size, "too_many_channel_rates");
+            snprintf(error, error_size,
+                     "too_many_channel_rates: receiver[%zu] channel[%zu] lists more than %d rates",
+                     config->receiver_count - 1U, (size_t)(ch - state->current_receiver->channels),
+                     SIM_MAX_CHANNEL_RATES);
+            return false;
         }
         state->current_rate = &ch->rates[ch->rate_count++];
     } else if (state->in_channels_seq && state->current_channel == NULL) {
         receiver_config_t *r = state->current_receiver;
         if (r->channel_count >= SIM_MAX_CHANNELS) {
-            return set_error(error, error_size, "too_many_channels");
+            snprintf(error, error_size, "too_many_channels: receiver[%zu] lists more than %d channels",
+                     config->receiver_count - 1U, SIM_MAX_CHANNELS);
+            return false;
         }
         state->current_channel = &r->channels[r->channel_count++];
         state->current_channel->stream_enabled = true;
     } else if (state->in_receivers_seq && state->current_receiver == NULL) {
         if (config->receiver_count >= SIM_MAX_RECEIVERS) {
-            return set_error(error, error_size, "too_many_receivers");
+            snprintf(error, error_size, "too_many_receivers: config lists more than %d receivers",
+                     SIM_MAX_RECEIVERS);
+            return false;
         }
         state->current_receiver = &config->receivers[config->receiver_count++];
     }

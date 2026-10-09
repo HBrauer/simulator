@@ -9,7 +9,7 @@
  * over a blocking socket (the API is local and tiny), so the receiver needs no HTTP
  * library dependency. */
 
-#define CONTROL_MAX_CHANNELS 8U
+#define CONTROL_MAX_CHANNELS 24U /* matches the simulator's SIM_MAX_CHANNELS */
 #define CONTROL_MAX_CHANNEL_RATES 128U
 #define CONTROL_MAX_NAME 24U
 #define CONTROL_MAX_HOST 64U
