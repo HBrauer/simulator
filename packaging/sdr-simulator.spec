@@ -7,7 +7,7 @@ Name:           sdr-simulator
 Version:        %{pkg_version}
 Release:        %{pkg_release}%{?dist}
 Summary:        SDR receiver simulator streaming VITA-49 IQ data
-License:        LicenseRef-Unspecified
+License:        MIT
 URL:            https://github.com/HBrauer/simulator
 Source0:        %{name}-%{version}.tar.gz
 
@@ -69,6 +69,7 @@ exit 0
 %systemd_postun_with_restart 'sdr-simulator@*.service'
 
 %files
+%license LICENSE
 %doc README.md docs/quick_start.md docs/configuration_manual.md docs/rest_api.md docs/vita49_udp.md
 %{_bindir}/sdr-simulator
 %{_unitdir}/sdr-simulator@.service
