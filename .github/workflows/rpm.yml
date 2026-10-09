@@ -55,23 +55,38 @@ jobs:
             --define "pkg_release ${{ steps.ver.outputs.release }}" \
             packaging/sdr-simulator.spec
 
-      - name: Smoke-test install
-        run: |
-          dnf install -y rpmbuild/RPMS/*/sdr-simulator-[0-9]*.rpm
-          rpm -ql sdr-simulator
-          getent passwd sdr-simulator
-          # With no setup folder the built-in noise-only starter runs.
-          test "$(sdr-simulator --render-once-samples 1024 | wc -c)" -eq 4096
-          # A new setup folder anywhere, selected via the instance-style env var.
-          sdr-simulator --init /tmp/site-a
-          test "$(SDR_SIMULATOR_CONFIG_DIR=/tmp/site-a sdr-simulator --render-once-samples 1024 | wc -c)" -eq 4096
-
       - uses: actions/upload-artifact@v4
         with:
           name: sdr-simulator-rpm-${{ steps.ver.outputs.version }}-${{ steps.ver.outputs.release }}
           path: |
             rpmbuild/RPMS/*/*.rpm
             rpmbuild/SRPMS/*.rpm
+
+      # Separate steps so the run summary shows exactly which check failed.
+      - name: "Smoke test: install RPM"
+        run: |
+          set -x
+          dnf install -y rpmbuild/RPMS/*/sdr-simulator-[0-9]*.rpm
+          rpm -ql sdr-simulator
+
+      - name: "Smoke test: service user exists"
+        run: |
+          set -x
+          getent group sdr-simulator
+          getent passwd sdr-simulator
+
+      - name: "Smoke test: built-in starter runs"
+        run: |
+          set -x
+          sdr-simulator --scenario-time-ns 0 --render-once-samples 1024 > /tmp/builtin.iq
+          test "$(stat -c %s /tmp/builtin.iq)" -eq 4096
+
+      - name: "Smoke test: --init setup runs"
+        run: |
+          set -x
+          sdr-simulator --init /tmp/site-a
+          SDR_SIMULATOR_CONFIG_DIR=/tmp/site-a sdr-simulator --scenario-time-ns 0 --render-once-samples 1024 > /tmp/site-a.iq
+          test "$(stat -c %s /tmp/site-a.iq)" -eq 4096
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
