@@ -24,7 +24,6 @@ BuildRequires:  pkgconfig(sdl2)
 BuildRequires:  pkgconfig(fftw3f)
 BuildRequires:  pkgconfig(volk)
 Requires(pre):  shadow-utils
-%{?systemd_requires}
 
 %description
 Simulates an SDR receiver: renders configurable scenarios (noise, tones, bursts, IQ and audio

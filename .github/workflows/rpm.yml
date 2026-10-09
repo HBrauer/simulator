@@ -62,31 +62,8 @@ jobs:
             rpmbuild/RPMS/*/*.rpm
             rpmbuild/SRPMS/*.rpm
 
-      # Separate steps so the run summary shows exactly which check failed.
-      - name: "Smoke test: install RPM"
-        run: |
-          set -x
-          dnf install -y rpmbuild/RPMS/*/sdr-simulator-[0-9]*.rpm
-          rpm -ql sdr-simulator
-
-      - name: "Smoke test: service user exists"
-        run: |
-          set -x
-          getent group sdr-simulator
-          getent passwd sdr-simulator
-
-      - name: "Smoke test: built-in starter runs"
-        run: |
-          set -x
-          sdr-simulator --scenario-time-ns 0 --render-once-samples 1024 > /tmp/builtin.iq
-          test "$(stat -c %s /tmp/builtin.iq)" -eq 4096
-
-      - name: "Smoke test: --init setup runs"
-        run: |
-          set -x
-          sdr-simulator --init /tmp/site-a
-          SDR_SIMULATOR_CONFIG_DIR=/tmp/site-a sdr-simulator --scenario-time-ns 0 --render-once-samples 1024 > /tmp/site-a.iq
-          test "$(stat -c %s /tmp/site-a.iq)" -eq 4096
+      - name: Smoke test
+        run: packaging/smoke-test.sh
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
