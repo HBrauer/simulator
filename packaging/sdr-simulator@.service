@@ -1,0 +1,28 @@
+# One simulator per instance: sdr-simulator@NAME runs the setup folder named by
+# SDR_SIMULATOR_CONFIG_DIR in /etc/sdr-simulator/instances/NAME.conf.
+#
+#   sudo sdr-simulator --init /srv/sim/site-a
+#   sudo mkdir -p /etc/sdr-simulator/instances
+#   echo SDR_SIMULATOR_CONFIG_DIR=/srv/sim/site-a | sudo tee /etc/sdr-simulator/instances/site-a.conf
+#   sudo systemctl enable --now sdr-simulator@site-a
+[Unit]
+Description=SDR receiver simulator (%i)
+Documentation=file:///usr/share/doc/sdr-simulator/README.md
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/etc/sdr-simulator/instances/%i.conf
+
+[Service]
+Type=simple
+User=sdr-simulator
+Group=sdr-simulator
+EnvironmentFile=/etc/sdr-simulator/instances/%i.conf
+ExecStart=/usr/bin/sdr-simulator
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=yes
+ProtectSystem=full
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

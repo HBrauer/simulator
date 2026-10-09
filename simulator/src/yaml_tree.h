@@ -2,6 +2,7 @@
 #define YAML_TREE_H
 
 #include <stdbool.h>
+#include <stdio.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -25,6 +26,7 @@ typedef struct yaml_tree_node yaml_tree_node_t;
  * NULL on error (with a "scenario_invalid:<reason>" message written to `error`). Anchors,
  * aliases and tags are not supported. */
 yaml_tree_node_t *yaml_tree_load_file(const char *path, char *error, size_t error_size);
+yaml_tree_node_t *yaml_tree_load_stream(FILE *file, char *error, size_t error_size); /* leaves file open */
 void yaml_tree_free(yaml_tree_node_t *node);
 
 /* Structure. yaml_tree_kind must not be called on NULL. */

@@ -5,6 +5,7 @@
 #include "renderer.h"
 #include "rest_server.h"
 #include "scenario.h"
+#include "setup_dir.h"
 #include "streamer.h"
 #include "timebase.h"
 #include "udp_output.h"
@@ -34,6 +35,38 @@ static const char *arg_value(int argc, char **argv, const char *name)
         }
     }
     return NULL;
+}
+
+static bool has_flag(int argc, char **argv, const char *name)
+{
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], name) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void print_usage(FILE *out)
+{
+    fprintf(out,
+            "usage: sdr-simulator [--config-dir DIR] [options]\n"
+            "       sdr-simulator --init DIR\n"
+            "\n"
+            "A setup folder holds " SETUP_DIR_CONFIG_FILE ", " SETUP_DIR_SCENARIO_FILE " and " SETUP_DIR_ASSETS_DIR "/;\n"
+            "relative asset paths in the scenario resolve against it. The folder is taken from\n"
+            "--config-dir, else $" SETUP_DIR_ENV "; with neither (and no --config), the\n"
+            "built-in noise-only starter setup runs.\n"
+            "\n"
+            "  --init DIR                 create DIR as a new setup (noise-only starter files)\n"
+            "  --config-dir DIR           run the setup in DIR\n"
+            "  --config FILE              receiver config file (overrides the setup folder's)\n"
+            "  --scenario FILE            scenario file (default: the config's scenario_file,\n"
+            "                             else " SETUP_DIR_SCENARIO_FILE " in the setup folder)\n"
+            "  --scenario-time-ns NS      run on a fixed scenario clock instead of wall time\n"
+            "  --stream-block-samples N   override stream_block_samples\n"
+            "  --render-once-samples N    render N samples of one channel to stdout and exit\n"
+            "  --render-channel INDEX     channel for --render-once-samples (default 0)\n");
 }
 
 /* Warn once per (channel, looping IQ replay source) pair whose extraction quality or DDC
@@ -207,27 +240,106 @@ static void warn_signal_clipping(const simulator_config_t *config, const scenari
 
 int main(int argc, char **argv)
 {
+    if (has_flag(argc, argv, "--help") || has_flag(argc, argv, "-h")) {
+        print_usage(stdout);
+        return 0;
+    }
+
+    char error[256];
+    if (has_flag(argc, argv, "--init")) {
+        const char *init_dir = arg_value(argc, argv, "--init");
+        if (init_dir == NULL) {
+            print_usage(stderr);
+            return 1;
+        }
+        if (!setup_dir_init(init_dir, error, sizeof(error))) {
+            fprintf(stderr, "init error: %s\n", error);
+            return 1;
+        }
+        printf("created setup in %s\n"
+               "  edit %s/" SETUP_DIR_CONFIG_FILE " and %s/" SETUP_DIR_SCENARIO_FILE ", put recordings in %s/" SETUP_DIR_ASSETS_DIR "/\n"
+               "  run:  sdr-simulator --config-dir %s\n",
+               init_dir, init_dir, init_dir, init_dir, init_dir);
+        return 0;
+    }
+
     const char *config_path = arg_value(argc, argv, "--config");
     const char *scenario_path = arg_value(argc, argv, "--scenario");
     const char *scenario_time_arg = arg_value(argc, argv, "--scenario-time-ns");
     const char *once_arg = arg_value(argc, argv, "--render-once-samples");
     const char *block_samples_arg = arg_value(argc, argv, "--stream-block-samples");
-    if (config_path == NULL) {
-        config_path = "simulator/configs/receiver_scanner.yaml";
+
+    /* Setup-folder mode unless only an explicit --config was given, which keeps the
+     * cwd-relative behaviour the repo's configs and tests rely on. With no setup at all, run
+     * the embedded starter so a fresh install streams something out of the box. */
+    const char *config_dir = arg_value(argc, argv, "--config-dir");
+    if (config_dir == NULL && config_path == NULL) {
+        config_dir = getenv(SETUP_DIR_ENV);
+        if (config_dir != NULL && config_dir[0] == '\0') {
+            config_dir = NULL;
+        }
+    }
+    const bool builtin = config_dir == NULL && config_path == NULL;
+    if (builtin) {
+        fprintf(stderr, "no setup folder given (--config-dir or $" SETUP_DIR_ENV "): running the built-in "
+                        "noise-only starter; create your own with: sdr-simulator --init DIR\n");
+    }
+    char config_buf[SIM_MAX_PATH];
+    if (config_dir != NULL && config_path == NULL) {
+        if (snprintf(config_buf, sizeof(config_buf), "%s/" SETUP_DIR_CONFIG_FILE, config_dir) >= (int)sizeof(config_buf)) {
+            fprintf(stderr, "config error: setup folder path too long: %s\n", config_dir);
+            return 2;
+        }
+        config_path = config_buf;
     }
 
-    char error[256];
     simulator_config_t config;
-    if (!config_load_yaml(config_path, &config, error, sizeof(error))) {
+    bool config_ok;
+    if (builtin) {
+        FILE *f = setup_template_open(SETUP_DIR_CONFIG_FILE);
+        config_ok = f != NULL && config_load_yaml_stream(f, &config, error, sizeof(error));
+        if (f != NULL) {
+            fclose(f);
+        }
+    } else {
+        config_ok = config_load_yaml(config_path, &config, error, sizeof(error));
+    }
+    if (!config_ok) {
         fprintf(stderr, "config error: %s\n", error);
+        if (config_dir != NULL && access(config_path, F_OK) != 0) {
+            fprintf(stderr, "no setup at %s -- create one with: sdr-simulator --init %s\n", config_dir, config_dir);
+        }
         return 2;
     }
-    if (scenario_path == NULL) {
+    char scenario_buf[SIM_MAX_PATH];
+    if (scenario_path == NULL && !builtin) {
         scenario_path = config.scenario_file;
+        if (config_dir != NULL) {
+            const char *name = config.scenario_file[0] != '\0' ? config.scenario_file : SETUP_DIR_SCENARIO_FILE;
+            if (name[0] == '/') {
+                scenario_path = name;
+            } else {
+                if (snprintf(scenario_buf, sizeof(scenario_buf), "%s/%s", config_dir, name) >= (int)sizeof(scenario_buf)) {
+                    fprintf(stderr, "scenario error: path too long: %s/%s\n", config_dir, name);
+                    return 3;
+                }
+                scenario_path = scenario_buf;
+            }
+        }
     }
     scenario_t scenario;
-    if (!scenario_load(scenario_path, &scenario, error, sizeof(error)) ||
-        !scenario_validate(&scenario, ".", error, sizeof(error))) {
+    bool scenario_ok;
+    if (builtin && scenario_path == NULL) {
+        FILE *f = setup_template_open(SETUP_DIR_SCENARIO_FILE);
+        scenario_ok = f != NULL && scenario_load_stream(f, &scenario, error, sizeof(error));
+        if (f != NULL) {
+            fclose(f);
+        }
+    } else {
+        scenario_ok = scenario_load(scenario_path, &scenario, error, sizeof(error));
+    }
+    if (!scenario_ok ||
+        !scenario_validate(&scenario, config_dir != NULL ? config_dir : ".", error, sizeof(error))) {
         fprintf(stderr, "scenario error: %s\n", error);
         return 3;
     }

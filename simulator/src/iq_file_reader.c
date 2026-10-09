@@ -10,7 +10,7 @@ bool iq_file_reader_open(iq_file_reader_t *reader, const char *path, char *error
     memset(reader, 0, sizeof(*reader));
     FILE *file = fopen(path, "rb");
     if (file == NULL) {
-        snprintf(error, error_size, "asset_not_found:%s", strerror(errno));
+        snprintf(error, error_size, "asset_not_found: %s: %s", path, strerror(errno));
         return false;
     }
     if (fseeko(file, 0, SEEK_END) != 0) {

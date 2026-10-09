@@ -102,13 +102,22 @@ receiver_includes = include_directories('receiver/src')
 receiver_deps = [m_dep, fftw3f_dep, jansson_dep]
 receiver_lib = static_library('receivercore', receiver_sources, dependencies: receiver_deps, include_directories: receiver_includes)
 
+# Starter files, embedded: written by `sdr-simulator --init` and run as-is when no setup is given.
+setup_template_files = files('simulator/setup_template/receiver.yaml', 'simulator/setup_template/scenario.yaml')
+setup_template_c = custom_target(
+  'setup_template',
+  input: setup_template_files,
+  output: 'setup_template.c',
+  command: [find_program('python3'), files('simulator/scripts/embed_files.py'), '@OUTPUT@', '@INPUT@']
+)
+
 simulator = executable(
   'sdr-simulator',
-  'simulator/src/main.c',
+  ['simulator/src/main.c', 'simulator/src/setup_dir.c', setup_template_c],
   link_with: sim_lib,
   dependencies: sim_deps,
   include_directories: sim_includes,
-  install: false
+  install: true
 )
 
 waterfall_receiver = executable(

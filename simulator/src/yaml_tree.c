@@ -209,9 +209,15 @@ yaml_tree_node_t *yaml_tree_load_file(const char *path, char *error, size_t erro
         snprintf(error, error_size, "scenario_invalid:cannot_open_file");
         return NULL;
     }
+    yaml_tree_node_t *root = yaml_tree_load_stream(file, error, error_size);
+    fclose(file);
+    return root;
+}
+
+yaml_tree_node_t *yaml_tree_load_stream(FILE *file, char *error, size_t error_size)
+{
     yaml_parser_t parser;
     if (!yaml_parser_initialize(&parser)) {
-        fclose(file);
         snprintf(error, error_size, "scenario_invalid:yaml_init_failed");
         return NULL;
     }
@@ -248,7 +254,6 @@ yaml_tree_node_t *yaml_tree_load_file(const char *path, char *error, size_t erro
     }
 
     yaml_parser_delete(&parser);
-    fclose(file);
     if (failed) {
         yaml_tree_free(root);
         return NULL;

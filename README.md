@@ -27,6 +27,50 @@ meson setup build
 meson compile -C build
 ```
 
+## Installing From RPM
+
+RPMs are built by GitHub Actions (`.github/workflows/rpm.yml`): every push to `master` attaches
+them to the workflow run, and pushing a `v*` tag publishes them as a GitHub Release. The RPM
+contains only the simulator; the waterfall receiver is built from source.
+
+```sh
+sudo dnf install ./sdr-simulator-*.rpm
+```
+
+Each simulator runs from a **setup folder** that can live anywhere (full guide:
+[configuration manual §12](docs/configuration_manual.md#12-installation-and-setup-folders)):
+
+```
+/srv/sim/site-a/
+├── receiver.yaml    # receivers, channels, REST/UDP ports
+├── scenario.yaml    # signals
+└── assets/          # IQ/WAV recordings, referenced as assets/<file>
+```
+
+Relative asset paths in the scenario resolve against the setup folder, so it can be moved or
+copied between machines. The simulator picks the folder from `--config-dir DIR`, else
+`$SDR_SIMULATOR_CONFIG_DIR`. With neither, plain `sdr-simulator` runs a built-in noise-only
+starter setup, so a fresh install streams something straight away.
+
+Create a new setup and run it by hand:
+
+```sh
+sdr-simulator --init /srv/sim/site-a
+sdr-simulator --config-dir /srv/sim/site-a
+```
+
+Run it as a service. Each instance `sdr-simulator@NAME` reads its setup folder from
+`/etc/sdr-simulator/instances/NAME.conf`, so several simulators can run side by side; give each
+setup its own `rest_port` and `udp_output_port` values. Services run as the `sdr-simulator` user,
+which needs read access to the setup folder.
+
+```sh
+sudo mkdir -p /etc/sdr-simulator/instances
+echo SDR_SIMULATOR_CONFIG_DIR=/srv/sim/site-a | sudo tee /etc/sdr-simulator/instances/site-a.conf
+sudo systemctl enable --now sdr-simulator@site-a
+journalctl -u sdr-simulator@site-a
+```
+
 ## Quick Start Example
 
 Terminal 1, start the simulator:

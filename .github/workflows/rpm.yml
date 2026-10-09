@@ -1,0 +1,92 @@
+name: Build RPM
+
+on:
+  push:
+    branches: [master]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  rpm:
+    runs-on: ubuntu-latest
+    container: fedora:latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # git must exist before checkout, otherwise actions/checkout falls back to a tarball
+      # without .git and `git archive` below fails.
+      - name: Install packaging tools
+        run: dnf install -y git rpm-build rpmdevtools 'dnf-command(builddep)'
+
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: dnf builddep -y packaging/sdr-simulator.spec
+
+      - name: Determine version
+        id: ver
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            version="${GITHUB_REF_NAME#v}"
+            release=1
+          else
+            version=$(sed -n "s/^ *version: *'\([^']*\)'.*/\1/p" meson.build | head -1)
+            release="0.${GITHUB_RUN_NUMBER}.git$(git rev-parse --short HEAD)"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "release=$release" >> "$GITHUB_OUTPUT"
+          echo "Building $version-$release"
+
+      - name: Create source tarball
+        run: |
+          mkdir -p rpmbuild/SOURCES
+          git archive --format=tar.gz \
+            --prefix="sdr-simulator-${{ steps.ver.outputs.version }}/" \
+            -o "rpmbuild/SOURCES/sdr-simulator-${{ steps.ver.outputs.version }}.tar.gz" HEAD
+
+      - name: Build RPM
+        run: |
+          rpmbuild -ba \
+            --define "_topdir $PWD/rpmbuild" \
+            --define "pkg_version ${{ steps.ver.outputs.version }}" \
+            --define "pkg_release ${{ steps.ver.outputs.release }}" \
+            packaging/sdr-simulator.spec
+
+      - name: Smoke-test install
+        run: |
+          dnf install -y rpmbuild/RPMS/*/sdr-simulator-[0-9]*.rpm
+          rpm -ql sdr-simulator
+          getent passwd sdr-simulator
+          # With no setup folder the built-in noise-only starter runs.
+          test "$(sdr-simulator --render-once-samples 1024 | wc -c)" -eq 4096
+          # A new setup folder anywhere, selected via the instance-style env var.
+          sdr-simulator --init /tmp/site-a
+          test "$(SDR_SIMULATOR_CONFIG_DIR=/tmp/site-a sdr-simulator --render-once-samples 1024 | wc -c)" -eq 4096
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdr-simulator-rpm-${{ steps.ver.outputs.version }}-${{ steps.ver.outputs.release }}
+          path: |
+            rpmbuild/RPMS/*/*.rpm
+            rpmbuild/SRPMS/*.rpm
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: rpm
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/RPMS/*/sdr-simulator-[0-9]*.rpm
+            dist/SRPMS/*.rpm

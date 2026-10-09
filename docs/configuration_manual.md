@@ -21,6 +21,10 @@ You run them together:
 
 If `--scenario` is omitted, the instance's `scenario_file` is used.
 
+On an installed system (RPM) you normally keep both files, plus the recordings they use, in a
+**setup folder** and run `sdr-simulator --config-dir DIR` — see
+[§12 Installation and setup folders](#12-installation-and-setup-folders).
+
 ---
 
 ## 1. The mental model
@@ -38,6 +42,92 @@ Three concepts, in order of the signal path:
 
 > Sources and signals live in the **scenario**. Channels live in the **instance**. A signal
 > becomes audible on a channel only when their frequency spans overlap.
+
+### 1.1 What the simulator actually does
+
+The simulator is a **replay-and-mix engine, not a signal generator**. Every sample it emits
+originates in a file you supply — it never synthesises a waveform from *data*. There is no
+modulator that takes bits, bytes, a message or a packet and produces a signal; the only synthesis
+it performs is analogue modulation of an audio clip onto a carrier (`wbfm`, `am`, `usb`, `lsb`).
+
+How a block of samples is produced depends on which of **two rendering paths** the channel is on.
+
+The **mixer** is the default and the one worth having in your head. For each output block it:
+
+1. picks the signals whose passband overlaps the channel window,
+2. reads each one's content from its source file at an epoch-derived playback position,
+3. resamples it from the source rate to the channel rate, and shifts it to its RF offset,
+4. scales it to the configured power, sums the signals, adds the noise floor,
+5. saturates the mix and packages it as a VITA 49.2 IF-data packet.
+
+**Passthrough** does almost none of that: one capture file is copied to the wire, with no
+resampling, no summing and no noise — only step 2 still applies. It is a deliberate opt-in for
+channels that exist to replay a recording rather than to model a band, and it is described in
+[§1.4](#14-two-rendering-paths-mixer-vs-passthrough). Read the rest of this section as describing
+the mixer unless it says otherwise.
+
+### 1.2 What goes in
+
+| Input | Accepted formats | Notes |
+| --- | --- | --- |
+| **IQ recording** (`iq_file`) | `ci16`, `cf32` | Interleaved little-endian complex baseband. Replayed with `modulation: iq`. |
+| **IQ recording, passthrough only** | `ci16`, `ci24`, `cf32` | Streamed verbatim; see [§6](#6-passthrough-dedicated-replay-channels). |
+| **Audio clip** (`audio_file`) | PCM16 `wav` | Mono, or stereo folded to mono. Modulated with `wbfm`/`am`/`usb`/`lsb`. |
+| **Bits, bytes, messages, packets** | — | **Not supported.** Pre-modulate them into an IQ file first; see [§9](#9-recipes-adding-your-own-content). |
+
+A `cf32` source feeding the **mixer** path is scaled by 2¹⁵ and saturated to `ci16` when it is
+loaded, because the mix bus is `ci16` — so it is quantised to 16 bits on ingest regardless of the
+channel's output format. Only the passthrough path carries `ci24`/`cf32` at full precision end to
+end.
+
+### 1.3 What comes out
+
+Always IQ, always VITA 49.2 over UDP, always big-endian on the wire. The payload format is a
+property of the **channel** (`output_format`: `ci16`, `ci24` or `cf32`) and is **independent of the
+source format** — a WAV source can be emitted as `cf32`, a `cf32` capture as `ci16`. The only
+coupling is passthrough, where the source `format` must equal the channel `output_format` or that
+channel renders silence.
+
+Bandwidth is unconstrained on the mixer path: any source rate resamples to any channel rate
+through a polyphase resampler whose anti-alias cutoff tracks the ratio. Integer ratios above 16
+from a looping source are instead extracted by a multi-stage DDC cascade (~80 dB alias
+rejection). Passthrough never resamples — it needs one capture file per bandwidth you intend to
+play.
+
+### 1.4 Two rendering paths: mixer vs. passthrough
+
+Everything above describes the **mixer** — the general path, and the default. A channel rendered
+by the mixer is a *synthesised band*: the simulator builds it sample by sample out of however many
+signals overlap that window, plus noise. That is what makes it a simulator rather than a player.
+
+**Passthrough** (`passthrough: true`) is the opposite bargain. The channel stops being a
+synthesised band and becomes a pipe for exactly one capture file, copied to the wire untouched.
+Everything the mixer does — summing, resampling, gain, noise — is skipped, not configured away.
+
+| | Mixer (default) | Passthrough |
+| --- | --- | --- |
+| Signals per channel | Any number, summed | Exactly one; **all others are ignored** on that channel |
+| Noise floor | Added | Never — the capture's own noise is all you get |
+| Resampling | Any source rate → any channel rate | None. One file per rate, via `passthrough_variants` |
+| Unsupported bandwidth | Resampled to fit | **Silence** |
+| Precision | `ci16` mix bus (a `cf32` source is quantised on load) | Native `ci16`/`ci24`/`cf32` end to end |
+| Format coupling | None — any source format, any `output_format` | Source `format` **must equal** the channel's `output_format`, else silence |
+| Power control | `power_dbm` / `snr_db` / `output_scale` | Literal `memcpy` at unit gain; a scaled copy otherwise |
+| Cost per block | Full render | ~15× cheaper |
+
+Use the **mixer** whenever you are building a scene — several emitters, a noise floor, bursts,
+a signal you want to find by tuning around it. Use **passthrough** when you already have the
+exact band you want on disk and the simulator's job is faithful, cheap replay of it: a recorded
+80 MHz swathe fed to a downstream decoder, or a high-rate stream where the render cost of the
+mixer would not sustain real time.
+
+The practical trap is that passthrough is **exclusive by design, not an overlay**. Adding a
+passthrough signal to a scenario silently removes every other signal *and* the noise floor from
+any channel it is active on. If you want a capture combined with other emitters, leave
+`passthrough` unset and let the mixer resample it. Mechanics and requirements are in
+[§6](#6-passthrough-dedicated-replay-channels).
+
+
 
 ---
 
@@ -70,7 +160,7 @@ At-a-glance tables for every parameter. The sections that follow explain the beh
 | --- | --- | --- |
 | `id` | string | Required, unique. |
 | `source_type` | `iq_file` \| `audio_file` | Required. |
-| `file` | string (path) | Required (unless `passthrough_variants` is given). |
+| `file` | string (path) | Required (unless `passthrough_variants` is given). A relative path resolves against the setup folder in setup-folder mode, otherwise against the working directory ([§12.2](#122-setup-folders)). |
 | `format` | `ci16` \| `cf32` (IQ) \| `wav` (audio) | Required. `cf32` is interleaved little-endian `float32` (±1.0 full scale), converted to ci16 at load. |
 | `byte_order` | `little_endian` | IQ only. |
 | `iq_layout` | `interleaved_iq` | IQ only. |
@@ -108,7 +198,7 @@ bytes per complex sample; WAV: the header's frame count).
 | --- | --- | --- |
 | `schema_version` | integer, must be `1` | Required. |
 | `instance_id` | string | Required. |
-| `scenario_file` | string (path) | Required. Default scenario when `--scenario` is omitted. |
+| `scenario_file` | string (path) | Optional. Default scenario when `--scenario` is omitted. In a setup folder it is relative to the folder and defaults to `scenario.yaml`. |
 | `log_path` | string | Optional. |
 | `stream_block_samples` | integer, `1`–`4096` | CI16 samples per VITA 49.2 packet. Default `1024` (use `1536` for the MTU-9000 profile). |
 | `stream_max_batch_latency_us` | integer (µs) | Max wall-clock span of samples the UDP thread coalesces into one paced `sendmmsg` burst. Bounds send-side latency so low-rate channels update smoothly instead of scrolling in jerks; high-rate channels are unaffected (they hit the fixed 16-packet count cap first). Default `25000` (25 ms); `0` uses the default. Raise it to favour syscall batching, lower it for smoother low-rate updates. |
@@ -269,7 +359,7 @@ the same thing regardless of how hot the WAV was mastered.)
 > noise together, so SNR is unchanged — just buys headroom); or reduce the signal `power_dbm` /
 > `snr_db`; or raise `rf_reference_power_dbm` (affects every signal on the receiver, and de-tunes the
 > passthrough memcpy fast path). The simulator prints a per-signal **`warning: signal '…' overdrives
-> receiver R channel C …`** at startup whenever this condition is met (see [§10 Validation](#10-validation)),
+> receiver R channel C …`** at startup whenever this condition is met (see [§11 Validation](#11-validation)),
 > with the specific `output_scale` ceiling to use.
 
 ### 3.4 Signal bandwidth
@@ -524,7 +614,139 @@ knobs (`asset_cache_max_bytes`, `ddc_cache_max_bytes`).
 
 ---
 
-## 9. Worked example: `benchmark_load.yaml`
+## 9. Recipes: adding your own content
+
+Because the simulator replays rather than generates (see [§1.1](#11-what-the-simulator-actually-does)),
+adding a new *kind* of signal is always the same three steps:
+
+1. **Produce a baseband IQ file** outside the simulator — GNU Radio, a Python script, or a real
+   off-air recording. Interleaved little-endian `ci16` or `cf32`, centred at 0 Hz.
+2. **Declare it as a source**, with the file's *true* sample rate and its occupied bandwidth.
+3. **Place it with a signal**, at an RF frequency, a power, and a timing model.
+
+### 9.1 An FSK signal
+
+The shipped [`generate_sample_iq.py`](../simulator/scripts/generate_sample_iq.py) writes a
+continuous-phase binary FSK test pattern — a `1010…` bit pattern at `--symbol-rate`, mapped to
+`--tone-hz ± --deviation-hz`, phase-integrated so symbol transitions stay continuous:
+
+```sh
+python3 simulator/scripts/generate_sample_iq.py \
+  --output simulator/assets/my_fsk.c16 \
+  --pattern fsk --sample-rate 24576000 --samples 24576 \
+  --tone-hz 1000000 --deviation-hz 120000 --symbol-rate 12000
+```
+
+Then declare and place it:
+
+```yaml
+sources:
+- id: my_fsk
+  source_type: iq_file
+  file: simulator/assets/my_fsk.c16
+  format: ci16
+  byte_order: little_endian
+  iq_layout: interleaved_iq
+  sample_rate_hz: 24576000
+  bandwidth_hz: 264000        # 2 * (deviation + symbol rate), not the file's full span
+  center_frequency_hz: 0
+  nominal_level_dbfs: -12.0
+signals:
+- signal_id: sig_my_fsk
+  source_reference: my_fsk
+  center_frequency_hz: 10005000000
+  snr_db: 20.0
+  start_time_s: 0.0
+  repeat_interval_s: 1.0
+```
+
+> The generator does **not** snap the FSK phase to a whole number of cycles per file (unlike its
+> `tone`/`multitone` patterns), so a continuously looped FSK asset has a phase step at the loop
+> seam — a broadband click once per loop. Fine for energy-detection and scanner tests, misleading
+> for spectral-purity measurements.
+
+### 9.2 A POCSAG (or any other decodable) transmission
+
+The simulator has no POCSAG encoder — and needs none. Capture or generate the transmission once,
+then replay it. The shipped [`default.yaml`](../simulator/scenarios/default.yaml) does exactly
+this with a 32 kS/s `cf32` capture:
+
+```yaml
+sources:
+- id: pocsag_15k_capture
+  source_type: iq_file
+  file: simulator/assets/pocsag_466075_32ksps.cf32
+  format: cf32
+  byte_order: little_endian
+  iq_layout: interleaved_iq
+  sample_rate_hz: 32000
+  bandwidth_hz: 15000
+  center_frequency_hz: 0
+  nominal_level_dbfs: -10.0
+signals:
+- signal_id: sig_pocsag_466075_02
+  source_reference: pocsag_15k_capture
+  center_frequency_hz: 466075000
+  snr_db: 40
+  start_time_s: 0
+  repeat_interval_s: 33
+```
+
+A real decoder pointed at a channel covering 466.075 MHz recovers the original pager messages —
+the bits survive because the simulator only shifts, scales and resamples the capture. The same
+recipe works unchanged for ADS-B, AIS, DMR, LoRa or anything else: the decodability lives in the
+file, not in the simulator.
+
+To place the *same* transmission at several frequencies, powers or schedules, add more signals
+referencing the one source — the file is loaded once and shared.
+
+### 9.3 An analogue radio station
+
+This is the one case with no external tooling: hand the simulator an audio clip and let it
+modulate.
+
+```yaml
+sources:
+- id: radio_clip_wav
+  source_type: audio_file
+  file: simulator/assets/radio_clip.wav
+  format: wav
+  sample_rate_hz: 48000
+  bandwidth_hz: 200000
+  center_frequency_hz: 0
+  nominal_level_dbfs: -6.0
+signals:
+- signal_id: fm_station
+  source_reference: radio_clip_wav
+  modulation: wbfm            # or am / usb / lsb
+  bandwidth_hz: 200000        # required for audio: the modulation sets the RF width
+  fm_deviation_hz: 75000
+  center_frequency_hz: 100100000
+  snr_db: 30.0
+```
+
+Omitting `repeat_interval_s` makes it an endless station; the clip is loop-conditioned at load
+(20 ms crossfade, DC removed, circular Hilbert) so the wrap is seamless.
+
+### 9.4 Choosing the source sample rate
+
+Give the source its file's real rate, and prefer a rate the channel rates **divide into as
+integers** — a non-integer ratio falls back to the legacy resampler with reduced alias rejection
+and warns at startup ([§11](#11-validation)). A 32 kS/s capture rendered into a 2.048 MS/s
+channel is fine; the same capture into a 1.5 MS/s channel is not.
+
+### 9.5 Which path will my signal take?
+
+| You want | Set | Cost / constraint |
+| --- | --- | --- |
+| The signal mixed with others and noise | nothing special (`replay_mode: fixed`) | Resamples to any channel rate. |
+| A capture that fills the band wherever you tune | `replay_mode: range` | Continuous only; no `repeat_interval_s`. |
+| A capture that holds its absolute RF position | `replay_mode: shift` | Continuous only; DDC-extracted at ratios > 16. |
+| One capture streamed verbatim, nothing else | `passthrough: true` | Needs `passthrough_variants` (one file per rate) and a matching channel `output_format`; excludes all other signals and the noise floor on that channel. |
+
+---
+
+## 10. Worked example: `benchmark_load.yaml`
 
 The shipped [`benchmark_load.yaml`](../simulator/tests/benchmarks/benchmark_load.yaml) puts four signals
 on the air over a −160 dBm/Hz noise floor, all using the **burst** timing model (each has a
@@ -544,7 +766,7 @@ of a 1-second burst — or `wbfm_station` into an endless radio station — dele
 
 ---
 
-## 10. Validation
+## 11. Validation
 
 Both files are validated at load; a failure prints an error code and the simulator refuses to
 start. The full list of codes is in [`schemas.md`](schemas.md). The timing-related ones:
@@ -570,3 +792,136 @@ The overdrive warning is the load-time counterpart of a subtle failure mode: a s
 (or a high `snr_db` over a low noise floor) can silently resolve to a power above the full-scale
 reference and rail the ADC, whose hard clipping shows up only as a comb of evenly spaced ghost
 carriers on the waterfall — not as an obvious error.
+
+---
+
+## 12. Installation and setup folders
+
+### 12.1 What the RPM installs
+
+The RPM installs only the program and its service integration — no configs, scenarios or
+recordings:
+
+| Path | What |
+| --- | --- |
+| `/usr/bin/sdr-simulator` | The simulator. |
+| `/usr/lib/systemd/system/sdr-simulator@.service` | Service template, one instance per simulator ([§12.5](#125-running-as-a-service)). |
+| `/usr/lib/sysusers.d/sdr-simulator.conf` | The `sdr-simulator` system user the service runs as. |
+| `/usr/share/doc/sdr-simulator/` | This manual and the README. |
+
+Nothing is created under `/etc`. The waterfall receiver is not packaged; build it from source.
+
+### 12.2 Setup folders
+
+A **setup folder** holds everything one simulator needs and can live anywhere — wherever your
+site keeps its configuration:
+
+```
+/srv/sim/site-a/
+├── receiver.yaml    # the instance config (§8): receivers, channels, REST/UDP ports
+├── scenario.yaml    # the scenario (§3): sources and signals
+└── assets/          # IQ/WAV recordings used by the scenario
+```
+
+Relative paths inside a setup folder resolve against the folder, not the directory you start
+the simulator from. A source therefore references its recording as
+
+```yaml
+file: assets/my_capture.c16
+```
+
+and the folder can be moved or copied to another machine unchanged. Absolute paths also work,
+e.g. for recordings on a shared data drive. A relative `scenario_file` in `receiver.yaml` is
+resolved the same way; without it, `scenario.yaml` is used.
+
+### 12.3 Choosing the setup
+
+The simulator picks its configuration in this order:
+
+| Given | Runs |
+| --- | --- |
+| `--config-dir DIR` | The setup folder `DIR`. |
+| `$SDR_SIMULATOR_CONFIG_DIR` | The setup folder it names (used by the service). |
+| `--config FILE` only | That instance file, with paths relative to the working directory — the repository layout used in the examples above. |
+| Nothing | A **built-in starter setup**: a noise floor only, nothing to configure. |
+
+`--config` and `--scenario` can be combined with a setup folder to override one of its files.
+
+The built-in starter is the same as a fresh `--init` (below): one receiver tuned 90–110 MHz
+with a 20 MHz front end, REST on `127.0.0.1:8100`, channel 0 (20 MHz, follows the tuner) on UDP
+port 50000 and channel 1 (200 kHz at 100 MHz) on port 50001, sent to `127.0.0.1`. It is meant
+to check that an installation works:
+
+```sh
+sdr-simulator
+curl http://127.0.0.1:8100/api/v1/metrics
+```
+
+### 12.4 Creating a setup
+
+```sh
+sdr-simulator --init /srv/sim/site-a
+```
+
+creates the folder (and any missing parents) with the starter `receiver.yaml`,
+`scenario.yaml` and an empty `assets/`. Both files are commented; `scenario.yaml` contains a
+ready-to-uncomment example for adding a recording. `--init` never overwrites an existing
+`receiver.yaml` or `scenario.yaml`.
+
+Then edit the files using sections 2–9 of this manual, copy your recordings into `assets/`,
+and test the setup in the foreground:
+
+```sh
+sdr-simulator --config-dir /srv/sim/site-a
+```
+
+A missing recording stops the start with the full path it looked for, e.g.
+`asset_not_found: /srv/sim/site-a/assets/my_capture.c16: No such file or directory`.
+
+To reach the simulator from other machines, change `rest_bind_host` to `0.0.0.0` and point
+`udp_output_host` at the receiving host or a multicast group (see [§8](#8-instance-yaml)).
+
+### 12.5 Running as a service
+
+Each simulator runs as one instance of the `sdr-simulator@` service. Instance `NAME` reads its
+setup folder from `/etc/sdr-simulator/instances/NAME.conf`:
+
+```sh
+sudo mkdir -p /etc/sdr-simulator/instances
+echo SDR_SIMULATOR_CONFIG_DIR=/srv/sim/site-a | sudo tee /etc/sdr-simulator/instances/site-a.conf
+sudo systemctl enable --now sdr-simulator@site-a
+```
+
+| Task | Command |
+| --- | --- |
+| Status | `systemctl status sdr-simulator@site-a` |
+| Logs (errors, load-time warnings) | `journalctl -u sdr-simulator@site-a` |
+| Apply edited config/scenario | `sudo systemctl restart sdr-simulator@site-a` |
+| Stop and disable | `sudo systemctl disable --now sdr-simulator@site-a` |
+
+An instance without its `.conf` file does not start, so a mistyped name fails visibly instead
+of running something unexpected. The service runs as the `sdr-simulator` user, which needs
+read access to the setup folder and its recordings. It restarts automatically 5 s after a
+crash.
+
+### 12.6 Several simulators on one machine
+
+Run one instance per setup folder:
+
+```sh
+sdr-simulator --init /srv/sim/site-a
+sdr-simulator --init /srv/sim/site-b
+echo SDR_SIMULATOR_CONFIG_DIR=/srv/sim/site-a | sudo tee /etc/sdr-simulator/instances/site-a.conf
+echo SDR_SIMULATOR_CONFIG_DIR=/srv/sim/site-b | sudo tee /etc/sdr-simulator/instances/site-b.conf
+sudo systemctl enable --now sdr-simulator@site-a sdr-simulator@site-b
+```
+
+The instances are independent processes, but they share the machine's network ports. Every
+`rest_port` must be unique across all running instances, and so must every
+`udp_output_port` that goes to the same destination. A fresh `--init` always uses REST port
+8100 and UDP ports 50000/50001, so change them in the second setup before starting it. A port
+clash shows up in that instance's log as a failure to start the REST server.
+
+Each instance also needs its own CPU time: a wideband channel (tens of MS/s) can occupy a core
+on its own, so check `actual_sample_rate_sps` and `samples_missed` in each instance's
+`/api/v1/metrics` after adding instances.

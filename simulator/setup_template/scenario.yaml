@@ -1,0 +1,32 @@
+# Starter scenario, created by `sdr-simulator --init`: a plain noise floor, no signals.
+#
+# To add a recording, copy it into assets/ and declare a source plus a signal, e.g.
+#
+#   sources:
+#   - id: my_capture
+#     source_type: iq_file
+#     file: assets/my_capture.c16        # relative to this setup folder
+#     format: ci16
+#     byte_order: little_endian
+#     iq_layout: interleaved_iq
+#     sample_rate_hz: 1024000
+#     bandwidth_hz: 1000000
+#     center_frequency_hz: 0
+#     nominal_level_dbfs: -10.0
+#   signals:
+#   - signal_id: my_signal
+#     source_reference: my_capture
+#     center_frequency_hz: 100000000
+#     bandwidth_hz: 1000000
+#     power_dbm: -70.0
+#
+# Full reference: /usr/share/doc/sdr-simulator/configuration_manual.md
+schema_version: 1
+scenario_id: starter
+description: 'Noise floor only'
+noise_floor:
+  enabled: true
+  power_dbm_per_hz: -140.0
+  seed: 1
+sources: []
+signals: []

@@ -295,19 +295,26 @@ static void leave_sequence(parse_state_t *state)
 
 bool config_load_yaml(const char *path, simulator_config_t *config, char *error, size_t error_size)
 {
+    FILE *file = fopen(path, "rb");
+    if (file == NULL) {
+        memset(config, 0, sizeof(*config));
+        snprintf(error, error_size, "config_not_found");
+        return false;
+    }
+    const bool ok = config_load_yaml_stream(file, config, error, error_size);
+    fclose(file);
+    return ok;
+}
+
+bool config_load_yaml_stream(FILE *file, simulator_config_t *config, char *error, size_t error_size)
+{
     memset(config, 0, sizeof(*config));
     config->stream_cpu = -1;
     config->asset_cache_max_bytes = SIZE_MAX; /* unset sentinel; config_validate applies the default */
     config->ddc_cache_max_bytes = SIZE_MAX;   /* unset sentinel; config_validate applies the default */
-    FILE *file = fopen(path, "rb");
-    if (file == NULL) {
-        snprintf(error, error_size, "config_not_found");
-        return false;
-    }
 
     yaml_parser_t parser;
     if (!yaml_parser_initialize(&parser)) {
-        fclose(file);
         snprintf(error, error_size, "yaml_parser_init_failed");
         return false;
     }
@@ -356,7 +363,6 @@ bool config_load_yaml(const char *path, simulator_config_t *config, char *error,
     }
 
     yaml_parser_delete(&parser);
-    fclose(file);
     if (!ok) {
         return false;
     }

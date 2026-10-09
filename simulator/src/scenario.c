@@ -94,6 +94,8 @@ static bool parse_passthrough_variants(const yaml_tree_node_t *src, scenario_sou
     return true;
 }
 
+static bool scenario_from_tree(yaml_tree_node_t *root, scenario_t *scenario, char *error, size_t error_size);
+
 bool scenario_load(const char *path, scenario_t *scenario, char *error, size_t error_size)
 {
     memset(scenario, 0, sizeof(*scenario));
@@ -101,6 +103,22 @@ bool scenario_load(const char *path, scenario_t *scenario, char *error, size_t e
     if (root == NULL) {
         return false; /* yaml_tree_load_file set the error message */
     }
+    return scenario_from_tree(root, scenario, error, error_size);
+}
+
+bool scenario_load_stream(FILE *file, scenario_t *scenario, char *error, size_t error_size)
+{
+    memset(scenario, 0, sizeof(*scenario));
+    yaml_tree_node_t *root = yaml_tree_load_stream(file, error, error_size);
+    if (root == NULL) {
+        return false;
+    }
+    return scenario_from_tree(root, scenario, error, error_size);
+}
+
+/* Parses root into scenario and frees root. */
+static bool scenario_from_tree(yaml_tree_node_t *root, scenario_t *scenario, char *error, size_t error_size)
+{
     if (yaml_tree_kind(root) != YAML_TREE_MAPPING) {
         yaml_tree_free(root);
         snprintf(error, error_size, "scenario_invalid:not_a_mapping");

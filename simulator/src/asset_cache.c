@@ -444,7 +444,7 @@ static bool load_iq_buffer(const char *path, uint64_t sample_count, sim_output_f
     if (file == NULL) {
         free(out->samples);
         out->samples = NULL;
-        snprintf(error, error_size, "asset_not_found:%s", strerror(errno));
+        snprintf(error, error_size, "asset_not_found: %s: %s", path, strerror(errno));
         return false;
     }
     uint8_t *dst = out->samples;
@@ -497,7 +497,7 @@ static bool load_iq_source_float(const char *path, uint64_t sample_count, bool i
     FILE *file = fopen(path, "rb");
     if (file == NULL) {
         free(dst);
-        snprintf(error, error_size, "asset_not_found:%s", strerror(errno));
+        snprintf(error, error_size, "asset_not_found: %s: %s", path, strerror(errno));
         return false;
     }
     bool ok = true;

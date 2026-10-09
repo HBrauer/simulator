@@ -1,0 +1,42 @@
+# Starter receiver configuration, created by `sdr-simulator --init`.
+#
+# This folder is one simulator setup:
+#   receiver.yaml   this file -- receivers, channels, REST and UDP ports
+#   scenario.yaml   the signals to render (starts as a plain noise floor)
+#   assets/         your IQ/WAV recordings; reference them from scenario.yaml as assets/<file>
+#
+# Running several simulators on one machine: give each setup its own rest_port and
+# udp_output_port values so they do not collide.
+#
+# Full reference: /usr/share/doc/sdr-simulator/configuration_manual.md
+schema_version: 1
+instance_id: "starter"
+stream_block_samples: 1024
+receivers:
+  - receiver_id: 0
+    # 127.0.0.1 serves this machine only; use 0.0.0.0 (REST) and the client's address or a
+    # multicast group (UDP) to reach other hosts.
+    rest_bind_host: "127.0.0.1"
+    rest_port: 8100
+    udp_output_host: "127.0.0.1"
+    # Tuner range and instantaneous front-end bandwidth.
+    frequency_min_hz: 90000000
+    frequency_max_hz: 110000000
+    bandwidth_hz: 20000000
+    scan_rate_hz_per_s: 100000000000
+    rf_reference_power_dbm: -55.0
+    channels:
+      # Channel 0: wideband stream that follows the tuner.
+      - channel_id: 0
+        track_tuner: true
+        rates:
+          - { bandwidth_hz: 20000000, sample_rate_hz: 24576000 }
+          - { bandwidth_hz:  5000000, sample_rate_hz:  6144000 }
+          - { bandwidth_hz:  1000000, sample_rate_hz:  1536000 }
+        udp_output_port: 50000
+      # Channel 1: narrowband DDC channel at a fixed frequency inside the tuner band.
+      - channel_id: 1
+        center_frequency_hz: 100000000
+        rates:
+          - { bandwidth_hz: 200000, sample_rate_hz: 256000 }
+        udp_output_port: 50001
