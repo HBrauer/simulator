@@ -152,17 +152,25 @@ def test_replay_instances_started_apart_stay_sample_synchronous(tmp_path):
         procs.append(proc_b)
         _wait_json(f"http://127.0.0.1:{rest_b}/api/v1/health")
 
-        def flush(sock, duration_s=0.3):
+        def flush(socks, duration_s=0.3):
             """Discard the backlog buffered since bind (packets keep arriving at ~6 kpps, so
-            drain for a fixed wall time instead of waiting for the socket to go quiet)."""
+            drain for a fixed wall time instead of waiting for the socket to go quiet). Both
+            sockets are drained together up to the same instant: draining them one after the
+            other leaves the first refilling while the second drains, so their collection
+            windows start ~duration_s apart and never overlap when the receive buffer is large
+            enough (e.g. a big net.core.rmem_default) to keep that stale backlog."""
             deadline = time.time() + duration_s
-            sock.settimeout(0.05)
-            try:
-                while time.time() < deadline:
-                    sock.recvfrom(65536)
-            except socket.timeout:
-                pass
-            sock.settimeout(5.0)
+            for sock in socks:
+                sock.setblocking(False)
+            while time.time() < deadline:
+                for sock in socks:
+                    try:
+                        while True:
+                            sock.recvfrom(65536)
+                    except BlockingIOError:
+                        pass
+            for sock in socks:
+                sock.settimeout(5.0)
 
         def collect(sock, payloads, count=400):
             for _ in range(count):
@@ -173,8 +181,7 @@ def test_replay_instances_started_apart_stay_sample_synchronous(tmp_path):
 
         # The kernel receive buffer keeps only the oldest packets once full, so the two
         # sockets must be flushed and drained concurrently for their windows to overlap.
-        flush(sock_a)
-        flush(sock_b)
+        flush((sock_a, sock_b))
         payloads_a = {}
         payloads_b = {}
         threads = [
