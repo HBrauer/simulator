@@ -219,6 +219,8 @@ bytes per complex sample; WAV: the header's frame count).
 | `rest_port` | integer | Required, unique. |
 | `udp_output_host` | string (IP) | Required. **Destination** the IQ samples are sent to. Unicast (e.g. `127.0.0.1`, one receiver) or IPv4 multicast (e.g. `239.10.10.10`, any receiver that joins the group). |
 | `udp_multicast_interface` | string (IP) | Optional, **multicast only**. Picks which of the machine's network connections the multicast is sent out of, when it has more than one (e.g. Ethernet, Wi-Fi, loopback). Give the IP address of the connection to use. Empty (default) lets the system choose automatically — fine in most cases. Change it only when the automatic choice is wrong: to force local-only testing (`127.0.0.1`) or to send out a specific network when several are connected. Ignored for unicast destinations. |
+| `vrl_framing` | boolean | Optional. Wrap every VITA 49.2 packet (data and context) of this receiver's channels in a VITA 49.1 VRL frame (`VRLP` header + trailer, 12 extra bytes per datagram). Default `false`. See [vita49_udp.md](vita49_udp.md#vita-491-vrl-framing-optional). |
+| `vrl_crc` | boolean | Optional, only with `vrl_framing`. Put a CRC-32 in the VRL trailer instead of the `VEND` no-CRC marker. Default `false`. |
 | `frequency_min_hz` | integer, `0`–`100e9` | Required. Minimum configurable frequency for this receiver (tuner range start). |
 | `frequency_max_hz` | integer, > min, ≤ `100e9` | Required. Maximum configurable frequency for this receiver (tuner range stop). |
 | `bandwidth_hz` | integer (Hz) | Bandwidth of the receiver. All channels must be inside of this bandwidth. Default `80000000`. |

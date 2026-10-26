@@ -932,10 +932,17 @@ static bool handle_received_packet(
     waterfall_t *waterfall,
     rx_stats_t *stats,
     frame_sampler_t *sampler,
-    const uint8_t *packet_data,
-    size_t packet_bytes,
+    const uint8_t *datagram,
+    size_t datagram_bytes,
     bool *frame_ready)
 {
+    /* Strip an optional VITA 49.1 VRL frame; bare VRT datagrams pass through unchanged. */
+    const uint8_t *packet_data = NULL;
+    size_t packet_bytes = 0;
+    if (!vita49_rx_vrl_unwrap(datagram, datagram_bytes, &packet_data, &packet_bytes, NULL)) {
+        stats->bad_packets++;
+        return false;
+    }
     if (vita49_rx_packet_type(packet_data, packet_bytes) == VITA49_RX_PACKET_TYPE_CONTEXT) {
         vita49_rx_context_t context;
         if (!vita49_rx_parse_context(packet_data, packet_bytes, &context)) {

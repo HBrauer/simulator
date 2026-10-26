@@ -283,6 +283,62 @@ START_TEST(context_packet_rejects_small_buffer)
 }
 END_TEST
 
+START_TEST(vrl_crc32_matches_ieee_check_value)
+{
+    /* Standard CRC-32 check value for the ASCII string "123456789". */
+    const uint8_t check[] = {'1', '2', '3', '4', '5', '6', '7', '8', '9'};
+    ck_assert_uint_eq(vita49_vrl_crc32(check, sizeof(check)), 0xCBF43926U);
+}
+END_TEST
+
+START_TEST(wraps_packet_in_vrl_frame_without_crc)
+{
+    const iq_ci16_t samples[] = {{.i = 1, .q = -1}};
+    uint8_t out[64];
+    size_t vrt_bytes = 0;
+    size_t frame_bytes = 0;
+    const vita49_if_data_packet_t packet = {
+        .stream_id = 7U,
+        .payload = samples,
+        .payload_samples = 1,
+        .format = SIM_OUTPUT_FORMAT_CI16,
+    };
+    ck_assert(vita49_write_if_data_packet(&packet, out + VITA49_VRL_HEADER_BYTES, sizeof(out) - VITA49_VRL_HEADER_BYTES, &vrt_bytes));
+    ck_assert(vita49_vrl_wrap(out, sizeof(out), vrt_bytes, 0x1234U, false, &frame_bytes));
+    ck_assert_uint_eq(frame_bytes, vrt_bytes + VITA49_VRL_OVERHEAD_BYTES);
+    ck_assert_uint_eq(read_be32(out), VITA49_VRL_FRAME_ALIGNMENT_WORD);
+    ck_assert_uint_eq(read_be32(out + 4) >> 20U, 0x234U); /* 12-bit count wraps */
+    ck_assert_uint_eq(read_be32(out + 4) & 0xfffffU, frame_bytes / 4U);
+    ck_assert_uint_eq(read_be32(out + 8) >> 28U, VITA49_PACKET_TYPE_IF_DATA);
+    ck_assert_uint_eq(read_be32(out + 12), 7U);
+    ck_assert_uint_eq(read_be32(out + frame_bytes - 4U), VITA49_VRL_NO_CRC_WORD);
+}
+END_TEST
+
+START_TEST(wraps_packet_in_vrl_frame_with_crc)
+{
+    uint8_t out[32] = {0};
+    const size_t vrt_bytes = 8U;
+    memset(out + VITA49_VRL_HEADER_BYTES, 0xA5, vrt_bytes);
+    size_t frame_bytes = 0;
+    ck_assert(vita49_vrl_wrap(out, sizeof(out), vrt_bytes, 3U, true, &frame_bytes));
+    ck_assert_uint_eq(frame_bytes, 20U);
+    ck_assert_uint_eq(read_be32(out + 4) >> 20U, 3U);
+    ck_assert_uint_eq(read_be32(out + 16), vita49_vrl_crc32(out, 16U));
+    ck_assert_uint_ne(read_be32(out + 16), VITA49_VRL_NO_CRC_WORD);
+}
+END_TEST
+
+START_TEST(vrl_wrap_rejects_small_or_unaligned_frame)
+{
+    uint8_t out[32] = {0};
+    size_t frame_bytes = 99;
+    ck_assert(!vita49_vrl_wrap(out, 19U, 8U, 0U, false, &frame_bytes));
+    ck_assert_uint_eq(frame_bytes, 0U);
+    ck_assert(!vita49_vrl_wrap(out, sizeof(out), 6U, 0U, false, &frame_bytes));
+}
+END_TEST
+
 Suite *vita49_packet_suite(void)
 {
     Suite *suite = suite_create("vita49_packet");
@@ -296,6 +352,10 @@ Suite *vita49_packet_suite(void)
     tcase_add_test(tc, writes_context_packet_fields);
     tcase_add_test(tc, writes_context_packet_with_class_id);
     tcase_add_test(tc, context_packet_rejects_small_buffer);
+    tcase_add_test(tc, vrl_crc32_matches_ieee_check_value);
+    tcase_add_test(tc, wraps_packet_in_vrl_frame_without_crc);
+    tcase_add_test(tc, wraps_packet_in_vrl_frame_with_crc);
+    tcase_add_test(tc, vrl_wrap_rejects_small_or_unaligned_frame);
     suite_add_tcase(suite, tc);
     return suite;
 }

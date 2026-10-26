@@ -167,6 +167,10 @@ static bool apply_scalar(simulator_config_t *config, parse_state_t *state, const
             sim_strlcpy(r->udp_output_host, value, sizeof(r->udp_output_host));
         } else if (strcmp(key, "udp_multicast_interface") == 0) {
             sim_strlcpy(r->udp_multicast_interface, value, sizeof(r->udp_multicast_interface));
+        } else if (strcmp(key, "vrl_framing") == 0) {
+            r->vrl_framing = parse_bool_value(value);
+        } else if (strcmp(key, "vrl_crc") == 0) {
+            r->vrl_crc = parse_bool_value(value);
         } else if (strcmp(key, "frequency_min_hz") == 0) {
             r->frequency_min_hz = parse_u64(value);
         } else if (strcmp(key, "frequency_max_hz") == 0) {

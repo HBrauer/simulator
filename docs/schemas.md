@@ -28,6 +28,8 @@ Receiver fields:
 | `rest_port` | integer | yes | Unique per instance. |
 | `udp_output_host` | string | yes | UDP destination host. May be unicast, for example `127.0.0.1`, or IPv4 multicast, for example `239.10.10.10`. |
 | `udp_multicast_interface` | string | no | Local IPv4 interface used for multicast sends, for example `127.0.0.1` for loopback-only testing. Empty/default lets the kernel choose. |
+| `vrl_framing` | boolean | no | Wrap each VRT packet in a VITA 49.1 VRL frame. Default `false`. |
+| `vrl_crc` | boolean | no | With `vrl_framing`, write a CRC-32 trailer instead of `VEND`. Default `false`. |
 | `frequency_min_hz` | integer | yes | Minimum configurable frequency for the receiver (inclusive tuner range start), `0..100000000000`. |
 | `frequency_max_hz` | integer | yes | Maximum configurable frequency for the receiver (tuner range stop), greater than `frequency_min_hz` and `<= 100000000000`. |
 | `bandwidth_hz` | integer | no | Receiver-level: the instantaneous analog (ADC) window all channels extract from (distinct from a channel's own `bandwidth_hz`). Defaults to `80000000`; must be non-zero. |

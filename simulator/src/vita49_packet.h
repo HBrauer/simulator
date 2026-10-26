@@ -67,4 +67,26 @@ size_t vita49_context_packet_size(bool class_id_present);
 bool vita49_write_if_data_packet(const vita49_if_data_packet_t *packet, uint8_t *out, size_t out_size, size_t *written);
 bool vita49_write_context_packet(const vita49_context_packet_t *packet, uint8_t *out, size_t out_size, size_t *written);
 
+/* Optional VITA 49.1 VRL (VRT Link-Layer) framing: each VRT packet is wrapped as
+ *   word 0: Frame Alignment Word "VRLP"
+ *   word 1: 12-bit frame count (bits 31..20) | 20-bit frame size in words (bits 19..0)
+ *   words 2..N-1: the VRT packet, unchanged
+ *   word N: trailer, either a CRC-32 over words 0..N-1 or the no-CRC marker "VEND". */
+#define VITA49_VRL_HEADER_BYTES 8U
+#define VITA49_VRL_TRAILER_BYTES 4U
+#define VITA49_VRL_OVERHEAD_BYTES (VITA49_VRL_HEADER_BYTES + VITA49_VRL_TRAILER_BYTES)
+#define VITA49_VRL_FRAME_ALIGNMENT_WORD 0x56524C50U /* "VRLP" */
+#define VITA49_VRL_NO_CRC_WORD 0x56454E44U          /* "VEND" */
+#define VITA49_VRL_FRAME_COUNT_MASK 0x0fffU
+#define VITA49_VRL_MAX_FRAME_WORDS 0xfffffU
+
+/* CRC-32 used for the VRL trailer: the IEEE 802.3 / zlib CRC-32 (reflected polynomial
+ * 0xEDB88320, init and final XOR 0xFFFFFFFF) over the frame bytes in wire order. */
+uint32_t vita49_vrl_crc32(const uint8_t *data, size_t bytes);
+
+/* Wrap a VRT packet already written at frame + VITA49_VRL_HEADER_BYTES (packet_bytes long) in
+ * a VRL frame: fills in the header words and the trailer. frame_size must hold the packet plus
+ * VITA49_VRL_OVERHEAD_BYTES. */
+bool vita49_vrl_wrap(uint8_t *frame, size_t frame_size, size_t packet_bytes, uint16_t frame_count, bool crc, size_t *written);
+
 #endif

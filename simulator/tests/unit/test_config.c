@@ -385,6 +385,26 @@ START_TEST(parses_output_format_and_defaults_to_ci16)
 }
 END_TEST
 
+START_TEST(parses_vrl_framing_and_defaults_off)
+{
+    simulator_config_t config;
+    char error[128];
+    const char *path = write_temp_config("");
+    ck_assert_ptr_nonnull(path);
+    ck_assert_msg(config_load_yaml(path, &config, error, sizeof(error)), "%s", error);
+    ck_assert(!config.receivers[0].vrl_framing);
+    ck_assert(!config.receivers[0].vrl_crc);
+
+    char body[1024];
+    snprintf(body, sizeof(body), "    vrl_framing: true\n    vrl_crc: true\n%s", default_channels_yaml());
+    path = write_temp_config_body("", body);
+    ck_assert_ptr_nonnull(path);
+    ck_assert_msg(config_load_yaml(path, &config, error, sizeof(error)), "%s", error);
+    ck_assert(config.receivers[0].vrl_framing);
+    ck_assert(config.receivers[0].vrl_crc);
+}
+END_TEST
+
 START_TEST(rejects_invalid_output_format)
 {
     const char *path = write_temp_config_body(
@@ -630,6 +650,7 @@ Suite *config_suite(void)
     tcase_add_test(tc, parses_render_threads_and_defaults_to_one);
     tcase_add_test(tc, rejects_invalid_render_threads);
     tcase_add_test(tc, parses_output_format_and_defaults_to_ci16);
+    tcase_add_test(tc, parses_vrl_framing_and_defaults_off);
     tcase_add_test(tc, rejects_invalid_output_format);
     tcase_add_test(tc, parses_stream_cpus_range);
     tcase_add_test(tc, parses_stream_cpus_list);

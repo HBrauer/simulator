@@ -209,6 +209,50 @@ START_TEST(calculates_history_stride_from_duration)
 }
 END_TEST
 
+START_TEST(unwraps_vrl_frame)
+{
+    /* "VRLP", count 5 / 5 words, an 8-byte stand-in payload, then the trailer. */
+    uint8_t frame[20];
+    write_be32(frame, VITA49_RX_VRL_FRAME_ALIGNMENT_WORD);
+    write_be32(frame + 4, (5U << 20U) | 5U);
+    write_be32(frame + 8, 0x11223344U);
+    write_be32(frame + 12, 0x55667788U);
+    write_be32(frame + 16, VITA49_RX_VRL_NO_CRC_WORD);
+    const uint8_t *vrt = NULL;
+    size_t vrt_bytes = 0;
+    bool framed = false;
+    ck_assert(vita49_rx_vrl_unwrap(frame, sizeof(frame), &vrt, &vrt_bytes, &framed));
+    ck_assert(framed);
+    ck_assert_ptr_eq(vrt, frame + 8);
+    ck_assert_uint_eq(vrt_bytes, 8U);
+
+    /* A correct CRC-32 trailer is accepted; a corrupted payload is rejected. */
+    write_be32(frame + 16, vita49_rx_vrl_crc32(frame, 16U));
+    ck_assert(vita49_rx_vrl_unwrap(frame, sizeof(frame), &vrt, &vrt_bytes, &framed));
+    frame[9] ^= 0x01U;
+    ck_assert(!vita49_rx_vrl_unwrap(frame, sizeof(frame), &vrt, &vrt_bytes, &framed));
+
+    /* Frame size disagreeing with the datagram length is rejected. */
+    write_be32(frame + 4, (5U << 20U) | 6U);
+    ck_assert(!vita49_rx_vrl_unwrap(frame, sizeof(frame), &vrt, &vrt_bytes, &framed));
+}
+END_TEST
+
+START_TEST(passes_bare_vrt_through_vrl_unwrap)
+{
+    const uint8_t check[] = {'1', '2', '3', '4', '5', '6', '7', '8', '9'};
+    ck_assert_uint_eq(vita49_rx_vrl_crc32(check, sizeof(check)), 0xCBF43926U);
+    uint8_t packet[8] = {0x10, 0, 0, 2};
+    const uint8_t *vrt = NULL;
+    size_t vrt_bytes = 0;
+    bool framed = true;
+    ck_assert(vita49_rx_vrl_unwrap(packet, sizeof(packet), &vrt, &vrt_bytes, &framed));
+    ck_assert(!framed);
+    ck_assert_ptr_eq(vrt, packet);
+    ck_assert_uint_eq(vrt_bytes, sizeof(packet));
+}
+END_TEST
+
 Suite *receiver_c_suite(void)
 {
     Suite *suite = suite_create("receiver_c");
@@ -220,6 +264,8 @@ Suite *receiver_c_suite(void)
     tcase_add_test(tc, pushes_ci16_into_waterfall);
     tcase_add_test(tc, full_scale_tone_reads_zero_dbfs);
     tcase_add_test(tc, calculates_history_stride_from_duration);
+    tcase_add_test(tc, unwraps_vrl_frame);
+    tcase_add_test(tc, passes_bare_vrt_through_vrl_unwrap);
     suite_add_tcase(suite, tc);
     return suite;
 }

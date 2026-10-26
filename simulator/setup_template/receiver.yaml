@@ -19,6 +19,9 @@ receivers:
     rest_bind_host: "127.0.0.1"
     rest_port: 8100
     udp_output_host: "127.0.0.1"
+    # Optional VITA 49.1 VRL framing of every packet; vrl_crc adds a CRC-32 trailer.
+    # vrl_framing: true
+    # vrl_crc: false
     # Tuner range and instantaneous front-end bandwidth.
     frequency_min_hz: 90000000
     frequency_max_hz: 110000000

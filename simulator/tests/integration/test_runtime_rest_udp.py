@@ -1,4 +1,5 @@
 import json
+import zlib
 import socket
 import subprocess
 import threading
@@ -51,7 +52,7 @@ def _free_udp_port_block(count=5, start=30000):
     raise RuntimeError("could not find a free UDP port block")
 
 
-def _write_config(path, rest_port, udp_base, ch1_center=10005000000, stream_block_samples=None):
+def _write_config(path, rest_port, udp_base, ch1_center=10005000000, stream_block_samples=None, receiver_extra=""):
     stream_block_samples_line = ""
     if stream_block_samples is not None:
         stream_block_samples_line = f"stream_block_samples: {stream_block_samples}\n"
@@ -69,6 +70,7 @@ receivers:
     frequency_min_hz: 9960000000
     frequency_max_hz: 10040000000
     scan_rate_hz_per_s: 100000000000
+{receiver_extra}\
     channels:
       - {{ channel_id: 0, track_tuner: true, rates: [ {{ bandwidth_hz: 80000000, sample_rate_hz: 98304000 }} ], udp_output_port: {udp_base} }}
       - {{ channel_id: 1, center_frequency_hz: {ch1_center}, rates: [ {{ bandwidth_hz: 20000000, sample_rate_hz: 24576000 }}, {{ bandwidth_hz: 5000000, sample_rate_hz: 6144000 }} ], udp_output_port: {udp_base + 1} }}
@@ -175,6 +177,8 @@ def _assert_receiver_status_shape(status):
             "rf_reference_power_dbm",
             "udp_output_host",
             "udp_multicast_interface",
+            "vrl_framing",
+            "vrl_crc",
             "channel_count",
             "config_epoch",
         },
@@ -801,6 +805,50 @@ def test_vita49_udp_wraps_and_keeps_raw_payload(tmp_path):
             b for k in range(0, len(expected), 2) for b in (expected[k + 1], expected[k])
         )
         assert payload == expected_wire
+    finally:
+        _terminate(proc)
+        udp_sock.close()
+
+
+@pytest.mark.parametrize("vrl_crc", [False, True])
+def test_vrl_framing_wraps_every_packet(tmp_path, vrl_crc):
+    rest_port = _free_tcp_port()
+    udp_port = _free_udp_port_block()
+    config = tmp_path / "runtime_vrl.yaml"
+    extra = f"    vrl_framing: true\n    vrl_crc: {'true' if vrl_crc else 'false'}\n"
+    _write_config(config, rest_port, udp_port, stream_block_samples=256, receiver_extra=extra)
+
+    udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    udp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 8 * 1024 * 1024)
+    udp_sock.bind(("127.0.0.1", udp_port + 1))
+    udp_sock.settimeout(5.0)
+
+    proc = _start_sim(config)
+    try:
+        status = _wait_json(f"http://127.0.0.1:{rest_port}/api/v1/status")
+        assert status["vrl_framing"] is True
+        assert status["vrl_crc"] is vrl_crc
+        frame_counts = []
+        packet_types = set()
+        for _ in range(200):
+            frame, _ = udp_sock.recvfrom(65536)
+            assert frame[0:4] == b"VRLP"
+            word1 = int.from_bytes(frame[4:8], "big")
+            assert (word1 & 0xFFFFF) * 4 == len(frame)
+            trailer = int.from_bytes(frame[-4:], "big")
+            if vrl_crc:
+                # Independent check: zlib.crc32 is the IEEE 802.3 CRC-32 over the wire bytes.
+                assert trailer == zlib.crc32(frame[:-4])
+            else:
+                assert frame[-4:] == b"VEND"
+            vita = _parse_vita49_packet(frame[8:-4])
+            assert vita["stream_id"] == 1
+            packet_types.add(vita["packet_type"])
+            frame_counts.append(word1 >> 20)
+        # The stream opens with a context packet, so both packet types arrive framed.
+        assert packet_types == {1, 4}
+        steps = [(b - a) % 4096 for a, b in zip(frame_counts, frame_counts[1:])]
+        assert steps.count(1) >= 0.9 * len(steps), steps
     finally:
         _terminate(proc)
         udp_sock.close()

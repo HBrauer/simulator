@@ -166,6 +166,10 @@ typedef struct {
     double rf_reference_power_dbm;
     char udp_output_host[64];
     char udp_multicast_interface[64];
+    /* Optional VITA 49.1 VRL framing of every VRT packet this receiver sends; vrl_crc picks a
+     * CRC-32 trailer over the "VEND" no-CRC marker. */
+    bool vrl_framing;
+    bool vrl_crc;
     uint64_t config_epoch; /* bumped under the receiver lock on every runtime change */
     size_t channel_count;
     channel_config_t channels[SIM_MAX_CHANNELS];

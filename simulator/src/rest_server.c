@@ -176,7 +176,7 @@ static json_t *receiver_json(const receiver_config_t *r, const receiver_metrics_
 {
     const char *mode = receiver_effective_mode(r) == RECEIVER_MODE_FIXED ? "fixed" : "scan";
     json_t *root = json_pack(
-        "{s:i,s:s,s:I,s:I,s:I,s:I,s:f,s:f,s:f,s:s,s:s,s:i,s:I}",
+        "{s:i,s:s,s:I,s:I,s:I,s:I,s:f,s:f,s:f,s:s,s:s,s:b,s:b,s:i,s:I}",
         "receiver_id", (int)r->id,
         "effective_mode", mode,
         "frequency_min_hz", (json_int_t)r->frequency_min_hz,
@@ -188,6 +188,8 @@ static json_t *receiver_json(const receiver_config_t *r, const receiver_metrics_
         "rf_reference_power_dbm", r->rf_reference_power_dbm,
         "udp_output_host", r->udp_output_host,
         "udp_multicast_interface", r->udp_multicast_interface,
+        "vrl_framing", (int)r->vrl_framing,
+        "vrl_crc", (int)r->vrl_crc,
         "channel_count", (int)r->channel_count,
         "config_epoch", (json_int_t)r->config_epoch
     );
@@ -202,7 +204,7 @@ static json_t *capabilities_json(const receiver_config_t *r, uint64_t scenario_t
 {
     const char *mode = receiver_effective_mode(r) == RECEIVER_MODE_FIXED ? "fixed" : "scan";
     json_t *root = json_pack(
-        "{s:i,s:I,s:I,s:I,s:{s:I,s:I,s:s,s:f},s:i,s:s,s:s,s:s,s:I}",
+        "{s:i,s:I,s:I,s:I,s:{s:I,s:I,s:s,s:f},s:i,s:s,s:s,s:s,s:b,s:b,s:I}",
         "receiver_id", (int)r->id,
         "frequency_min_hz", (json_int_t)0,
         "simulator_frequency_max_hz", (json_int_t)SIM_MAX_RF_HZ,
@@ -216,6 +218,8 @@ static json_t *capabilities_json(const receiver_config_t *r, uint64_t scenario_t
         "iq_format", "vita49_2_ci16",
         "udp_output_host", r->udp_output_host,
         "udp_multicast_interface", r->udp_multicast_interface,
+        "vrl_framing", (int)r->vrl_framing,
+        "vrl_crc", (int)r->vrl_crc,
         "config_epoch", (json_int_t)r->config_epoch
     );
     (void)scenario_time_ns;

@@ -64,6 +64,11 @@ typedef struct {
     uint8_t context_sequence;
     bool class_id_present;
     vita49_class_id_t class_id;
+    /* VITA 49.1 VRL framing, fixed for the run; data and context frames of a stream share
+     * one 12-bit frame counter. */
+    bool vrl_framing;
+    bool vrl_crc;
+    uint16_t vrl_frame_count;
 } stream_worker_t;
 
 struct streamer_manager {
@@ -496,6 +501,23 @@ static bool context_config_changed(const context_state_t *state, const channel_c
         (!channel->track_tuner && state->center_frequency_hz != channel->center_frequency_hz);
 }
 
+/* Bytes reserved ahead of each VRT packet for the VRL header (0 without framing). */
+static size_t vrl_packet_offset(const stream_worker_t *worker)
+{
+    return worker->vrl_framing ? VITA49_VRL_HEADER_BYTES : 0U;
+}
+
+/* Finish the datagram for a VRT packet written at frame + vrl_packet_offset(): wrap it in a VRL
+ * frame when framing is enabled, otherwise the packet is the datagram. */
+static bool finish_datagram(const stream_worker_t *worker, uint8_t *frame, size_t frame_size, size_t packet_bytes, uint16_t frame_count, size_t *datagram_bytes)
+{
+    if (!worker->vrl_framing) {
+        *datagram_bytes = packet_bytes;
+        return true;
+    }
+    return vita49_vrl_wrap(frame, frame_size, packet_bytes, frame_count, worker->vrl_crc, datagram_bytes);
+}
+
 static void maybe_send_context_packet(stream_worker_t *worker, udp_output_t *udp, const receiver_config_t *receiver, const channel_config_t *channel, context_state_t *state)
 {
     const uint64_t now_ns = monotonic_now_ns();
@@ -519,15 +541,19 @@ static void maybe_send_context_packet(stream_worker_t *worker, udp_output_t *udp
         .reference_level_dbm = channel->rf_reference_power_dbm,
         .format = channel->output_format,
     };
-    uint8_t packet[80];
+    uint8_t packet[80U + VITA49_VRL_OVERHEAD_BYTES];
+    const size_t offset = vrl_packet_offset(worker);
     size_t packet_bytes = 0;
-    if (!vita49_write_context_packet(&context, packet, sizeof(packet), &packet_bytes)) {
+    size_t datagram_bytes = 0;
+    if (!vita49_write_context_packet(&context, packet + offset, sizeof(packet) - offset, &packet_bytes) ||
+        !finish_datagram(worker, packet, sizeof(packet), packet_bytes, worker->vrl_frame_count, &datagram_bytes)) {
         return;
     }
     size_t sent_bytes = 0;
     int error_code = 0;
-    if (udp_output_send(udp, packet, packet_bytes, &sent_bytes, &error_code)) {
+    if (udp_output_send(udp, packet, datagram_bytes, &sent_bytes, &error_code)) {
         worker->context_sequence = (uint8_t)((worker->context_sequence + 1U) & 0x0fU);
+        worker->vrl_frame_count = (uint16_t)((worker->vrl_frame_count + 1U) & VITA49_VRL_FRAME_COUNT_MASK);
         atomic_fetch_add(&worker->metrics->udp_packets_sent, 1);
         atomic_fetch_add(&worker->metrics->udp_bytes_sent, sent_bytes);
         atomic_fetch_add(&worker->stream_metrics->udp_packets_sent, 1);
@@ -561,7 +587,9 @@ static void *stream_udp_thread_main(void *arg)
         return NULL;
     }
 
-    const size_t send_capacity = vita49_if_data_packet_size(worker->block_samples, worker->class_id_present, output_format);
+    const size_t vrl_offset = vrl_packet_offset(worker);
+    const size_t send_capacity = vita49_if_data_packet_size(worker->block_samples, worker->class_id_present, output_format) +
+        (worker->vrl_framing ? VITA49_VRL_OVERHEAD_BYTES : 0U);
     uint8_t *packets = calloc(STREAM_SEND_BATCH_SIZE, send_capacity);
     if (packets == NULL) {
         record_worker_error(worker, "packet buffer allocation failed");
@@ -643,8 +671,11 @@ static void *stream_udp_thread_main(void *arg)
                 .payload_samples = (size_t)record->sample_count,
                 .format = output_format,
             };
+            size_t vrt_bytes = 0;
             size_t send_bytes = 0;
-            if (!vita49_write_if_data_packet(&vita_packet, packet, send_capacity, &send_bytes)) {
+            const uint16_t frame_count = (uint16_t)((worker->vrl_frame_count + prepared_count) & VITA49_VRL_FRAME_COUNT_MASK);
+            if (!vita49_write_if_data_packet(&vita_packet, packet + vrl_offset, send_capacity - vrl_offset, &vrt_bytes) ||
+                !finish_datagram(worker, packet, send_capacity, vrt_bytes, frame_count, &send_bytes)) {
                 record_send_drop(worker, EINVAL, record->sample_count);
                 continue;
             }
@@ -661,6 +692,7 @@ static void *stream_udp_thread_main(void *arg)
                 sent_samples += send_samples[i];
             }
             worker->vita_sequence = (uint8_t)((worker->vita_sequence + sent_messages) & 0x0fU);
+            worker->vrl_frame_count = (uint16_t)((worker->vrl_frame_count + sent_messages) & VITA49_VRL_FRAME_COUNT_MASK);
             atomic_fetch_add(&worker->metrics->udp_packets_sent, sent_messages);
             atomic_fetch_add(&worker->metrics->udp_bytes_sent, sent_bytes);
             atomic_fetch_add(&worker->metrics->samples_rendered, sent_samples);
@@ -770,6 +802,8 @@ bool streamer_manager_start(streamer_manager_t **manager, const streamer_config_
                     .information_class_code = config->config->class_id_information_code,
                     .packet_class_code = config->config->class_id_packet_code,
                 },
+                .vrl_framing = receiver->vrl_framing,
+                .vrl_crc = receiver->vrl_crc,
             };
             if (!stream_worker_start(worker)) {
                 streamer_manager_stop(m);

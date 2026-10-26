@@ -1,6 +1,7 @@
 #include "vita49_packet.h"
 
 #include <limits.h>
+#include <pthread.h>
 #include <string.h>
 
 #define VITA49_PSI_VITA49_2 (1U << 25U)
@@ -303,6 +304,50 @@ bool vita49_write_if_data_packet(const vita49_if_data_packet_t *packet, uint8_t 
     write_be64(out + offset, fractional_ps);
     offset += 8;
     write_if_data_payload(packet->payload, packet->payload_samples, packet->format, out + offset);
+    if (written != NULL) {
+        *written = total_bytes;
+    }
+    return true;
+}
+
+static uint32_t vrl_crc_table[256];
+static pthread_once_t vrl_crc_table_once = PTHREAD_ONCE_INIT;
+
+static void vrl_crc_table_init(void)
+{
+    for (uint32_t n = 0; n < 256U; n++) {
+        uint32_t c = n;
+        for (int k = 0; k < 8; k++) {
+            c = (c & 1U) != 0U ? 0xEDB88320U ^ (c >> 1U) : c >> 1U;
+        }
+        vrl_crc_table[n] = c;
+    }
+}
+
+uint32_t vita49_vrl_crc32(const uint8_t *data, size_t bytes)
+{
+    pthread_once(&vrl_crc_table_once, vrl_crc_table_init);
+    uint32_t crc = 0xffffffffU;
+    for (size_t i = 0; i < bytes; i++) {
+        crc = vrl_crc_table[(crc ^ data[i]) & 0xffU] ^ (crc >> 8U);
+    }
+    return crc ^ 0xffffffffU;
+}
+
+bool vita49_vrl_wrap(uint8_t *frame, size_t frame_size, size_t packet_bytes, uint16_t frame_count, bool crc, size_t *written)
+{
+    if (written != NULL) {
+        *written = 0;
+    }
+    const size_t total_bytes = packet_bytes + VITA49_VRL_OVERHEAD_BYTES;
+    if (frame == NULL || packet_bytes % 4U != 0U || total_bytes > frame_size ||
+        total_bytes / 4U > VITA49_VRL_MAX_FRAME_WORDS) {
+        return false;
+    }
+    write_be32(frame, VITA49_VRL_FRAME_ALIGNMENT_WORD);
+    write_be32(frame + 4U, ((uint32_t)(frame_count & VITA49_VRL_FRAME_COUNT_MASK) << 20U) | (uint32_t)(total_bytes / 4U));
+    const size_t trailer_offset = total_bytes - VITA49_VRL_TRAILER_BYTES;
+    write_be32(frame + trailer_offset, crc ? vita49_vrl_crc32(frame, trailer_offset) : VITA49_VRL_NO_CRC_WORD);
     if (written != NULL) {
         *written = total_bytes;
     }

@@ -116,9 +116,39 @@ profile uses `1536` for `ci16` but should be halved for the 8-byte formats).
 > left-justified per §6.1.1.1); older `vita49io` reads `ci24` from the low bits and misreads
 > it.
 
+## VITA 49.1 VRL Framing (optional)
+
+Setting `vrl_framing: true` on a receiver wraps **every** packet its channels send, both IF
+data and IF context, in a VITA 49.1 VRT Link-Layer (VRL) frame. Framing is off by default,
+and then the datagrams are exactly as described above. Each frame carries exactly one VRT
+packet, so one UDP datagram is still one VRT packet, plus 12 bytes:
+
+| Offset | Size | Field |
+| --- | --- | --- |
+| 0 | 4 | Frame Alignment Word `0x56524C50` (ASCII `VRLP`). |
+| 4 | 4 | Frame count (bits 31..20, 12 bits) and frame size in 32-bit words including header and trailer (bits 19..0). |
+| 8 | variable | The unchanged VITA 49.2 packet (data or context), as documented above. |
+| end − 4 | 4 | Trailer: a CRC-32 when `vrl_crc: true`, otherwise `0x56454E44` (ASCII `VEND`, "no CRC"). |
+
+- **Frame count**: one counter per channel stream, shared by its data and context frames.
+  It advances by one for each frame actually sent and wraps modulo 4096. A gap means lost
+  frames.
+- **CRC**: the IEEE 802.3 / zlib CRC-32 (reflected polynomial `0xEDB88320`, initial value and
+  final XOR `0xFFFFFFFF`) over every frame byte before the trailer, in wire order. It equals
+  Python's `zlib.crc32(frame[:-4])`. The VITA 49.1 text was not available to check this
+  against; if a third-party VRL decoder rejects the CRC, use the default `VEND` trailer.
+- **Sizing**: add 12 bytes to the datagram sizes given above when sizing for an MTU.
+
+The receiver's REST status and capabilities report `vrl_framing` and `vrl_crc`.
+
 ## Receiver Note
 
-The in-repo waterfall receiver auto-detects the payload format from the context packet's Data
+The in-repo waterfall receiver auto-detects VRL framing: a datagram starting with `VRLP` is
+validated (frame size, plus the CRC unless the trailer is `VEND`) and unwrapped, and a frame
+that fails these checks counts as a bad packet. It expects one VRT packet per frame, as the
+simulator sends.
+
+The receiver also auto-detects the payload format from the context packet's Data
 Packet Payload Format field and decodes `ci16`, `ci24`, and `cf32` accordingly. Because it
 learns the format from the ~1 Hz context heartbeat, a receiver that starts after a stream is
 already running decodes the first sub-second of an 8-byte-format stream as `ci16` until the

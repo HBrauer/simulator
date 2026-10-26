@@ -49,6 +49,19 @@ typedef struct {
     vita49_rx_format_t format;     /* paired IF-data sample format; valid only if has_format */
 } vita49_rx_context_t;
 
+/* VITA 49.1 VRL framing: "VRLP", frame count/size word, VRT packet(s), then a CRC-32 or
+ * "VEND" trailer. */
+#define VITA49_RX_VRL_FRAME_ALIGNMENT_WORD 0x56524C50U
+#define VITA49_RX_VRL_NO_CRC_WORD 0x56454E44U
+#define VITA49_RX_VRL_OVERHEAD_BYTES 12U
+
+/* Locate the VRT packet in a datagram. A datagram that does not start with "VRLP" is taken as
+ * a bare VRT packet (*framed = false; framed may be NULL). A VRL frame is validated (frame size matches the
+ * datagram; trailer is "VEND" or a matching IEEE 802.3 CRC-32) and *vrt points at its payload.
+ * Returns false for a malformed frame or a CRC mismatch. */
+bool vita49_rx_vrl_unwrap(const uint8_t *data, size_t bytes, const uint8_t **vrt, size_t *vrt_bytes, bool *framed);
+uint32_t vita49_rx_vrl_crc32(const uint8_t *data, size_t bytes);
+
 /* Packet type from the first header word, or 0xff if the buffer is too small. */
 uint8_t vita49_rx_packet_type(const uint8_t *data, size_t bytes);
 bool vita49_rx_parse_if_data(const uint8_t *data, size_t bytes, vita49_rx_packet_t *packet);

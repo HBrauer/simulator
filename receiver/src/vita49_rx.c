@@ -167,3 +167,47 @@ bool vita49_rx_parse_if_data(const uint8_t *data, size_t bytes, vita49_rx_packet
     };
     return packet->payload_bytes % 4U == 0U;
 }
+
+uint32_t vita49_rx_vrl_crc32(const uint8_t *data, size_t bytes)
+{
+    /* IEEE 802.3 / zlib CRC-32, bitwise: the receiver checks only display-rate traffic. */
+    uint32_t crc = 0xffffffffU;
+    for (size_t i = 0; i < bytes; i++) {
+        crc ^= data[i];
+        for (int k = 0; k < 8; k++) {
+            crc = (crc & 1U) != 0U ? 0xEDB88320U ^ (crc >> 1U) : crc >> 1U;
+        }
+    }
+    return crc ^ 0xffffffffU;
+}
+
+bool vita49_rx_vrl_unwrap(const uint8_t *data, size_t bytes, const uint8_t **vrt, size_t *vrt_bytes, bool *framed)
+{
+    if (data == 0 || vrt == 0 || vrt_bytes == 0) {
+        return false;
+    }
+    const bool is_frame = bytes >= 4U && read_be32(data) == VITA49_RX_VRL_FRAME_ALIGNMENT_WORD;
+    if (framed != 0) {
+        *framed = is_frame;
+    }
+    if (!is_frame) {
+        *vrt = data;
+        *vrt_bytes = bytes;
+        return true;
+    }
+    if (bytes < VITA49_RX_VRL_OVERHEAD_BYTES) {
+        return false;
+    }
+    const size_t frame_words = read_be32(data + 4U) & 0xfffffU;
+    if (frame_words * 4U != bytes) {
+        return false;
+    }
+    const size_t trailer_offset = bytes - 4U;
+    const uint32_t trailer = read_be32(data + trailer_offset);
+    if (trailer != VITA49_RX_VRL_NO_CRC_WORD && trailer != vita49_rx_vrl_crc32(data, trailer_offset)) {
+        return false;
+    }
+    *vrt = data + 8U;
+    *vrt_bytes = bytes - VITA49_RX_VRL_OVERHEAD_BYTES;
+    return true;
+}
