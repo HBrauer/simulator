@@ -11,6 +11,11 @@
 #include <string.h>
 #include <time.h>
 
+/* libmicrohttpd < 0.9.74 (e.g. EL9) only has the older name for 413. */
+#ifndef MHD_HTTP_CONTENT_TOO_LARGE
+#define MHD_HTTP_CONTENT_TOO_LARGE MHD_HTTP_PAYLOAD_TOO_LARGE
+#endif
+
 struct rest_server {
     struct MHD_Daemon *daemon;
     rest_context_t context;

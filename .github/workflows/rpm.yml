@@ -9,7 +9,7 @@ on:
 
 jobs:
   rpm:
-    # Built on EL9 so the RPM links against the glibc (2.34) and libvolk (2.5) that Rocky 9 ships.
+    # Built on EL9 so the RPM links against the glibc (2.34) and libvolk (EPEL) that Rocky 9 ships.
     runs-on: ubuntu-latest
     container: rockylinux/rockylinux:9
     defaults:
