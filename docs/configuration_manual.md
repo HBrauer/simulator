@@ -795,6 +795,27 @@ The overdrive warning is the load-time counterpart of a subtle failure mode: a s
 reference and rail the ADC, whose hard clipping shows up only as a comb of evenly spaced ghost
 carriers on the waterfall — not as an obvious error.
 
+### Host checks
+
+Before loading assets, the simulator checks that the host can carry the configured streams,
+and prints `host check error:` / `host check warning:` lines to stderr. Errors stop startup
+(exit code `8`). Warnings do not stop it, unless you pass `--strict-host-checks`, which turns
+every warning into a startup failure (useful for production services and CI). A one-shot
+`--render-once-samples` run skips the checks, and the clock check is skipped when you use
+`--scenario-time-ns`.
+
+| Check | Level | Cause | Fix |
+| --- | --- | --- | --- |
+| `stream_cpus lists CPU N, but this process may only run on CPUs …` | error | A pinned CPU does not exist or is outside the process's affinity (`taskset`, cgroup cpuset, systemd `CPUAffinity=`/`AllowedCPUs=`). Pinning would silently not happen. | Fix `stream_cpus`, or allow the CPUs for the service. |
+| `N stream threads … share M CPUs` | warning | Each channel runs one UDP thread plus `render_threads` render threads; there are more of them than usable CPUs (the `stream_cpus` set, else the affinity set). | Give the streams more CPUs or fewer/lighter channels; watch the late/underrun metrics. |
+| `UDP send buffer is … KiB (… capped by net.core.wmem_max)` | warning | The kernel limited the 16 MiB `SO_SNDBUF` request below what one burst of the largest datagrams needs; the non-blocking sends then fail and count as drops. | `sudo sysctl -w net.core.wmem_max=16777216` |
+| `receiver R: N-byte datagrams exceed the M-byte MTU towards HOST` | warning | The route to `udp_output_host` has a smaller MTU than the largest datagram (block size × bytes per sample + headers), so every packet is IP-fragmented. Loopback (MTU 65536) never triggers this. | Lower `stream_block_samples`, or use jumbo frames (MTU 9000) end to end. |
+| `the system clock is not NTP/PTP-synchronised` | warning | Timestamps and replay positions follow `CLOCK_REALTIME`; an unsynchronised clock means they will not line up with other hosts. | Enable NTP/PTP (`timedatectl`, `chronyc tracking`). |
+| `asset data takes N MiB of the M MiB that was available` | warning | Checked right after the asset load: the loaded assets use more than 75 % of the memory that was available (`MemAvailable`, or the cgroup `memory.max` headroom under systemd). | Lower `asset_cache_max_bytes` so large passthrough captures are memory-mapped instead of copied. |
+
+Receive-side buffers (`net.core.rmem_max`) are a property of the receiving host; the waterfall
+receiver checks those itself and prints the matching `sysctl` hint.
+
 ---
 
 ## 12. Installation and setup folders

@@ -21,7 +21,7 @@ bool udp_output_open(udp_output_t *output, const char *host, uint16_t port, cons
     if (output->fd < 0) {
         return false;
     }
-    int sndbuf = 16 * 1024 * 1024;
+    int sndbuf = UDP_OUTPUT_SNDBUF_BYTES;
     (void)setsockopt(output->fd, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf));
     const int flags = fcntl(output->fd, F_GETFL, 0);
     if (flags >= 0) {
@@ -59,6 +59,21 @@ void udp_output_close(udp_output_t *output)
         close(output->fd);
         output->fd = -1;
     }
+}
+
+bool udp_output_sndbuf(const udp_output_t *output, int *bytes)
+{
+    socklen_t size = sizeof(*bytes);
+    return output->fd >= 0 && getsockopt(output->fd, SOL_SOCKET, SO_SNDBUF, bytes, &size) == 0;
+}
+
+bool udp_output_path_mtu(udp_output_t *output, int *mtu)
+{
+    if (output->fd < 0 || connect(output->fd, (const struct sockaddr *)&output->addr, sizeof(output->addr)) != 0) {
+        return false;
+    }
+    socklen_t size = sizeof(*mtu);
+    return getsockopt(output->fd, IPPROTO_IP, IP_MTU, mtu, &size) == 0;
 }
 
 bool udp_output_send(udp_output_t *output, const void *data, size_t bytes, size_t *sent_bytes, int *error_code)

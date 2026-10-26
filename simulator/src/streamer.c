@@ -21,7 +21,6 @@
 
 #define RENDER_BACKPRESSURE_NS 50000L
 #define RINGBUFFER_PACKET_CAPACITY 8U
-#define STREAM_SEND_BATCH_SIZE 16U
 #define CONTEXT_PACKET_INTERVAL_NS 1000000000ULL
 /* Low-rate channels shrink their block below the configured size so block latency, pacing,
  * and the context heartbeat stay bounded (~>= 4 blocks/s); never below this floor. */

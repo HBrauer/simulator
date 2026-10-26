@@ -250,10 +250,11 @@ fused multiply-adds is too slow. Suggestions, roughly in order of expected payof
 - Already batching with `sendmmsg` — good. Next steps, in order:
   - **UDP GSO (`UDP_SEGMENT`)**: hand the kernel one large buffer per batch and let it split
     into datagrams; typically 2–3× fewer syscalls/CPU than `sendmmsg` at these rates.
-  - Raise `SO_SNDBUF` explicitly and verify against `net.core.wmem_max`.
+  - ~~Raise `SO_SNDBUF` explicitly and verify against `net.core.wmem_max`.~~ Done: the startup
+    host check reads the effective `SO_SNDBUF` back and warns with the `sysctl` fix.
   - If the kernel stack tops out: **AF_XDP** (via libxdp) gives near-line-rate UDP without the
     full DPDK operational burden. DPDK only if this must saturate >10 GbE reliably.
-- Check MTU: at 96 MS/s use jumbo frames (9000 MTU) if the network allows — 4× fewer packets.
+- Check MTU (startup host check warns when datagrams exceed the route MTU): at 96 MS/s use jumbo frames (9000 MTU) if the network allows — 4× fewer packets.
 
 ### External libraries worth adopting (all C-friendly, permissive licenses)
 - **VOLK** (already optional): make it a hard dependency for the wideband build; it covers the

@@ -1,6 +1,7 @@
 #include "asset_cache.h"
 #include "config.h"
 #include "ddc.h"
+#include "host_check.h"
 #include "metrics.h"
 #include "renderer.h"
 #include "rest_server.h"
@@ -66,7 +67,8 @@ static void print_usage(FILE *out)
             "  --scenario-time-ns NS      run on a fixed scenario clock instead of wall time\n"
             "  --stream-block-samples N   override stream_block_samples\n"
             "  --render-once-samples N    render N samples of one channel to stdout and exit\n"
-            "  --render-channel INDEX     channel for --render-once-samples (default 0)\n");
+            "  --render-channel INDEX     channel for --render-once-samples (default 0)\n"
+            "  --strict-host-checks       fail startup on host check warnings, not only errors\n");
 }
 
 /* Warn once per (channel, looping IQ replay source) pair whose extraction quality or DDC
@@ -311,6 +313,27 @@ int main(int argc, char **argv)
         }
         return 2;
     }
+    size_t block_samples = config.stream_block_samples;
+    if (block_samples_arg != NULL) {
+        block_samples = (size_t)strtoull(block_samples_arg, NULL, 10);
+        if (block_samples == 0 || block_samples > SIM_MAX_STREAM_BLOCK_SAMPLES) {
+            fprintf(stderr, "invalid --stream-block-samples\n");
+            return 6;
+        }
+    }
+    /* Host requirements for streaming (CPU pinning, socket buffers, MTU, clock sync). Skipped
+     * for a one-shot render, which never opens a stream. Runs before the potentially slow asset
+     * load so a host that cannot carry the config fails fast. */
+    const bool streaming = once_arg == NULL;
+    const bool strict_host_checks = has_flag(argc, argv, "--strict-host-checks");
+    host_check_result_t host_result = {0};
+    if (streaming) {
+        host_check_startup(&config, block_samples, scenario_time_arg == NULL, stderr, &host_result);
+        if (host_result.errors > 0 || (strict_host_checks && host_result.warnings > 0)) {
+            fprintf(stderr, "host check failed (%zu error(s), %zu warning(s))\n", host_result.errors, host_result.warnings);
+            return 8;
+        }
+    }
     char scenario_buf[SIM_MAX_PATH];
     if (scenario_path == NULL && !builtin) {
         scenario_path = config.scenario_file;
@@ -344,6 +367,8 @@ int main(int argc, char **argv)
         return 3;
     }
     asset_cache_t asset_cache;
+    const size_t memory_available_bytes = streaming ? host_check_available_memory_bytes() : 0U;
+    const size_t resident_before_assets = host_check_resident_bytes();
     const prerender_params_t prerender_params = {
         .oversample = config.audio_prerender_oversample,
         .max_rate_hz = config.audio_prerender_max_rate_hz,
@@ -351,6 +376,16 @@ int main(int argc, char **argv)
     if (!asset_cache_load_limited(&asset_cache, &scenario, config.asset_cache_max_bytes, 4096, &prerender_params, error, sizeof(error))) {
         fprintf(stderr, "asset cache error: %s\n", error);
         return 4;
+    }
+    if (streaming) {
+        const size_t resident_after_assets = host_check_resident_bytes();
+        const size_t loaded = resident_after_assets > resident_before_assets ? resident_after_assets - resident_before_assets : 0U;
+        host_check_memory(loaded, memory_available_bytes, stderr, &host_result);
+        if (strict_host_checks && host_result.warnings > 0) {
+            fprintf(stderr, "host check failed (%zu warning(s), --strict-host-checks)\n", host_result.warnings);
+            asset_cache_free(&asset_cache);
+            return 8;
+        }
     }
     renderer_ddc_cache_configure(config.ddc_cache_max_bytes);
     warn_ddc_rate_combinations(&config, &scenario);
@@ -418,15 +453,6 @@ int main(int argc, char **argv)
     receiver_metrics_t metrics[SIM_MAX_RECEIVERS];
     for (size_t i = 0; i < SIM_MAX_RECEIVERS; i++) {
         receiver_metrics_init(&metrics[i]);
-    }
-
-    size_t block_samples = config.stream_block_samples;
-    if (block_samples_arg != NULL) {
-        block_samples = (size_t)strtoull(block_samples_arg, NULL, 10);
-        if (block_samples == 0 || block_samples > SIM_MAX_STREAM_BLOCK_SAMPLES) {
-            fprintf(stderr, "invalid --stream-block-samples\n");
-            return 6;
-        }
     }
 
     rest_server_t *servers[SIM_MAX_RECEIVERS] = {0};

@@ -9,6 +9,7 @@ int main(void)
         asset_cache_suite(),
         ddc_suite(),
         ddc_cache_suite(),
+        host_check_suite(),
         scenario_suite(),
         timebase_suite(),
         iq_file_reader_suite(),

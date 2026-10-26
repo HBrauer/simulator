@@ -65,6 +65,7 @@ sim_render_sources = files(
 sim_sources = files(
   'simulator/src/asset_cache.c',
   'simulator/src/config.c',
+  'simulator/src/host_check.c',
   'simulator/src/iq_file_reader.c',
   'simulator/src/receiver.c',
   'simulator/src/rest_server.c',
@@ -137,6 +138,7 @@ unit_tests = executable(
     'simulator/tests/unit/test_asset_cache.c',
     'simulator/tests/unit/test_ddc.c',
     'simulator/tests/unit/test_ddc_cache.c',
+    'simulator/tests/unit/test_host_check.c',
     'simulator/tests/unit/test_iq_file_reader.c',
     'simulator/tests/unit/test_renderer.c',
     'simulator/tests/unit/test_ringbuffer.c',

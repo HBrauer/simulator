@@ -10,6 +10,9 @@
 #include <pthread.h>
 #include <stddef.h>
 
+/* Most IF-data datagrams one paced sendmmsg burst hands the kernel per stream. */
+#define STREAM_SEND_BATCH_SIZE 16U
+
 typedef struct streamer_manager streamer_manager_t;
 
 typedef struct {
