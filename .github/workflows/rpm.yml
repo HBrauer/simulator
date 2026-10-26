@@ -9,8 +9,9 @@ on:
 
 jobs:
   rpm:
+    # Built on EL9 so the RPM links against the glibc (2.34) and libvolk (2.5) that Rocky 9 ships.
     runs-on: ubuntu-latest
-    container: fedora:latest
+    container: rockylinux/rockylinux:9
     defaults:
       run:
         shell: bash
@@ -19,6 +20,12 @@ jobs:
       # without .git and `git archive` below fails.
       - name: Install packaging tools
         run: dnf install -y git rpm-build rpmdevtools 'dnf-command(builddep)'
+
+      # volk-devel comes from EPEL; check-devel, libyaml-devel and friends from CRB.
+      - name: Enable EPEL and CRB
+        run: |
+          dnf install -y epel-release
+          dnf config-manager --set-enabled crb
 
       - uses: actions/checkout@v5
 

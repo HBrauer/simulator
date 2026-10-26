@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Install the built RPM and check it works. Run from the repository root inside the Fedora CI
-# container. A failing check is reported as a GitHub annotation carrying its output, so the
-# cause is visible on the run page without opening the log.
+# Install the built RPM and check it works. Run from the repository root inside the CI
+# Rocky Linux container. A failing check is reported as a GitHub annotation carrying
+# its output, so the cause is visible on the run page without opening the log.
 set -uo pipefail
 
 annotate_failure() {
