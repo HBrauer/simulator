@@ -1,6 +1,6 @@
 # Version/release are injected by CI (see .github/workflows/rpm.yml); the defaults allow a
 # plain local `rpmbuild -ba packaging/sdr-simulator.spec` with a matching source tarball.
-%{!?pkg_version: %global pkg_version 0.1.0}
+%{!?pkg_version: %global pkg_version 0.2.0}
 %{!?pkg_release: %global pkg_release 1}
 
 Name:           sdr-simulator
