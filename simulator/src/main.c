@@ -432,7 +432,12 @@ int main(int argc, char **argv)
             if (channel->track_tuner) {
                 continue;
             }
-            iq_ci16_t warm[64];
+            /* Sized for the widest output format: ci24/cf32 take 8 bytes per sample. */
+            union {
+                iq_ci16_t ci16;
+                iq_ci24_t ci24;
+                iq_cf32_t cf32;
+            } warm[64];
             render_stats_t warm_stats;
             renderer_render_channel_block(&scenario, &asset_cache, &config.receivers[i], channel,
                                           timebase_now_ns(&timebase), warm, 64, &warm_stats);
