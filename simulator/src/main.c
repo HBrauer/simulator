@@ -468,7 +468,7 @@ int main(int argc, char **argv)
             .timebase = &timebase,
             .receiver_lock = &receiver_lock,
             .metrics = &metrics[i],
-            .version = "0.2.0",
+            .version = "0.2.1",
         };
         if (!rest_server_start(&servers[i], &context)) {
             fprintf(stderr, "failed to start REST server for receiver %u\n", config.receivers[i].id);
